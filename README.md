@@ -24,6 +24,12 @@ provide light up more sources; the rest self-disable and the run continues.
 | Trends | Reddit, Hacker News, YouTube, Google Trends |
 | Web research | DuckDuckGo (keyless) + optional Tavily/Brave, with main-content extraction |
 
+**Event addresses:** the `events.location` column holds the fullest address each source actually
+publishes — usually a complete street address (`"125 Pioneer Plaza, El Paso, TX 79901, US"`) for
+Ticketmaster and most web-sourced venues. When a source only publishes a city/region (or the event
+is virtual and has no physical address at all), `location` falls back to whatever is available —
+it's never fabricated. See `core/address.py` for the formatting logic.
+
 **Own-account social (opt-in):** Instagram Graph + Threads official APIs. These are free and
 ToS-compliant but **only read your own Business/Creator account** — your posts, insights, and IG's
 capped *recent* hashtag media. They can't search a platform globally. They run only when you pass

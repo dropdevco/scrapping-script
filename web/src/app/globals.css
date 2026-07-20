@@ -1,0 +1,72 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+/*
+  Frontera — desert-night design tokens.
+  Dark-first: warm charcoal base (never pure black), sunset accent, sand neutrals.
+*/
+@theme {
+  --color-night: #0e0c0a;         /* page base — warm near-black */
+  --color-surface: #181410;       /* raised surfaces */
+  --color-surface-2: #221c16;     /* inner card cores */
+  --color-line: #2e261e;          /* hairlines */
+  --color-sand: #e8e0d4;          /* primary text */
+  --color-sand-dim: #a89e8f;      /* secondary text */
+  --color-sand-faint: #6e6558;    /* tertiary text */
+  --color-sunset: #f4652e;        /* accent — sunset orange */
+  --color-sunset-soft: #ff8a50;
+  --color-rose-dusk: #e5484d;
+
+  --font-display: var(--font-bricolage);
+  --font-sans: var(--font-geist);
+
+  --radius-shell: 1.75rem;
+  --radius-core: 1.375rem;
+
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-swift: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+html {
+  background: var(--color-night);
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-night);
+  color: var(--color-sand);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-sunset) 70%, transparent);
+  color: #fff;
+}
+
+/* Leaflet dark-theme polish */
+.leaflet-container {
+  background: var(--color-night);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: var(--color-surface-2);
+  color: var(--color-sand);
+  border: 1px solid var(--color-line);
+  border-radius: 0.9rem;
+}
+.leaflet-popup-content { margin: 0.65rem 0.85rem; }
+.leaflet-container a.leaflet-popup-close-button { color: var(--color-sand-dim); }
+
+.venue-dot {
+  background: transparent;
+  border: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

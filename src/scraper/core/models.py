@@ -46,6 +46,8 @@ class Event(BaseModel):
     end_time: Optional[datetime] = None
     venue: Optional[str] = None
     location: Optional[str] = None
+    lat: Optional[float] = None            # venue latitude, when the provider exposes it
+    lng: Optional[float] = None            # venue longitude
     url: Optional[str] = None
     image_url: Optional[str] = None
     categories: list[str] = Field(default_factory=list)

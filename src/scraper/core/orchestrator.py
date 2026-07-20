@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timezone
 from typing import Any
 
 from .dedupe import (
@@ -22,6 +23,16 @@ from .models import Document, Event, Kind, SearchParams, SourceResult, Trend
 from .storage import Storage
 
 log = logging.getLogger("scraper.orchestrator")
+
+
+def _event_sort_key(e: Event) -> tuple[int, float]:
+    """Sort undated events last; normalize naive/aware datetimes so comparison never raises."""
+    dt = e.start_time
+    if dt is None:
+        return (1, 0.0)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (0, dt.timestamp())
 
 
 async def _fetch_one(source, params: SearchParams, http: HttpClient):
@@ -76,7 +87,11 @@ async def run(params: SearchParams) -> dict[str, Any]:
     try:
         if params.kind is Kind.EVENTS:
             events: list[Event] = [i for i in raw_items if isinstance(i, Event)]
-            events = dedupe_events(assign_hashes_events(events))[: params.limit]
+            events = dedupe_events(assign_hashes_events(events))
+            # Chronological, not by source registration order — otherwise a source
+            # that returns lots of events crowds out other sources before storage.
+            events.sort(key=_event_sort_key)
+            events = events[: params.limit]
             await storage.upsert_events(events)
             items = [e.model_dump(mode="json") for e in events]
         elif params.kind is Kind.TRENDS:

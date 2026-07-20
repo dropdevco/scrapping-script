@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, time
 from typing import Any, Optional
 
+from ..core.address import format_address
 from ..core.config import settings
 from ..core.http import HttpClient
 from ..core.models import Event, Kind, SearchParams
@@ -19,6 +20,16 @@ def _dt(value: str | None) -> Optional[datetime]:
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
+        return None
+
+
+def _coord(value: Any) -> Optional[float]:
+    """Ticketmaster sends coordinates as strings; convert defensively."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -55,9 +66,17 @@ class TicketmasterSource(Source):
     def _parse(self, e: dict[str, Any]) -> Event:
         venues = (e.get("_embedded") or {}).get("venues") or []
         venue = venues[0] if venues else {}
-        city = (venue.get("city") or {}).get("name")
-        state = (venue.get("state") or {}).get("stateCode")
-        location = ", ".join(p for p in (city, state) if p) or None
+        full_address = format_address(
+            street=(venue.get("address") or {}).get("line1"),
+            city=(venue.get("city") or {}).get("name"),
+            region=(venue.get("state") or {}).get("stateCode"),
+            postal=venue.get("postalCode"),
+            country=(venue.get("country") or {}).get("countryCode"),
+        )
+
+        coords = venue.get("location")
+        if not isinstance(coords, dict):
+            coords = {}
 
         images = e.get("images") or []
         image_url = images[0].get("url") if images else None
@@ -79,7 +98,9 @@ class TicketmasterSource(Source):
             description=e.get("info") or e.get("pleaseNote"),
             start_time=_dt(start),
             venue=venue.get("name"),
-            location=location or (venue.get("address") or {}).get("line1"),
+            location=full_address,
+            lat=_coord(coords.get("latitude")),
+            lng=_coord(coords.get("longitude")),
             url=e.get("url"),
             image_url=image_url,
             categories=categories,

@@ -21,6 +21,7 @@ from datetime import date, datetime
 from typing import Any, Optional
 from urllib.parse import quote
 
+from ..core.address import format_address
 from ..core.http import HttpClient
 from ..core.models import Event, Kind, SearchParams
 from .base import Source
@@ -90,11 +91,43 @@ def _as_location(loc: Any) -> tuple[Optional[str], Optional[str]]:
     name = loc.get("name")
     addr = loc.get("address")
     if isinstance(addr, dict):
-        parts = [addr.get("addressLocality"), addr.get("addressRegion")]
-        location = ", ".join(p for p in parts if p) or addr.get("streetAddress")
+        country = addr.get("addressCountry")
+        if isinstance(country, dict):
+            country = country.get("name") or country.get("@id")
+        location = format_address(
+            street=addr.get("streetAddress"),
+            city=addr.get("addressLocality"),
+            region=addr.get("addressRegion"),
+            postal=addr.get("postalCode"),
+            country=country if isinstance(country, str) else None,
+        )
     else:
         location = addr if isinstance(addr, str) else None
     return name, location
+
+
+def _coord(value: Any) -> Optional[float]:
+    """schema.org geo values arrive as strings or numbers; convert defensively."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_geo(loc: Any) -> tuple[Optional[float], Optional[float]]:
+    """Return (lat, lng) from a schema.org location value's ``geo``, when present."""
+    if isinstance(loc, list):
+        loc = loc[0] if loc else None
+    if not isinstance(loc, dict):
+        return None, None
+    geo = loc.get("geo")
+    if isinstance(geo, list):
+        geo = geo[0] if geo else None
+    if not isinstance(geo, dict):
+        return None, None
+    return _coord(geo.get("latitude")), _coord(geo.get("longitude"))
 
 
 def _walk_for_events(node: Any):
@@ -190,6 +223,7 @@ class EventsWebSource(Source):
             if not isinstance(node, dict):
                 continue
             venue, location = _as_location(node.get("location"))
+            lat, lng = _as_geo(node.get("location"))
             image = node.get("image")
             if isinstance(image, list):
                 image = image[0] if image else None
@@ -204,6 +238,8 @@ class EventsWebSource(Source):
                     end_time=_dt(node.get("endDate")),
                     venue=venue,
                     location=location,
+                    lat=lat,
+                    lng=lng,
                     url=(node.get("url") if isinstance(node.get("url"), str) else None) or url,
                     image_url=image if isinstance(image, str) else None,
                     raw=node,

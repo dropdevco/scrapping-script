@@ -11,6 +11,7 @@ blocking the event loop.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -23,6 +24,25 @@ log = logging.getLogger("scraper.storage")
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
+
+
+def _address_hash(address: Optional[str], venue_name: Optional[str]) -> str:
+    """Stable venue natural key. MUST match the SQL rule in 0002_venues.sql:
+
+    sha1( lower(trim(coalesce(address,''))) || '|' || lower(trim(coalesce(venue_name,''))) )
+    """
+    key = f"{(address or '').strip().lower()}|{(venue_name or '').strip().lower()}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+
+
+def _venue_row(e: Event) -> dict[str, Any]:
+    return {
+        "name": e.venue,
+        "address": e.location,
+        "lat": e.lat,
+        "lng": e.lng,
+        "address_hash": _address_hash(e.location, e.venue),
+    }
 
 
 def _event_row(e: Event) -> dict[str, Any]:
@@ -80,7 +100,18 @@ class Storage:
     async def upsert_events(self, events: list[Event]) -> None:
         if not self.enabled or not events:
             return
-        rows = [_event_row(e) for e in events]
+        # Venues first, so event rows can reference them. A venue failure must never
+        # break the event upsert — _upsert_venues returns {} and venue_id stays None.
+        venue_ids = await asyncio.to_thread(self._upsert_venues, events)
+        rows: list[dict[str, Any]] = []
+        for e in events:
+            row = _event_row(e)
+            row["venue_id"] = (
+                venue_ids.get(_address_hash(e.location, e.venue))
+                if (e.venue or e.location)
+                else None
+            )
+            rows.append(row)
         await asyncio.to_thread(self._upsert, "events", rows, "content_hash")
 
     async def upsert_trends(self, trends: list[Trend]) -> None:
@@ -186,6 +217,38 @@ class Storage:
         return rows or None
 
     # ── internals ───────────────────────────────────────────────────────────────
+    def _upsert_venues(self, events: list[Event]) -> dict[str, str]:
+        """Upsert one venue row per distinct address_hash; return hash -> venue id.
+
+        Runs synchronously (called via asyncio.to_thread). Any failure is logged and
+        yields {} so the caller stores events with venue_id = None instead of failing.
+        """
+        try:
+            by_hash: dict[str, dict[str, Any]] = {}
+            for e in events:
+                if not (e.venue or e.location):
+                    continue  # virtual / venue-less event
+                row = _venue_row(e)
+                kept = by_hash.get(row["address_hash"])
+                # Prefer the duplicate that actually has coordinates.
+                if kept is None or (kept.get("lat") is None and row.get("lat") is not None):
+                    by_hash[row["address_hash"]] = row
+            if not by_hash:
+                return {}
+            self._client.table("venues").upsert(
+                list(by_hash.values()), on_conflict="address_hash"
+            ).execute()
+            res = (
+                self._client.table("venues")
+                .select("id,address_hash")
+                .in_("address_hash", list(by_hash))
+                .execute()
+            )
+            return {r["address_hash"]: r["id"] for r in (res.data or [])}
+        except Exception as exc:  # noqa: BLE001 - venues must never break the event upsert
+            log.error("venue upsert failed, storing events without venue_id: %s", exc)
+            return {}
+
     def _upsert(self, table: str, rows: list[dict[str, Any]], on_conflict: str) -> None:
         try:
             self._client.table(table).upsert(rows, on_conflict=on_conflict).execute()

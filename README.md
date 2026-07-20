@@ -41,6 +41,21 @@ free; a paid X source can be dropped in later as just another connector.
 
 ---
 
+## Frontera: Fullstack Events Discovery Site
+
+Built on this scraper is **Frontera** — a bilingual (EN/ES) web app for discovering events across El Paso + Juárez. Live data flows from the scraper → Supabase → Next.js 16 frontend.
+
+**Features:**
+- Event listing with smart search, time filters (today / this week), city filters
+- Event detail pages with venue info + Google Maps links
+- Interactive map: 50+ geotagged venues, clustered pins
+- Event submission form (Google OAuth): crowd-sourced additions with moderation queue
+- Dark-first design, responsive mobile/desktop, fully bilingual UI toggle
+
+**See** `web/SETUP.md` for local development, environment setup, and deployment.
+
+---
+
 ## Architecture
 
 Three thin surfaces over one shared **core**:
@@ -68,8 +83,19 @@ src/scraper/
   sources/      events_*, trends_*, web_*, social_* (+ base, registry, auth_meta)
   mcp_server.py MCP tools (agent-facing)
   scheduler.py  curated recurring jobs
-supabase/migrations/0001_init.sql
+
+web/                      Next.js 16 fullstack events site (Frontera)
+  src/app/              Page routes (listing, map, event detail, submit form)
+  src/components/       React components (event grid, filters, map, auth)
+  src/lib/              Queries, types, i18n, Supabase clients
+  SETUP.md              Local dev + deployment guide
+  
+supabase/migrations/
+  0001_init.sql         Event/trend/run tables
+  0002_venues.sql       Venue-centric schema (location as primary entity)
+  
 .github/workflows/scheduled_scrape.yml
+.claude/launch.json       Next.js dev server config
 ```
 
 ---

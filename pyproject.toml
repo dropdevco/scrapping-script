@@ -1,0 +1,44 @@
+[project]
+name = "scraper-mcp"
+version = "0.1.0"
+description = "Web research & scraping MCP server: events, trends, and content ideas into Supabase"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Carlos Gonzalez" }]
+
+# Core runtime deps kept light so `import scraper.core.*` works with a minimal install.
+dependencies = [
+    "mcp>=1.2.0",              # MCP server SDK (provides FastMCP)
+    "pydantic>=2.6",          # normalized models
+    "httpx>=0.27",            # async HTTP client
+    "python-dotenv>=1.0",     # .env loading
+    "supabase>=2.4",          # Supabase (Postgres) client
+    "trafilatura>=1.8",       # readable main-content extraction from web pages
+    "beautifulsoup4>=4.12",   # HTML parsing fallback
+    "ddgs>=6.0",              # DuckDuckGo search (keyless)
+    "feedparser>=6.0",        # RSS/Atom parsing for event feeds
+]
+
+[project.optional-dependencies]
+# Heavier / flaky extras. Sources lazily import these and self-disable if missing.
+trends = ["pytrends>=4.9"]    # Google Trends (pulls in pandas)
+dev = ["ruff>=0.5", "pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+scraper-mcp = "scraper.mcp_server:main"
+scraper-schedule = "scraper.scheduler:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scraper"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

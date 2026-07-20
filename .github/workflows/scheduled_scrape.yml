@@ -1,0 +1,46 @@
+name: scheduled-scrape
+
+# Runs curated scrape jobs on a schedule and writes results to Supabase.
+# Secrets/vars are read from the repo's Actions settings — never commit real keys.
+on:
+  schedule:
+    - cron: "0 11 * * *"   # daily 11:00 UTC (~05:00 America/Denver)
+  workflow_dispatch:        # allow manual "Run workflow" from the Actions tab
+    inputs:
+      job:
+        description: "Which job to run"
+        default: "all"
+        type: choice
+        options: ["all", "events", "trends"]
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[trends]"
+
+      - name: Run scrape
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TICKETMASTER_API_KEY: ${{ secrets.TICKETMASTER_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USER_AGENT: ${{ vars.REDDIT_USER_AGENT }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          SCHEDULE_LOCATION: ${{ vars.SCHEDULE_LOCATION }}
+          SCHEDULE_TOPICS: ${{ vars.SCHEDULE_TOPICS }}
+          SCHEDULE_DAYS: ${{ vars.SCHEDULE_DAYS }}
+        run: python -m scraper.scheduler "${{ github.event.inputs.job || 'all' }}"

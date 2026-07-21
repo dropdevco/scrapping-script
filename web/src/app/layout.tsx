@@ -1,15 +1,16 @@
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
-import { Bricolage_Grotesque, Geist } from "next/font/google";
+import { Libre_Franklin, Geist } from "next/font/google";
 import type { Lang } from "@/lib/types";
 import { LangProvider } from "@/components/lang-context";
 import { Header } from "@/components/header";
 import { getDict } from "@/lib/i18n";
 import "./globals.css";
 
-const bricolage = Bricolage_Grotesque({
+const headline = Libre_Franklin({
   subsets: ["latin", "latin-ext"],
-  variable: "--font-bricolage",
+  weight: ["600", "700", "800", "900"],
+  variable: "--font-headline",
   display: "swap",
 });
 
@@ -31,7 +32,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const t = getDict(lang);
 
   return (
-    <html lang={lang} className={`${bricolage.variable} ${geist.variable} antialiased`}>
+    <html lang={lang} className={`${headline.variable} ${geist.variable} antialiased`}>
       <body className="min-h-[100dvh]">
         <LangProvider lang={lang}>
           <Header />

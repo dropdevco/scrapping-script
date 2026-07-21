@@ -17,7 +17,7 @@
   --color-sunset-soft: #ff8a50;
   --color-rose-dusk: #e5484d;
 
-  --font-display: var(--font-bricolage);
+  --font-display: var(--font-headline);
   --font-sans: var(--font-geist);
 
   --radius-shell: 1.75rem;

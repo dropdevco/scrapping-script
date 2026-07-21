@@ -72,9 +72,8 @@ export function Header() {
         })}
       </nav>
 
-      {/* pop rule — thin halftone + solid line */}
-      <div className="h-[3px] w-full bg-ink" />
-      <div className="h-1.5 w-full halftone-cosmo opacity-70" />
+      {/* masthead rule */}
+      <div className="h-[2px] w-full bg-ink" />
     </header>
   );
 }

@@ -7,7 +7,6 @@ import type { Lang } from "@/lib/types";
 import { Filters } from "@/components/filters";
 import { EventCard } from "@/components/event-card";
 import { CutoutText } from "@/components/cutout-text";
-import { ParallaxScene } from "@/components/parallax-scene";
 
 export const dynamic = "force-dynamic";
 
@@ -54,7 +53,7 @@ async function EventGrid({ searchParams }: { searchParams: Search }) {
       <p className="mb-5 font-condensed text-[13px] font-medium uppercase tracking-[0.16em] text-ink-soft">
         {events.length} {events.length === 1 ? t.eventFound : t.eventsFound}
       </p>
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
         {events.map((e, i) => (
           <EventCard key={e.id} event={e} index={i} />
         ))}
@@ -72,16 +71,9 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
 
   return (
     <>
-      {/* ── HERO — magazine cover-line over paper-cut El Paso ─────────────── */}
-      <section className="relative min-h-[82vh] overflow-hidden">
-        <ParallaxScene />
-        <div className="relative z-10 mx-auto max-w-6xl px-4 pt-14 md:px-6 md:pt-20">
-          {/* dateline */}
-          <p className="mb-5 inline-flex items-center gap-2.5 font-condensed text-[11px] font-semibold uppercase tracking-[0.3em] text-ink-soft">
-            <span className="h-2.5 w-2.5 bg-cosmo" />
-            El Paso · Juárez
-          </p>
-
+      {/* ── HERO — magazine cover-line over the landmark collage ─────────── */}
+      <section className="relative min-h-[78vh]">
+        <div className="relative z-10 mx-auto max-w-6xl px-4 pt-16 md:px-6 md:pt-24">
           {/* cover-line */}
           <h1 className="max-w-3xl font-display text-[13vw] font-black italic leading-[0.9] tracking-tight text-ink sm:text-7xl md:text-8xl">
             <span className="block">{t.heroTitle}</span>
@@ -128,7 +120,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
             <Suspense
               key={JSON.stringify(sp)}
               fallback={
-                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
                   {Array.from({ length: 6 }).map((_, i) => (
                     <div
                       key={i}

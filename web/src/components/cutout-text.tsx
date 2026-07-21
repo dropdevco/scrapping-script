@@ -45,7 +45,7 @@ export function CutoutText({
   className?: string;
 }) {
   return (
-    <span className={`inline-flex flex-wrap items-center gap-[0.08em] ${className}`}>
+    <span className={`inline-flex items-center gap-[0.08em] whitespace-nowrap ${className}`}>
       {[...text].map((ch, i) => {
         if (ch === " ") return <span key={i} className="w-[0.32em]" />;
         const h = hash(ch + i, seed);

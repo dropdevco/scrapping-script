@@ -12,7 +12,7 @@ import {
 import type { Lang } from "@/lib/types";
 import { LangProvider } from "@/components/lang-context";
 import { Header } from "@/components/header";
-import { SkylineBand } from "@/components/skyline-band";
+import { LandmarkBackdrop } from "@/components/landmark-backdrop";
 import { getDict } from "@/lib/i18n";
 import "./globals.css";
 
@@ -81,12 +81,11 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     <html lang={lang} className={`${fontVars} antialiased`}>
       <body className="min-h-[100dvh]">
         <LangProvider lang={lang}>
+          <LandmarkBackdrop />
           <Header />
           <main>{children}</main>
 
           <footer className="mt-32">
-            {/* paper-cut El Paso skyline band */}
-            <SkylineBand />
             <div className="bg-ink text-paper">
               <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-10 md:flex-row md:items-center md:justify-between md:px-6">
                 <span className="font-display text-2xl font-black italic tracking-tight">

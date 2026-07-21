@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 300" fill="none">
+  <!-- "La Equis" — Ciudad Juárez. Stylized monumental red X on a plinth. -->
+  <!-- back blade -->
+  <path d="M44 12 L86 12 L156 276 L114 276 Z" fill="#c11a3f" stroke="#141118" stroke-width="4" stroke-linejoin="round"/>
+  <!-- front blade -->
+  <path d="M156 12 L114 12 L44 276 L86 276 Z" fill="#f5232b" stroke="#141118" stroke-width="4" stroke-linejoin="round"/>
+  <!-- crossing highlight -->
+  <path d="M100 116 L118 150 L100 184 L82 150 Z" fill="#ff6b74"/>
+  <!-- plinth -->
+  <rect x="34" y="276" width="132" height="18" fill="#141118"/>
+</svg>

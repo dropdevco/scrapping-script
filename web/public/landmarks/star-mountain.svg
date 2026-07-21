@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 260" fill="none">
+  <!-- Franklin Mountains — El Paso. Layered adobe ridges with the illuminated Lone Star. -->
+  <path d="M0 260 L70 150 L120 186 L190 96 L250 150 L320 110 L380 158 L420 132 L420 260 Z" fill="#a9683f" stroke="#141118" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M0 260 L60 196 L128 224 L196 168 L268 214 L338 176 L420 220 L420 260 Z" fill="#c98b5e" stroke="#141118" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Lone Star outline near the summit -->
+  <g transform="translate(190 70)" stroke="#141118" stroke-width="3" stroke-linejoin="round">
+    <path d="M0 -34 L9.6 -10.4 L34 -10.4 L14 4.4 L21.6 28 L0 13.6 L-21.6 28 L-14 4.4 L-34 -10.4 L-9.6 -10.4 Z" fill="#ffd21e"/>
+    <path d="M0 -34 L9.6 -10.4 L34 -10.4 L14 4.4 L21.6 28 L0 13.6 L-21.6 28 L-14 4.4 L-34 -10.4 L-9.6 -10.4 Z" fill="none"/>
+  </g>
+  <!-- light bulbs tracing the star -->
+  <g fill="#fff" stroke="#141118" stroke-width="1.4">
+    <circle cx="190" cy="36" r="2.4"/>
+    <circle cx="199.6" cy="59.6" r="2.4"/>
+    <circle cx="224" cy="59.6" r="2.4"/>
+    <circle cx="204" cy="74.4" r="2.4"/>
+    <circle cx="211.6" cy="98" r="2.4"/>
+    <circle cx="190" cy="83.6" r="2.4"/>
+    <circle cx="168.4" cy="98" r="2.4"/>
+    <circle cx="176" cy="74.4" r="2.4"/>
+    <circle cx="156" cy="59.6" r="2.4"/>
+    <circle cx="180.4" cy="59.6" r="2.4"/>
+  </g>
+</svg>

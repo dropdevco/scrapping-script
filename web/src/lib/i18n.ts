@@ -32,7 +32,7 @@ const dict = {
     submitEvent: "Submit an event",
     submitYourEvent: "Submit your event",
     submitIntro:
-      "Hosting something on either side of the border? Add it to Frontera — we review every submission before it goes live.",
+      "Hosting something on either side of the border? Add it to Chisme — we review every submission before it goes live.",
     signInToSubmit: "Sign in with Google to submit your event.",
     signIn: "Sign in",
     signOut: "Sign out",
@@ -96,7 +96,7 @@ const dict = {
     submitEvent: "Publica tu evento",
     submitYourEvent: "Publica tu evento",
     submitIntro:
-      "¿Organizas algo en cualquier lado de la frontera? Agrégalo a Frontera — revisamos cada envío antes de publicarlo.",
+      "¿Organizas algo en cualquier lado de la frontera? Agrégalo a Chisme — revisamos cada envío antes de publicarlo.",
     signInToSubmit: "Inicia sesión con Google para publicar tu evento.",
     signIn: "Iniciar sesión",
     signOut: "Cerrar sesión",

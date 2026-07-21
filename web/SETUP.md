@@ -1,6 +1,6 @@
-# Frontera Setup Guide
+# Chisme Setup Guide
 
-Frontera is a fullstack El Paso + Juárez events discovery site. This guide covers local development setup and deployment.
+Chisme is a fullstack El Paso + Juárez events discovery site. This guide covers local development setup and deployment.
 
 ## Prerequisites
 

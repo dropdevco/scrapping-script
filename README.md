@@ -41,9 +41,9 @@ free; a paid X source can be dropped in later as just another connector.
 
 ---
 
-## Frontera: Fullstack Events Discovery Site
+## Chisme: Fullstack Events Discovery Site
 
-Built on this scraper is **Frontera** — a bilingual (EN/ES) web app for discovering events across El Paso + Juárez. Live data flows from the scraper → Supabase → Next.js 16 frontend.
+Built on this scraper is **Chisme** — a bilingual (EN/ES) web app for discovering events across El Paso + Juárez. Live data flows from the scraper → Supabase → Next.js 16 frontend.
 
 **Features:**
 - Event listing with smart search, time filters (today / this week), city filters
@@ -84,7 +84,7 @@ src/scraper/
   mcp_server.py MCP tools (agent-facing)
   scheduler.py  curated recurring jobs
 
-web/                      Next.js 16 fullstack events site (Frontera)
+web/                      Next.js 16 fullstack events site (Chisme)
   src/app/              Page routes (listing, map, event detail, submit form)
   src/components/       React components (event grid, filters, map, auth)
   src/lib/              Queries, types, i18n, Supabase clients

@@ -20,7 +20,7 @@ const geist = Geist({
 });
 
 export const metadata: Metadata = {
-  title: "Frontera — El Paso + Juárez events",
+  title: "Chisme — El Paso + Juárez events",
   description:
     "Concerts, ballgames, markets, meetups — every event on both sides of the border, in one place.",
 };
@@ -39,7 +39,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           <footer className="mt-32 border-t border-line/60">
             <div className="mx-auto flex max-w-6xl flex-col gap-2 px-4 py-10 text-xs text-sand-faint md:flex-row md:items-center md:justify-between md:px-6">
               <span className="font-display text-sm text-sand-dim">
-                frontera<span className="text-sunset">.</span>
+                chisme<span className="text-sunset">.</span>
               </span>
               <span>{t.footerNote}</span>
             </div>

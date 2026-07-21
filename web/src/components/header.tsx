@@ -19,7 +19,7 @@ export function Header() {
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 md:px-6">
         <Link href="/" className="group flex items-baseline gap-2">
           <span className="font-display text-xl font-bold tracking-tight text-sand">
-            frontera
+            chisme
           </span>
           <span className="h-1.5 w-1.5 rounded-full bg-sunset transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-150" />
         </Link>

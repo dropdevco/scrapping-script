@@ -6,6 +6,7 @@ from datetime import datetime, time
 from typing import Any, Optional
 
 from ..core.address import format_address
+from ..core.categorize import guess_category
 from ..core.config import settings
 from ..core.http import HttpClient
 from ..core.media import clean_image_url
@@ -91,11 +92,12 @@ class TicketmasterSource(Source):
 
         dates = e.get("dates") or {}
         start = (dates.get("start") or {}).get("dateTime") or (dates.get("start") or {}).get("localDate")
+        title = e.get("name", "Untitled event")
 
         return Event(
             source=self.name,
             source_id=e.get("id"),
-            title=e.get("name", "Untitled event"),
+            title=title,
             description=e.get("info") or e.get("pleaseNote"),
             start_time=_dt(start),
             venue=venue.get("name"),
@@ -104,7 +106,7 @@ class TicketmasterSource(Source):
             lng=_coord(coords.get("longitude")),
             url=e.get("url"),
             image_url=image_url,
-            categories=categories,
+            categories=categories or [guess_category(title)],
             raw=e,
         )
 

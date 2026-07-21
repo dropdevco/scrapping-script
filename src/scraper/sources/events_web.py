@@ -22,6 +22,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from ..core.address import format_address
+from ..core.categorize import guess_category
 from ..core.http import HttpClient
 from ..core.media import clean_image_url
 from ..core.models import Event, Kind, SearchParams
@@ -230,10 +231,11 @@ class EventsWebSource(Source):
                 image = image[0] if image else None
             if isinstance(image, dict):
                 image = image.get("url")
+            title = str(node.get("name") or "Untitled event")
             out.append(
                 Event(
                     source=self.name,
-                    title=str(node.get("name") or "Untitled event"),
+                    title=title,
                     description=node.get("description"),
                     start_time=_dt(node.get("startDate")),
                     end_time=_dt(node.get("endDate")),
@@ -243,6 +245,7 @@ class EventsWebSource(Source):
                     lng=lng,
                     url=(node.get("url") if isinstance(node.get("url"), str) else None) or url,
                     image_url=clean_image_url(image),
+                    categories=[guess_category(title)],
                     raw=node,
                 )
             )

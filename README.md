@@ -20,7 +20,7 @@ provide light up more sources; the rest self-disable and the run continues.
 
 | Job | Sources |
 |-----|---------|
-| Events | Ticketmaster Discovery API (free key) + keyless open-web fallback: direct city pages on Eventbrite, Ticketmaster (public), and Meetup — empirically verified to serve crawlable schema.org/Event JSON-LD — plus a site:-scoped DuckDuckGo supplement |
+| Events | Ticketmaster Discovery API (free key) + keyless open-web fallback: direct city pages on Eventbrite, Ticketmaster (public), and Meetup, plus a dedicated crawl of Visit El Paso's official calendar (visitelpaso.com/events) — all empirically verified to serve crawlable schema.org/Event JSON-LD — plus a site:-scoped DuckDuckGo supplement |
 | Trends | Reddit, Hacker News, YouTube, Google Trends |
 | Web research | DuckDuckGo (keyless) + optional Tavily/Brave, with main-content extraction |
 

@@ -7,6 +7,14 @@ structured events. A ``site:``-scoped DuckDuckGo search adds extra detail pages.
 bot-block or render events only via JavaScript (allevents.in, 10times, bandsintown, seatgeek,
 dice.fm…) are intentionally skipped because a keyless fetch gets nothing from them.
 
+For El Paso specifically, Visit El Paso's own events calendar (visitelpaso.com/events) is
+fetched as a dedicated, higher-priority path: it's server-rendered (confirmed via plain GET,
+no JS needed), lists events soonest-first with no pagination, robots.txt allows it, and each
+event's detail page carries full schema.org/Event JSON-LD (as a @graph entry, already handled
+by _iter_jsonld_events below). The listing page's own category badges are richer than our
+keyword guess and are used directly, the same way Ticketmaster's own classification is trusted
+over the guesser.
+
 For full, reliable coverage set ``TICKETMASTER_API_KEY`` — the Discovery API source is the
 primary events provider; this one is the free fallback / supplement.
 """
@@ -19,7 +27,7 @@ import logging
 import re
 from datetime import date, datetime
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urljoin
 
 from ..core.address import format_address
 from ..core.categorize import guess_category
@@ -105,6 +113,11 @@ def _as_location(loc: Any) -> tuple[Optional[str], Optional[str]]:
         )
     else:
         location = addr if isinstance(addr, str) else None
+        if location:
+            # Some sites (Visit El Paso) prefix the plain-string address with the
+            # venue name again, e.g. "MACC: 201 W Franklin Ave. El Paso, TX 79901".
+            # A colon this early in a real address is always this label artifact.
+            location = re.sub(r"^[^:]{1,40}:\s*", "", location)
     return name, location
 
 
@@ -188,6 +201,45 @@ def _ddg_site_search(query: str, max_results: int) -> list[str]:
         return []
 
 
+_VISITELPASO_LISTING = "https://visitelpaso.com/events"
+_VISITELPASO_MAX_EVENTS = 30  # cards are listed soonest-first; caps detail-page fetches
+
+
+async def _visitelpaso_events(http: HttpClient) -> list[tuple[str, list[str]]]:
+    """(detail_url, categories) pairs from Visit El Paso's official calendar, soonest-first.
+
+    The listing page's category badges are the site's own classification — richer
+    than our keyword guesser — but don't appear in the detail page's Event JSON-LD,
+    so they're captured here and applied after the JSON-LD fetch.
+    """
+    try:
+        if not await http.can_fetch(_VISITELPASO_LISTING):
+            return []
+        html = await http.get_text(_VISITELPASO_LISTING, headers={"User-Agent": _BROWSER_UA})
+    except Exception as exc:  # noqa: BLE001
+        log.debug("fetch %s failed: %s", _VISITELPASO_LISTING, exc)
+        return []
+
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+    for card in soup.select(".event-card"):
+        link = card.select_one(".event-card__title a[href]")
+        if not link or not link.get("href"):
+            continue
+        href = urljoin(_VISITELPASO_LISTING, link["href"])
+        if href in seen:
+            continue
+        seen.add(href)
+        cats = [b.get_text(strip=True) for b in card.select(".badge") if b.get_text(strip=True)]
+        out.append((href, cats))
+        if len(out) >= _VISITELPASO_MAX_EVENTS:
+            break
+    return out
+
+
 class EventsWebSource(Source):
     name = "events_web"
     kind = Kind.EVENTS
@@ -208,8 +260,28 @@ class EventsWebSource(Source):
         urls = list(dict.fromkeys(u for u in urls if u))[:_MAX_PAGES]
         pages = await asyncio.gather(*(self._page_events(u, http) for u in urls))
         events = [e for page in pages for e in page]
+
+        # Visit El Paso's official calendar: dedicated path so it isn't squeezed
+        # out by the generic _MAX_PAGES cap above, with its own category badges
+        # applied on top of the generic JSON-LD extraction.
+        if city and "el paso" in city.lower():
+            vep_items = await _visitelpaso_events(http)
+            vep_pages = await asyncio.gather(
+                *(self._page_events_with_categories(u, cats, http) for u, cats in vep_items)
+            )
+            events += [e for page in vep_pages for e in page]
+
         events = [e for e in events if _in_window(e, params.start_date, params.end_date)]
         return events
+
+    async def _page_events_with_categories(
+        self, url: str, categories: list[str], http: HttpClient
+    ) -> list[Event]:
+        page = await self._page_events(url, http)
+        if categories:
+            for e in page:
+                e.categories = categories
+        return page
 
     async def _page_events(self, url: str, http: HttpClient) -> list[Event]:
         try:

@@ -5,6 +5,7 @@ import { motion } from "motion/react";
 import type { EventRow } from "@/lib/types";
 import { useLang } from "./lang-context";
 import { dateLocale } from "@/lib/i18n";
+import { ImagePlaceholder } from "./image-placeholder";
 
 function fmtDate(iso: string | null, locale: string): { day: string; time: string } | null {
   if (!iso) return null;
@@ -44,9 +45,7 @@ export function EventCard({ event, index }: { event: EventRow; index: number }) 
               className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-[1.03]"
             />
           ) : (
-            <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-surface-2 to-night">
-              <span className="font-display text-3xl font-bold text-line">f.</span>
-            </div>
+            <ImagePlaceholder variant="card" />
           )}
           {when && (
             <span className="absolute left-2.5 top-2.5 rounded-full bg-night/85 px-2.5 py-1 text-[11px] font-medium text-sand backdrop-blur-sm">

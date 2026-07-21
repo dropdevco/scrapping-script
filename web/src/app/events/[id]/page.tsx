@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { fetchEvent } from "@/lib/events";
 import { dateLocale, getDict } from "@/lib/i18n";
 import type { Lang } from "@/lib/types";
+import { ImagePlaceholder } from "@/components/image-placeholder";
 
 export const dynamic = "force-dynamic";
 
@@ -43,9 +44,7 @@ export default async function EventPage({ params }: { params: Promise<{ id: stri
             // eslint-disable-next-line @next/next/no-img-element
             <img src={event.image_url} alt="" className="h-full w-full object-cover" />
           ) : (
-            <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-surface-2 to-night">
-              <span className="font-display text-6xl font-bold text-line">f.</span>
-            </div>
+            <ImagePlaceholder variant="hero" />
           )}
         </div>
 

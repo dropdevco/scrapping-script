@@ -8,6 +8,7 @@ from typing import Any, Optional
 from ..core.address import format_address
 from ..core.config import settings
 from ..core.http import HttpClient
+from ..core.media import clean_image_url
 from ..core.models import Event, Kind, SearchParams
 from .base import Source
 
@@ -79,7 +80,7 @@ class TicketmasterSource(Source):
             coords = {}
 
         images = e.get("images") or []
-        image_url = images[0].get("url") if images else None
+        image_url = clean_image_url(images[0].get("url") if images else None)
 
         categories = []
         for c in e.get("classifications") or []:

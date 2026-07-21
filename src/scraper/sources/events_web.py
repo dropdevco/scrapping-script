@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 from ..core.address import format_address
 from ..core.http import HttpClient
+from ..core.media import clean_image_url
 from ..core.models import Event, Kind, SearchParams
 from .base import Source
 
@@ -241,7 +242,7 @@ class EventsWebSource(Source):
                     lat=lat,
                     lng=lng,
                     url=(node.get("url") if isinstance(node.get("url"), str) else None) or url,
-                    image_url=image if isinstance(image, str) else None,
+                    image_url=clean_image_url(image),
                     raw=node,
                 )
             )

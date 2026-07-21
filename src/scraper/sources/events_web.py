@@ -201,6 +201,111 @@ def _ddg_site_search(query: str, max_results: int) -> list[str]:
         return []
 
 
+# Visit El Paso and La Nube both run the same white-label "event-card" calendar
+# widget (same CSS classes, same S3 image bucket naming, cross-listed events) —
+# they only differ in whether the detail page also carries JSON-LD.
+_CARD_DATE_RE = re.compile(r"([A-Za-z]+\s+\d{1,2},\s*\d{4})")
+_CARD_TIME_RE = re.compile(r"(\d{1,2}:\d{2}\s*[AP]M)", re.IGNORECASE)
+
+
+def _parse_calendar_card(card: Any, base_url: str) -> dict[str, Any]:
+    """Extract every field the shared card format exposes.
+
+    Sites whose detail pages carry richer JSON-LD only need ``href``/``categories``
+    from here; sites that don't (La Nube) build the whole Event from these fields.
+    """
+    link = card.select_one(".event-card__title a[href]")
+    href = urljoin(base_url, link["href"]) if link and link.get("href") else None
+    title = link.get_text(strip=True) if link else None
+
+    img = card.select_one("img[src]")
+    image = img.get("src") if img else None
+
+    date_text = None
+    time_text = None
+    categories: list[str] = []
+    for date_div in card.select(".event-card__date"):
+        badges = date_div.select(".badge")
+        if badges:
+            categories = [b.get_text(strip=True) for b in badges if b.get_text(strip=True)]
+            continue
+        text = date_div.get_text(strip=True)
+        if not text:
+            continue
+        if re.search(r"\d{4}", text):
+            date_text = text
+        elif re.search(r"(am|pm)", text, re.IGNORECASE):
+            time_text = text
+
+    venue = None
+    address = None
+    loc_el = card.select_one(".event-card__location")
+    if loc_el:
+        for icon in loc_el.select("i"):
+            icon.decompose()
+        lines = [ln.strip() for ln in loc_el.get_text(separator="\n").split("\n") if ln.strip()]
+        if lines:
+            venue = lines[0]
+        if len(lines) > 1:
+            address = lines[1]
+
+    desc_el = card.select_one(".mt-2, .mt-3")
+    description = desc_el.get_text(separator=" ", strip=True) if desc_el else None
+
+    return {
+        "href": href,
+        "title": title,
+        "image": image,
+        "date_text": date_text,
+        "time_text": time_text,
+        "categories": categories,
+        "venue": venue,
+        "address": address,
+        "description": description,
+    }
+
+
+def _parse_card_datetime(
+    date_text: Optional[str], time_text: Optional[str]
+) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Cards show a date RANGE plus a separate daily TIME range, e.g.
+    "Jul 10, 2026 - Jul 31, 2026" + "12:00 PM - 3:00 PM" for a recurring daily
+    session. Anchored to the range's first day (its next/soonest occurrence) —
+    the fuller recurrence is preserved in the description text.
+    """
+    dates = _CARD_DATE_RE.findall(date_text or "")
+    if not dates:
+        return None, None
+    times = _CARD_TIME_RE.findall(time_text or "")
+
+    def _combine(date_str: str, time_str: Optional[str]) -> Optional[datetime]:
+        fmt = "%B %d, %Y %I:%M %p" if time_str else "%B %d, %Y"
+        raw = f"{date_str} {time_str}" if time_str else date_str
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            return None
+
+    start = _combine(dates[0], times[0] if times else None)
+    end = _combine(dates[0], times[1]) if len(times) > 1 else None
+    return start, end
+
+
+async def _fetch_calendar_listing(listing_url: str, http: HttpClient) -> Optional[Any]:
+    """Fetch a calendar listing page and return its parsed soup, or None on failure."""
+    try:
+        if not await http.can_fetch(listing_url):
+            return None
+        html = await http.get_text(listing_url, headers={"User-Agent": _BROWSER_UA})
+    except Exception as exc:  # noqa: BLE001
+        log.debug("fetch %s failed: %s", listing_url, exc)
+        return None
+
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(html, "html.parser")
+
+
 _VISITELPASO_LISTING = "https://visitelpaso.com/events"
 _VISITELPASO_MAX_EVENTS = 30  # cards are listed soonest-first; caps detail-page fetches
 
@@ -212,32 +317,63 @@ async def _visitelpaso_events(http: HttpClient) -> list[tuple[str, list[str]]]:
     than our keyword guesser — but don't appear in the detail page's Event JSON-LD,
     so they're captured here and applied after the JSON-LD fetch.
     """
-    try:
-        if not await http.can_fetch(_VISITELPASO_LISTING):
-            return []
-        html = await http.get_text(_VISITELPASO_LISTING, headers={"User-Agent": _BROWSER_UA})
-    except Exception as exc:  # noqa: BLE001
-        log.debug("fetch %s failed: %s", _VISITELPASO_LISTING, exc)
+    soup = await _fetch_calendar_listing(_VISITELPASO_LISTING, http)
+    if soup is None:
         return []
 
-    from bs4 import BeautifulSoup
-
-    soup = BeautifulSoup(html, "html.parser")
     out: list[tuple[str, list[str]]] = []
     seen: set[str] = set()
     for card in soup.select(".event-card"):
-        link = card.select_one(".event-card__title a[href]")
-        if not link or not link.get("href"):
-            continue
-        href = urljoin(_VISITELPASO_LISTING, link["href"])
-        if href in seen:
+        fields = _parse_calendar_card(card, _VISITELPASO_LISTING)
+        href = fields["href"]
+        if not href or href in seen:
             continue
         seen.add(href)
-        cats = [b.get_text(strip=True) for b in card.select(".badge") if b.get_text(strip=True)]
-        out.append((href, cats))
+        out.append((href, fields["categories"]))
         if len(out) >= _VISITELPASO_MAX_EVENTS:
             break
     return out
+
+
+_LANUBE_LISTING = "https://la-nube.org/plan-your-day/calendar"
+_LANUBE_MAX_EVENTS = 60
+
+
+async def _lanube_events(http: HttpClient) -> list[Event]:
+    """Events from La Nube's calendar (same widget as Visit El Paso), built
+    straight from the listing card's fields — its detail pages carry no JSON-LD.
+    """
+    soup = await _fetch_calendar_listing(_LANUBE_LISTING, http)
+    if soup is None:
+        return []
+
+    events: list[Event] = []
+    seen: set[str] = set()
+    for card in soup.select(".event-card"):
+        fields = _parse_calendar_card(card, _LANUBE_LISTING)
+        href = fields["href"]
+        if not href or href in seen or not fields["title"]:
+            continue
+        seen.add(href)
+        start, end = _parse_card_datetime(fields["date_text"], fields["time_text"])
+        events.append(
+            Event(
+                source="events_web",
+                title=fields["title"],
+                description=fields["description"],
+                start_time=start,
+                end_time=end,
+                venue=fields["venue"],
+                location=fields["address"],
+                url=href,
+                image_url=clean_image_url(fields["image"]),
+                categories=fields["categories"] or [guess_category(fields["title"])],
+                raw=fields,
+            )
+        )
+        if len(events) >= _LANUBE_MAX_EVENTS:
+            break
+    return events
 
 
 class EventsWebSource(Source):
@@ -261,15 +397,15 @@ class EventsWebSource(Source):
         pages = await asyncio.gather(*(self._page_events(u, http) for u in urls))
         events = [e for page in pages for e in page]
 
-        # Visit El Paso's official calendar: dedicated path so it isn't squeezed
-        # out by the generic _MAX_PAGES cap above, with its own category badges
-        # applied on top of the generic JSON-LD extraction.
+        # El Paso's own calendar sites: dedicated paths so they aren't squeezed
+        # out by the generic _MAX_PAGES cap above.
         if city and "el paso" in city.lower():
             vep_items = await _visitelpaso_events(http)
             vep_pages = await asyncio.gather(
                 *(self._page_events_with_categories(u, cats, http) for u, cats in vep_items)
             )
             events += [e for page in vep_pages for e in page]
+            events += await _lanube_events(http)
 
         events = [e for e in events if _in_window(e, params.start_date, params.end_date)]
         return events

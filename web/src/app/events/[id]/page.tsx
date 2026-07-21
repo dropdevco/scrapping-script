@@ -26,10 +26,10 @@ export default async function EventPage({ params }: { params: Promise<{ id: stri
     : null;
 
   return (
-    <div className="mx-auto max-w-4xl px-4 pb-24 pt-10 md:px-6 md:pt-16">
+    <div className="mx-auto max-w-4xl px-4 pb-24 pt-10 md:px-6 md:pt-14">
       <Link
         href="/"
-        className="mb-8 inline-flex items-center gap-1.5 text-[13px] text-sand-faint transition-colors hover:text-sand"
+        className="mb-8 inline-flex items-center gap-1.5 font-condensed text-[12px] font-medium uppercase tracking-[0.14em] text-ink-soft transition-colors hover:text-cosmo"
       >
         <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M19 12H5m6 6-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
@@ -37,94 +37,104 @@ export default async function EventPage({ params }: { params: Promise<{ id: stri
         {t.backToEvents}
       </Link>
 
-      {/* hero card — double bezel */}
-      <div className="rounded-[1.75rem] bg-surface p-1.5 ring-1 ring-line/70">
-        <div className="relative aspect-[2/1] overflow-hidden rounded-[1.375rem] bg-surface-2">
+      {/* kickers */}
+      {event.categories && event.categories.length > 0 && (
+        <p className="mb-4 flex flex-wrap gap-2">
+          {event.categories.slice(0, 4).map((c) => (
+            <span
+              key={c}
+              className="rounded-full bg-cosmo px-2.5 py-1 font-condensed text-[10px] font-bold uppercase tracking-[0.16em] text-white shadow-[2px_2px_0_var(--color-ink)]"
+            >
+              {c}
+            </span>
+          ))}
+        </p>
+      )}
+
+      {/* title */}
+      <h1 className="max-w-3xl font-display text-4xl font-black italic leading-[0.98] tracking-tight text-ink md:text-6xl">
+        {event.title}
+      </h1>
+
+      {/* photo — double bezel on ink */}
+      <div className="mt-8 rounded-[1.5rem] border-[1.5px] border-ink bg-card p-1.5 shadow-[4px_5px_0_var(--color-ink)]">
+        <div className="relative aspect-[2/1] overflow-hidden rounded-[1.05rem] bg-paper-2">
           <EventImage src={event.image_url} variant="hero" className="h-full w-full object-cover" />
         </div>
+      </div>
 
-        <div className="px-5 pb-6 pt-5 md:px-7 md:pb-8">
-          {event.categories && event.categories.length > 0 && (
-            <p className="mb-3 flex flex-wrap gap-2">
-              {event.categories.slice(0, 3).map((c) => (
-                <span
-                  key={c}
-                  className="rounded-full border border-line px-2.5 py-0.5 text-[10px] uppercase tracking-[0.16em] text-sunset-soft"
-                >
-                  {c}
-                </span>
-              ))}
+      {/* meta columns */}
+      <div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-2">
+        <div className="rounded-[1.125rem] border-[1.5px] border-ink bg-paper/50 p-5">
+          <p className="font-condensed text-[11px] font-semibold uppercase tracking-[0.22em] text-cosmo">
+            {t.when}
+          </p>
+          <p className="mt-2 font-display text-xl font-bold text-ink">
+            {start
+              ? start.toLocaleDateString(locale, { weekday: "long", month: "long", day: "numeric" })
+              : t.dateTBA}
+          </p>
+          {start && (
+            <p className="text-[14px] text-ink-soft">
+              {start.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" })}
             </p>
           )}
-          <h1 className="font-display text-3xl font-bold leading-tight tracking-tight text-sand md:text-4xl">
-            {event.title}
-          </h1>
-
-          <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div className="rounded-[1.125rem] bg-surface-2 p-4 ring-1 ring-line/50">
-              <p className="text-[10px] uppercase tracking-[0.18em] text-sand-faint">{t.when}</p>
-              <p className="mt-1.5 text-[15px] text-sand">
-                {start
-                  ? start.toLocaleDateString(locale, {
-                      weekday: "long",
-                      month: "long",
-                      day: "numeric",
-                    })
-                  : t.dateTBA}
-              </p>
-              {start && (
-                <p className="text-[13px] text-sand-dim">
-                  {start.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" })}
-                </p>
-              )}
-            </div>
-            <div className="rounded-[1.125rem] bg-surface-2 p-4 ring-1 ring-line/50">
-              <p className="text-[10px] uppercase tracking-[0.18em] text-sand-faint">{t.where}</p>
-              <p className="mt-1.5 text-[15px] text-sand">{venueName ?? t.virtual}</p>
-              {address && (
-                <p className="text-[13px] leading-relaxed text-sand-dim">
-                  {mapsUrl ? (
-                    <a href={mapsUrl} target="_blank" rel="noreferrer" className="underline decoration-line underline-offset-4 transition-colors hover:text-sand">
-                      {address}
-                    </a>
-                  ) : (
-                    address
-                  )}
-                </p>
-              )}
-            </div>
-          </div>
-
-          {event.description && (
-            <div className="mt-6">
-              <p className="text-[10px] uppercase tracking-[0.18em] text-sand-faint">{t.about}</p>
-              <p className="mt-2 whitespace-pre-line text-[15px] leading-relaxed text-sand-dim">
-                {event.description}
-              </p>
-            </div>
-          )}
-
-          <div className="mt-8 flex flex-wrap items-center gap-3">
-            {event.url && (
-              <a
-                href={event.url}
-                target="_blank"
-                rel="noreferrer"
-                className="group flex items-center gap-2 rounded-full bg-sand py-1.5 pl-5 pr-1.5 text-sm font-medium text-night transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.02]"
-              >
-                {t.getTickets}
-                <span className="flex h-8 w-8 items-center justify-center rounded-full bg-night text-sand transition-transform duration-300 group-hover:translate-x-0.5">
-                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M7 17 17 7m0 0H8m9 0v9" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </span>
-              </a>
-            )}
-            <span className="text-[11px] text-sand-faint">
-              {t.source}: {event.source.replace("events_", "")}
-            </span>
-          </div>
         </div>
+        <div className="rounded-[1.125rem] border-[1.5px] border-ink bg-paper/50 p-5">
+          <p className="font-condensed text-[11px] font-semibold uppercase tracking-[0.22em] text-cosmo">
+            {t.where}
+          </p>
+          <p className="mt-2 font-display text-xl font-bold text-ink">{venueName ?? t.virtual}</p>
+          {address && (
+            <p className="text-[14px] leading-relaxed text-ink-soft">
+              {mapsUrl ? (
+                <a
+                  href={mapsUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline decoration-cosmo decoration-2 underline-offset-4 transition-colors hover:text-cosmo"
+                >
+                  {address}
+                </a>
+              ) : (
+                address
+              )}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* description — editorial drop-cap */}
+      {event.description && (
+        <div className="mt-10">
+          <p className="mb-3 font-condensed text-[11px] font-semibold uppercase tracking-[0.22em] text-cosmo">
+            {t.about}
+          </p>
+          <p className="whitespace-pre-line text-[16px] leading-relaxed text-ink/90 first-letter:float-left first-letter:mr-2 first-letter:font-display first-letter:text-5xl first-letter:font-black first-letter:italic first-letter:leading-[0.7] first-letter:text-cosmo">
+            {event.description}
+          </p>
+        </div>
+      )}
+
+      <div className="mt-10 flex flex-wrap items-center gap-4">
+        {event.url && (
+          <a
+            href={event.url}
+            target="_blank"
+            rel="noreferrer"
+            className="group inline-flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
+          >
+            {t.getTickets}
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white transition-transform duration-300 group-hover:translate-x-0.5">
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M7 17 17 7m0 0H8m9 0v9" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+          </a>
+        )}
+        <span className="font-condensed text-[11px] uppercase tracking-[0.14em] text-ink-faint">
+          {t.source}: {event.source.replace("events_", "")}
+        </span>
       </div>
     </div>
   );

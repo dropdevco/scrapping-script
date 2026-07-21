@@ -2,62 +2,109 @@
 @import "leaflet/dist/leaflet.css";
 
 /*
-  Chisme — desert-night design tokens.
-  Dark-first: warm charcoal base (never pure black), sunset accent, sand neutrals.
+  Chisme — pop-art × Cosmopolitan magazine-collage design tokens.
+  Light-first: warm cream "magazine paper" base, near-black ink,
+  Cosmo hot-pink signature, pop primaries as color-blocked accents.
 */
 @theme {
-  --color-night: #0e0c0a;         /* page base — warm near-black */
-  --color-surface: #181410;       /* raised surfaces */
-  --color-surface-2: #221c16;     /* inner card cores */
-  --color-line: #2e261e;          /* hairlines */
-  --color-sand: #e8e0d4;          /* primary text */
-  --color-sand-dim: #a89e8f;      /* secondary text */
-  --color-sand-faint: #6e6558;    /* tertiary text */
-  --color-sunset: #f4652e;        /* accent — sunset orange */
-  --color-sunset-soft: #ff8a50;
-  --color-rose-dusk: #e5484d;
+  --color-paper: #fbf6ec;         /* page base — warm magazine cream */
+  --color-card: #fffcf5;          /* raised card core (brighter paper) */
+  --color-paper-2: #f3ebda;       /* sunken inset / secondary surface */
+  --color-ink: #141118;           /* primary text — near-black */
+  --color-ink-soft: #4a4550;      /* secondary text */
+  --color-ink-faint: #8a8189;     /* tertiary text */
+  --color-cosmo: #e6117f;         /* signature hot pink/magenta */
+  --color-cosmo-soft: #ff4fa3;    /* lighter pink — hovers/accents */
+  --color-pop-red: #f5232b;
+  --color-pop-yellow: #ffd21e;
+  --color-pop-blue: #1e63ff;
+  --color-line: #e0d5c0;          /* hairlines on paper */
+  --color-ink-line: #141118;      /* bold ink outline */
 
-  --font-display: var(--font-headline);
-  --font-sans: var(--font-geist);
+  --font-display: var(--font-fraunces);   /* editorial didone */
+  --font-sans: var(--font-archivo);       /* body grotesque */
+  --font-condensed: var(--font-oswald);   /* datelines */
 
-  --radius-shell: 1.75rem;
-  --radius-core: 1.375rem;
+  --radius-shell: 1.5rem;
+  --radius-core: 1.125rem;
 
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-swift: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 html {
-  background: var(--color-night);
-  color-scheme: dark;
+  background: var(--color-paper);
+  color-scheme: light;
 }
 
 body {
-  background: var(--color-night);
-  color: var(--color-sand);
+  background:
+    radial-gradient(var(--color-line) 0.6px, transparent 0.6px) 0 0 / 22px 22px,
+    var(--color-paper);
+  background-attachment: fixed;
+  color: var(--color-ink);
   font-family: var(--font-sans), system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
-  background: color-mix(in oklab, var(--color-sunset) 70%, transparent);
+  background: var(--color-cosmo);
   color: #fff;
 }
 
-/* Leaflet dark-theme polish */
+/* ── Pop-art texture helpers ─────────────────────────────────────────── */
+/* Ben-Day halftone dot fills — faint enough that text stays crisp. */
+.halftone-cosmo {
+  background-image: radial-gradient(var(--color-cosmo) 1.5px, transparent 1.6px);
+  background-size: 9px 9px;
+}
+.halftone-red {
+  background-image: radial-gradient(var(--color-pop-red) 1.5px, transparent 1.6px);
+  background-size: 9px 9px;
+}
+.halftone-ink {
+  background-image: radial-gradient(var(--color-ink) 1.3px, transparent 1.4px);
+  background-size: 10px 10px;
+}
+
+/* Glued-paper depth for cut shapes/letters. */
+.paper-shadow {
+  filter: drop-shadow(2px 3px 0 rgba(20, 17, 24, 0.16));
+}
+.paper-shadow-sm {
+  filter: drop-shadow(1px 2px 0 rgba(20, 17, 24, 0.14));
+}
+
+/* Torn/rough top edge for cut-paper bands (mask a jagged strip off the top). */
+.torn-top {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='10' preserveAspectRatio='none'%3E%3Cpath d='M0 10 V4 L6 6 L12 3 L18 6 L24 2 L30 6 L36 3 L42 6 L48 2 L54 6 L60 3 L66 6 L72 2 L78 6 L84 3 L90 6 L96 2 L102 6 L108 3 L114 6 L120 4 V10 Z' fill='%23000'/%3E%3C/svg%3E"),
+    linear-gradient(#000, #000);
+  -webkit-mask-size: 120px 10px, 100% 100%;
+  -webkit-mask-position: top, bottom;
+  -webkit-mask-repeat: repeat-x, no-repeat;
+  -webkit-mask-composite: source-over;
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='10' preserveAspectRatio='none'%3E%3Cpath d='M0 10 V4 L6 6 L12 3 L18 6 L24 2 L30 6 L36 3 L42 6 L48 2 L54 6 L60 3 L66 6 L72 2 L78 6 L84 3 L90 6 L96 2 L102 6 L108 3 L114 6 L120 4 V10 Z' fill='%23000'/%3E%3C/svg%3E"),
+    linear-gradient(#000, #000);
+  mask-size: 120px 10px, 100% 100%;
+  mask-position: top, bottom;
+  mask-repeat: repeat-x, no-repeat;
+}
+
+/* ── Leaflet light-theme polish ──────────────────────────────────────── */
 .leaflet-container {
-  background: var(--color-night);
+  background: var(--color-paper-2);
   font-family: var(--font-sans), system-ui, sans-serif;
 }
 .leaflet-popup-content-wrapper,
 .leaflet-popup-tip {
-  background: var(--color-surface-2);
-  color: var(--color-sand);
-  border: 1px solid var(--color-line);
-  border-radius: 0.9rem;
+  background: var(--color-card);
+  color: var(--color-ink);
+  border: 1.5px solid var(--color-ink);
+  border-radius: 0.75rem;
+  box-shadow: 3px 4px 0 rgba(20, 17, 24, 0.12);
 }
 .leaflet-popup-content { margin: 0.65rem 0.85rem; }
-.leaflet-container a.leaflet-popup-close-button { color: var(--color-sand-dim); }
+.leaflet-container a.leaflet-popup-close-button { color: var(--color-ink-soft); }
 
 .venue-dot {
   background: transparent;

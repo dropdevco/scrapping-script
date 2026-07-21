@@ -43,14 +43,14 @@ export function AuthButton() {
   return user ? (
     <button
       onClick={signOut}
-      className="rounded-full border border-line px-3.5 py-1.5 text-xs text-sand-dim transition-colors duration-200 hover:border-sand-faint hover:text-sand"
+      className="rounded-full border-[1.5px] border-ink bg-card px-3.5 py-1.5 font-condensed text-[12px] font-medium uppercase tracking-[0.12em] text-ink transition-transform duration-200 hover:-translate-y-0.5"
     >
       {t.signOut}
     </button>
   ) : (
     <button
       onClick={signIn}
-      className="rounded-full border border-line px-3.5 py-1.5 text-xs text-sand-dim transition-colors duration-200 hover:border-sand-faint hover:text-sand"
+      className="rounded-full border-[1.5px] border-ink bg-cosmo px-3.5 py-1.5 font-condensed text-[12px] font-semibold uppercase tracking-[0.12em] text-white shadow-[2px_2px_0_var(--color-ink)] transition-transform duration-200 hover:-translate-y-0.5"
     >
       {t.signIn}
     </button>

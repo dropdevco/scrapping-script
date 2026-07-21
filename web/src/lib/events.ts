@@ -3,9 +3,9 @@ import type { EventRow } from "./types";
 
 export type EventFilters = {
   q?: string;
-  city?: string;      // "el paso" | "juarez"
-  when?: string;      // "today" | "weekend" | "week"
-  category?: string;
+  city?: string;        // "el paso" | "juarez"
+  when?: string;        // "today" | "weekend" | "week"
+  categories?: string[]; // multi-select — OR semantics
 };
 
 /* Juárez appears in data as "Juárez", "Ciudad Juárez", unaccented "Juarez"… */
@@ -64,8 +64,9 @@ export async function fetchEvents(filters: EventFilters, limit = 60): Promise<Ev
     q = q.or(pats.join(","));
   }
 
-  if (filters.category) {
-    q = q.contains("categories", [filters.category]);
+  if (filters.categories && filters.categories.length > 0) {
+    // OR semantics: event matches if it carries ANY selected category.
+    q = q.overlaps("categories", filters.categories);
   }
 
   const { data, error } = await q;

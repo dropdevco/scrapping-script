@@ -12,40 +12,38 @@ export function Header() {
   const nav = [
     { href: "/", label: t.upcoming },
     { href: "/map", label: t.map },
+    { href: "/submit", label: t.submitEvent },
   ];
 
   return (
-    <header className="sticky top-0 z-[1100] border-b border-line/60 bg-night/80 backdrop-blur-md">
+    <header className="sticky top-0 z-[1100] bg-paper/85 backdrop-blur-md">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 md:px-6">
-        <Link href="/" className="group flex items-baseline gap-2">
-          <span className="font-display text-xl font-bold tracking-tight text-sand">
+        {/* masthead wordmark — Cosmo-style didone */}
+        <Link href="/" className="group flex items-baseline gap-0.5">
+          <span className="font-display text-2xl font-black italic tracking-tight text-ink">
             chisme
           </span>
-          <span className="h-1.5 w-1.5 rounded-full bg-sunset transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-150" />
+          <span className="h-2 w-2 translate-y-[-1px] rounded-full bg-cosmo transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-150" />
         </Link>
 
-        <nav className="hidden items-center gap-1 md:flex">
-          {nav.map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={`rounded-full px-3.5 py-1.5 text-sm transition-colors duration-200 ${
-                pathname === item.href
-                  ? "bg-surface text-sand"
-                  : "text-sand-dim hover:text-sand"
-              }`}
-            >
-              {item.label}
-            </Link>
-          ))}
-          <Link
-            href="/submit"
-            className={`rounded-full px-3.5 py-1.5 text-sm transition-colors duration-200 ${
-              pathname === "/submit" ? "bg-surface text-sand" : "text-sand-dim hover:text-sand"
-            }`}
-          >
-            {t.submitEvent}
-          </Link>
+        {/* nav — condensed small caps */}
+        <nav className="hidden items-center gap-6 md:flex">
+          {nav.map((item) => {
+            const active = pathname === item.href;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`font-condensed text-[13px] font-medium uppercase tracking-[0.18em] transition-colors duration-200 ${
+                  active
+                    ? "text-ink underline decoration-cosmo decoration-[2.5px] underline-offset-[6px]"
+                    : "text-ink-soft hover:text-ink"
+                }`}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
         </nav>
 
         <div className="flex items-center gap-2.5">
@@ -55,19 +53,28 @@ export function Header() {
       </div>
 
       {/* mobile nav */}
-      <nav className="flex items-center gap-1 overflow-x-auto px-4 pb-2.5 md:hidden">
-        {[...nav, { href: "/submit", label: t.submitEvent }].map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className={`whitespace-nowrap rounded-full px-3 py-1 text-[13px] transition-colors ${
-              pathname === item.href ? "bg-surface text-sand" : "text-sand-dim"
-            }`}
-          >
-            {item.label}
-          </Link>
-        ))}
+      <nav className="flex items-center gap-4 overflow-x-auto px-4 pb-2.5 md:hidden">
+        {nav.map((item) => {
+          const active = pathname === item.href;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`whitespace-nowrap font-condensed text-[12px] font-medium uppercase tracking-[0.16em] transition-colors ${
+                active
+                  ? "text-ink underline decoration-cosmo decoration-2 underline-offset-4"
+                  : "text-ink-soft"
+              }`}
+            >
+              {item.label}
+            </Link>
+          );
+        })}
       </nav>
+
+      {/* pop rule — thin halftone + solid line */}
+      <div className="h-[3px] w-full bg-ink" />
+      <div className="h-1.5 w-full halftone-cosmo opacity-70" />
     </header>
   );
 }

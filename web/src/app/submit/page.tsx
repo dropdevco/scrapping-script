@@ -12,13 +12,14 @@ export default async function SubmitPage() {
 
   return (
     <div className="mx-auto max-w-3xl px-4 pb-24 pt-12 md:px-6 md:pt-20">
-      <p className="mb-4 inline-block rounded-full border border-line px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-sand-dim">
+      <p className="mb-4 inline-flex items-center gap-2 font-condensed text-[11px] font-semibold uppercase tracking-[0.28em] text-ink-soft">
+        <span className="h-2.5 w-2.5 bg-cosmo" />
         {t.submitEvent}
       </p>
-      <h1 className="font-display text-4xl font-bold tracking-tight text-sand md:text-5xl">
+      <h1 className="font-display text-5xl font-black italic tracking-tight text-ink md:text-6xl">
         {t.submitYourEvent}
       </h1>
-      <p className="mt-4 max-w-lg text-[15px] leading-relaxed text-sand-dim">{t.submitIntro}</p>
+      <p className="mt-4 max-w-lg text-[15px] leading-relaxed text-ink-soft">{t.submitIntro}</p>
 
       <div className="mt-10">
         <SubmitForm />

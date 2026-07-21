@@ -16,19 +16,19 @@ export default async function MapPage() {
     <div className="mx-auto max-w-6xl px-4 pb-24 pt-10 md:px-6 md:pt-14">
       <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="font-display text-3xl font-bold tracking-tight text-sand md:text-4xl">
+          <h1 className="font-display text-4xl font-black italic tracking-tight text-ink md:text-5xl">
             {t.map}
           </h1>
-          <p className="mt-1.5 text-sm text-sand-dim">{t.mapIntro}</p>
+          <p className="mt-1.5 text-sm text-ink-soft">{t.mapIntro}</p>
         </div>
-        <p className="text-[13px] text-sand-faint">
+        <p className="font-condensed text-[13px] font-medium uppercase tracking-[0.16em] text-ink-soft">
           {events.length} {t.eventsOnMap}
         </p>
       </div>
 
       {/* double-bezel map card */}
-      <div className="rounded-[1.75rem] bg-surface p-1.5 ring-1 ring-line/70">
-        <div className="h-[62dvh] min-h-[380px] overflow-hidden rounded-[1.375rem]">
+      <div className="rounded-[1.5rem] border-[1.5px] border-ink bg-card p-1.5 shadow-[4px_5px_0_var(--color-ink)]">
+        <div className="h-[62dvh] min-h-[380px] overflow-hidden rounded-[1.05rem]">
           <MapShell events={events} />
         </div>
       </div>

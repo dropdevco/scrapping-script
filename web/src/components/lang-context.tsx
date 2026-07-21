@@ -30,13 +30,13 @@ export function LangToggle() {
   }
 
   return (
-    <div className="flex items-center rounded-full border border-line bg-surface p-0.5 text-[11px] font-medium tracking-wide">
+    <div className="flex items-center rounded-full border-[1.5px] border-ink bg-card p-0.5 font-condensed text-[11px] font-semibold tracking-wide">
       {(["en", "es"] as const).map((l) => (
         <button
           key={l}
           onClick={() => switchTo(l)}
           className={`rounded-full px-2.5 py-1 uppercase transition-colors duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] ${
-            lang === l ? "bg-sand text-night" : "text-sand-dim hover:text-sand"
+            lang === l ? "bg-ink text-paper" : "text-ink-soft hover:text-ink"
           }`}
           aria-pressed={lang === l}
         >

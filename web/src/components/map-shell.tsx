@@ -7,8 +7,8 @@ import type { EventRow } from "@/lib/types";
 const EventMap = dynamic(() => import("./event-map").then((m) => m.EventMap), {
   ssr: false,
   loading: () => (
-    <div className="flex h-full w-full items-center justify-center bg-surface">
-      <span className="h-2 w-2 animate-ping rounded-full bg-sunset" />
+    <div className="flex h-full w-full items-center justify-center bg-paper-2">
+      <span className="h-2 w-2 animate-ping rounded-full bg-cosmo" />
     </div>
   ),
 });

@@ -6,50 +6,55 @@ import { getDict } from "@/lib/i18n";
 import type { Lang } from "@/lib/types";
 import { Filters } from "@/components/filters";
 import { EventCard } from "@/components/event-card";
+import { CutoutText } from "@/components/cutout-text";
+import { ParallaxScene } from "@/components/parallax-scene";
 
 export const dynamic = "force-dynamic";
 
 type Search = { [key: string]: string | string[] | undefined };
+
+const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
+function many(v: string | string[] | undefined): string[] {
+  const s = Array.isArray(v) ? v.join(",") : (v ?? "");
+  return s.split(",").map((x) => x.trim()).filter(Boolean);
+}
 
 async function EventGrid({ searchParams }: { searchParams: Search }) {
   const cookieStore = await cookies();
   const lang = (cookieStore.get("lang")?.value === "es" ? "es" : "en") as Lang;
   const t = getDict(lang);
 
-  const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
   let events;
   try {
     events = await fetchEvents({
       q: one(searchParams.q),
       city: one(searchParams.city),
       when: one(searchParams.when),
-      category: one(searchParams.category),
+      categories: many(searchParams.categories),
     });
   } catch (err) {
-    // One failed query must never take down the whole page — hero and
-    // filters stay useful; the grid degrades to a friendly message.
     console.error("EventGrid:", err);
     return (
-      <div className="rounded-[1.75rem] bg-surface p-12 text-center ring-1 ring-line/70">
-        <p className="text-sand-dim">{t.errGeneric}</p>
+      <div className="rounded-[1.5rem] border-[1.5px] border-ink bg-card p-12 text-center">
+        <p className="text-ink-soft">{t.errGeneric}</p>
       </div>
     );
   }
 
   if (events.length === 0) {
     return (
-      <div className="rounded-[1.75rem] bg-surface p-12 text-center ring-1 ring-line/70">
-        <p className="text-sand-dim">{t.noEvents}</p>
+      <div className="rounded-[1.5rem] border-[1.5px] border-dashed border-ink/40 bg-card p-12 text-center">
+        <p className="text-ink-soft">{t.noEvents}</p>
       </div>
     );
   }
 
   return (
     <>
-      <p className="mb-5 text-[13px] text-sand-faint">
+      <p className="mb-5 font-condensed text-[13px] font-medium uppercase tracking-[0.16em] text-ink-soft">
         {events.length} {events.length === 1 ? t.eventFound : t.eventsFound}
       </p>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
         {events.map((e, i) => (
           <EventCard key={e.id} event={e} index={i} />
         ))}
@@ -66,62 +71,78 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
   const categories = await fetchCategories().catch(() => []);
 
   return (
-    <div className="mx-auto max-w-6xl px-4 md:px-6">
-      {/* hero */}
-      <section className="pb-14 pt-16 md:pb-20 md:pt-28">
-        <h1 className="max-w-3xl font-display text-5xl font-bold leading-[1.02] tracking-tight text-sand md:text-7xl">
-          {t.heroTitle}{" "}
-          <span className="bg-gradient-to-r from-sunset to-rose-dusk bg-clip-text text-transparent">
-            {t.heroTitleAccent}
-          </span>
-        </h1>
-        <p className="mt-5 max-w-xl text-[15px] leading-relaxed text-sand-dim md:text-base">
-          {t.heroSub}
-        </p>
-        <div className="mt-8 flex items-center gap-3">
-          <a
-            href="#events"
-            className="group flex items-center gap-2 rounded-full bg-sand py-1.5 pl-5 pr-1.5 text-sm font-medium text-night transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.02]"
-          >
-            {t.exploreEvents}
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-night text-sand transition-transform duration-300 group-hover:translate-x-0.5">
-              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M5 12h14m-6-6 6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </span>
-          </a>
-          <Link
-            href="/map"
-            className="rounded-full border border-line px-5 py-2.5 text-sm text-sand-dim transition-colors duration-200 hover:border-sand-faint hover:text-sand"
-          >
-            {t.viewMap}
-          </Link>
+    <>
+      {/* ── HERO — magazine cover-line over paper-cut El Paso ─────────────── */}
+      <section className="relative min-h-[82vh] overflow-hidden">
+        <ParallaxScene />
+        <div className="relative z-10 mx-auto max-w-6xl px-4 pt-14 md:px-6 md:pt-20">
+          {/* dateline */}
+          <p className="mb-5 inline-flex items-center gap-2.5 font-condensed text-[11px] font-semibold uppercase tracking-[0.3em] text-ink-soft">
+            <span className="h-2.5 w-2.5 bg-cosmo" />
+            El Paso · Juárez
+          </p>
+
+          {/* cover-line */}
+          <h1 className="max-w-3xl font-display text-[13vw] font-black italic leading-[0.9] tracking-tight text-ink sm:text-7xl md:text-8xl">
+            <span className="block">{t.heroTitle}</span>
+            <CutoutText
+              text={t.heroTitleAccent}
+              seed={42}
+              className="mt-3 text-[10vw] not-italic leading-none sm:text-6xl md:text-7xl"
+            />
+          </h1>
+
+          <p className="mt-6 max-w-md text-[15px] leading-relaxed text-ink-soft md:text-base">
+            {t.heroSub}
+          </p>
+
+          <div className="mt-8 flex flex-wrap items-center gap-3">
+            <a
+              href="#events"
+              className="group inline-flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
+            >
+              {t.exploreEvents}
+              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white transition-transform duration-300 group-hover:translate-x-0.5">
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                  <path d="M5 12h14m-6-6 6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+            </a>
+            <Link
+              href="/map"
+              className="rounded-full border-[1.5px] border-ink bg-card px-5 py-2.5 text-sm font-semibold text-ink transition-transform duration-200 hover:-translate-y-0.5"
+            >
+              {t.viewMap}
+            </Link>
+          </div>
         </div>
       </section>
 
-      {/* filters + grid */}
-      <section id="events" className="scroll-mt-24 pb-24">
-        <Suspense>
-          <Filters categories={categories} />
-        </Suspense>
-        <div className="mt-8">
-          <Suspense
-            key={JSON.stringify(sp)}
-            fallback={
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="aspect-[4/3] animate-pulse rounded-[1.75rem] bg-surface ring-1 ring-line/40"
-                  />
-                ))}
-              </div>
-            }
-          >
-            <EventGrid searchParams={sp} />
+      {/* ── EVENTS — side filter + magazine grid ─────────────────────────── */}
+      <section id="events" className="mx-auto max-w-6xl scroll-mt-24 px-4 pb-24 pt-6 md:px-6">
+        <div className="lg:grid lg:grid-cols-[264px_1fr] lg:gap-8">
+          <Suspense>
+            <Filters categories={categories} />
           </Suspense>
+          <div>
+            <Suspense
+              key={JSON.stringify(sp)}
+              fallback={
+                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                  {Array.from({ length: 6 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="aspect-[4/3] animate-pulse rounded-[1.5rem] border-[1.5px] border-line bg-card"
+                    />
+                  ))}
+                </div>
+              }
+            >
+              <EventGrid searchParams={sp} />
+            </Suspense>
+          </div>
         </div>
       </section>
-    </div>
+    </>
   );
 }

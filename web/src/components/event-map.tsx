@@ -28,10 +28,10 @@ function dot(count: number) {
     iconAnchor: [size / 2, size / 2],
     html: `<div style="
       width:${size}px;height:${size}px;border-radius:9999px;
-      background:#f4652e;color:#0e0c0a;
+      background:#e6117f;color:#ffffff;
       display:flex;align-items:center;justify-content:center;
-      font:600 11px system-ui;border:2px solid #0e0c0a;
-      box-shadow:0 0 0 2px rgba(244,101,46,.35), 0 4px 14px rgba(0,0,0,.5);
+      font:700 11px system-ui;border:2px solid #141118;
+      box-shadow:2px 2px 0 rgba(20,17,24,.9);
     ">${count > 1 ? count : ""}</div>`,
   });
 }
@@ -70,7 +70,7 @@ export function EventMap({ events }: { events: EventRow[] }) {
     >
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
-        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
       />
       {pins.map((pin) => (
         <Marker key={pin.key} position={[pin.lat, pin.lng]} icon={dot(pin.events.length)}>
@@ -87,7 +87,7 @@ export function EventMap({ events }: { events: EventRow[] }) {
                   <Link
                     key={e.id}
                     href={`/events/${e.id}`}
-                    style={{ fontSize: 12.5, lineHeight: 1.35, color: "#ff8a50" }}
+                    style={{ fontSize: 12.5, lineHeight: 1.35, color: "#e6117f", fontWeight: 600 }}
                   >
                     {e.start_time
                       ? new Date(e.start_time).toLocaleDateString(locale, {

@@ -21,62 +21,68 @@ export function EventCard({ event, index }: { event: EventRow; index: number }) 
   const when = fmtDate(event.start_time, dateLocale(lang));
   const venueName = event.venues?.name ?? event.venue;
   const city = event.venues?.city;
+  const category = event.categories?.[0];
 
   return (
     <motion.article
-      initial={{ opacity: 0, y: 14 }}
+      initial={{ opacity: 0, y: 16 }}
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, margin: "-40px" }}
-      transition={{ duration: 0.45, delay: Math.min(index % 9, 6) * 0.04, ease: [0.16, 1, 0.3, 1] }}
+      transition={{ duration: 0.45, delay: Math.min(index % 8, 6) * 0.04, ease: [0.16, 1, 0.3, 1] }}
       className="group h-full"
     >
       <Link
         href={`/events/${event.id}`}
-        className="flex h-full flex-col rounded-[1.75rem] bg-surface p-1.5 ring-1 ring-line/70 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5 hover:ring-sand-faint/50"
+        className="flex h-full flex-col rounded-[1.25rem] border-[1.5px] border-ink bg-card p-1.5 shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-1 hover:-rotate-[0.7deg] hover:shadow-[5px_6px_0_var(--color-cosmo)]"
       >
-        {/* image */}
-        <div className="relative aspect-[16/9] overflow-hidden rounded-[1.375rem] bg-surface-2">
+        {/* clipping photo */}
+        <div className="relative aspect-[16/10] overflow-hidden rounded-[0.85rem] bg-paper-2">
           <EventImage
             src={event.image_url}
             variant="card"
-            className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-[1.03]"
+            className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-[1.04]"
           />
           {when && (
-            <span className="absolute left-2.5 top-2.5 rounded-full bg-night/85 px-2.5 py-1 text-[11px] font-medium text-sand backdrop-blur-sm">
+            <span className="absolute left-2 top-2 rounded-full bg-ink px-2.5 py-1 font-condensed text-[11px] font-semibold uppercase tracking-[0.08em] text-paper">
               {when.day}
+            </span>
+          )}
+          {category && (
+            <span className="absolute bottom-2 left-2 rounded-full bg-cosmo px-2.5 py-1 font-condensed text-[10px] font-bold uppercase tracking-[0.14em] text-white shadow-[2px_2px_0_var(--color-ink)]">
+              {category}
             </span>
           )}
         </div>
 
         {/* body */}
-        <div className="flex flex-1 flex-col gap-1.5 px-3.5 pb-3.5 pt-3">
-          <h3 className="font-display text-[15px] font-semibold leading-snug text-sand [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden">
+        <div className="flex flex-1 flex-col gap-1.5 px-2.5 pb-2.5 pt-3">
+          <h3 className="font-display text-[17px] font-bold leading-[1.12] tracking-tight text-ink [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden">
             {event.title}
           </h3>
-          <p className="text-[13px] text-sand-dim">
-            {when ? `${when.time}` : t.dateTBA}
+          <p className="text-[13px] text-ink-soft">
+            {when ? when.time : t.dateTBA}
             {venueName ? (
               <>
                 {" · "}
-                <span className="text-sand-dim">{venueName}</span>
+                <span>{venueName}</span>
               </>
             ) : null}
           </p>
-          <div className="mt-auto flex items-center justify-between pt-1.5">
+          <div className="mt-auto flex items-center justify-between pt-2">
             {city ? (
-              <span className="rounded-full border border-line px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-sand-faint">
+              <span className="rounded-full border border-ink/25 px-2 py-0.5 font-condensed text-[10px] font-medium uppercase tracking-[0.14em] text-ink-faint">
                 {city}
               </span>
             ) : (
-              <span className="text-[10px] uppercase tracking-[0.14em] text-sand-faint">
+              <span className="font-condensed text-[10px] uppercase tracking-[0.14em] text-ink-faint">
                 {event.location ? "" : t.virtual}
               </span>
             )}
-            {event.categories?.[0] && (
-              <span className="text-[10px] uppercase tracking-[0.14em] text-sunset-soft">
-                {event.categories[0]}
-              </span>
-            )}
+            <span className="flex h-6 w-6 items-center justify-center rounded-full border border-ink/20 text-ink-faint transition-colors group-hover:border-cosmo group-hover:text-cosmo">
+              <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                <path d="M5 12h14m-6-6 6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
           </div>
         </div>
       </Link>

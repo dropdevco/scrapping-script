@@ -18,8 +18,9 @@ const CATEGORIES = [
 ];
 
 const inputCls =
-  "w-full rounded-[1.125rem] border border-line bg-surface-2 px-4 py-3 text-[15px] text-sand placeholder:text-sand-faint outline-none transition-colors duration-200 focus:border-sand-faint";
-const labelCls = "mb-1.5 block text-[11px] uppercase tracking-[0.16em] text-sand-dim";
+  "w-full rounded-[0.9rem] border-[1.5px] border-ink bg-card px-4 py-3 text-[15px] text-ink placeholder:text-ink-faint outline-none transition-shadow duration-200 focus:shadow-[3px_3px_0_var(--color-cosmo)]";
+const labelCls =
+  "mb-1.5 block font-condensed text-[11px] font-semibold uppercase tracking-[0.18em] text-cosmo";
 
 export function SubmitForm() {
   const { t } = useLang();
@@ -137,52 +138,51 @@ export function SubmitForm() {
 
   if (!user) {
     return (
-      <div className="rounded-[1.75rem] bg-surface p-1.5 ring-1 ring-line/70">
-        <div className="flex flex-col items-center gap-5 rounded-[1.375rem] bg-surface-2 px-6 py-14 text-center">
-          <p className="max-w-sm text-[15px] text-sand-dim">{t.signInToSubmit}</p>
-          <button
-            onClick={signIn}
-            className="group flex items-center gap-2 rounded-full bg-sand py-1.5 pl-5 pr-1.5 text-sm font-medium text-night transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.02]"
-          >
-            {t.continueWithGoogle}
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-night text-sand">
-              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M21.35 11.1h-9.17v2.73h6.51c-.33 3.81-3.5 5.44-6.5 5.44C8.36 19.27 5 16.25 5 12c0-4.1 3.2-7.27 7.2-7.27 3.09 0 4.9 1.97 4.9 1.97L19 4.72S16.56 2 12.1 2C6.42 2 2.03 6.8 2.03 12c0 5.05 4.13 10 10.22 10 5.35 0 9.25-3.67 9.25-9.09 0-1.15-.15-1.81-.15-1.81Z" />
-              </svg>
-            </span>
-          </button>
-        </div>
+      <div className="flex flex-col items-center gap-5 rounded-[1.5rem] border-[1.5px] border-ink bg-card px-6 py-14 text-center shadow-[4px_5px_0_var(--color-ink)]">
+        <p className="max-w-sm text-[15px] text-ink-soft">{t.signInToSubmit}</p>
+        <button
+          onClick={signIn}
+          className="group flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
+        >
+          {t.continueWithGoogle}
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white">
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M21.35 11.1h-9.17v2.73h6.51c-.33 3.81-3.5 5.44-6.5 5.44C8.36 19.27 5 16.25 5 12c0-4.1 3.2-7.27 7.2-7.27 3.09 0 4.9 1.97 4.9 1.97L19 4.72S16.56 2 12.1 2C6.42 2 2.03 6.8 2.03 12c0 5.05 4.13 10 10.22 10 5.35 0 9.25-3.67 9.25-9.09 0-1.15-.15-1.81-.15-1.81Z" />
+            </svg>
+          </span>
+        </button>
       </div>
     );
   }
 
   if (state === "done") {
     return (
-      <div className="rounded-[1.75rem] bg-surface p-1.5 ring-1 ring-line/70">
-        <div className="flex flex-col items-center gap-4 rounded-[1.375rem] bg-surface-2 px-6 py-14 text-center">
-          <span className="flex h-12 w-12 items-center justify-center rounded-full bg-sunset/15 text-sunset">
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path d="m5 13 4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </span>
-          <p className="text-[15px] text-sand">{t.submitted}</p>
-          <button
-            onClick={() => setState("idle")}
-            className="text-[13px] text-sand-dim underline decoration-line underline-offset-4 transition-colors hover:text-sand"
-          >
-            {t.submitAnother}
-          </button>
-        </div>
+      <div className="flex flex-col items-center gap-4 rounded-[1.5rem] border-[1.5px] border-ink bg-card px-6 py-14 text-center shadow-[4px_5px_0_var(--color-cosmo)]">
+        <span className="flex h-12 w-12 items-center justify-center rounded-full bg-cosmo text-white shadow-[2px_2px_0_var(--color-ink)]">
+          <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <path d="m5 13 4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+        <p className="text-[15px] text-ink">{t.submitted}</p>
+        <button
+          onClick={() => setState("idle")}
+          className="font-condensed text-[13px] font-medium uppercase tracking-[0.12em] text-ink-soft underline decoration-cosmo decoration-2 underline-offset-4 transition-colors hover:text-cosmo"
+        >
+          {t.submitAnother}
+        </button>
       </div>
     );
   }
 
   return (
-    <form onSubmit={onSubmit} className="rounded-[1.75rem] bg-surface p-1.5 ring-1 ring-line/70">
-      <div className="grid grid-cols-1 gap-5 rounded-[1.375rem] bg-surface-2/60 p-5 md:grid-cols-2 md:p-7">
+    <form
+      onSubmit={onSubmit}
+      className="rounded-[1.5rem] border-[1.5px] border-ink bg-card p-5 shadow-[4px_5px_0_var(--color-ink)] md:p-7"
+    >
+      <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
         <div className="md:col-span-2">
           <label className={labelCls} htmlFor="title">
-            {t.evTitle} <span className="text-sunset">*</span>
+            {t.evTitle} <span className="text-cosmo">*</span>
           </label>
           <input id="title" name="title" required maxLength={140} className={inputCls} />
         </div>
@@ -196,7 +196,7 @@ export function SubmitForm() {
 
         <div>
           <label className={labelCls} htmlFor="start">
-            {t.evStart} <span className="text-sunset">*</span>
+            {t.evStart} <span className="text-cosmo">*</span>
           </label>
           <input id="start" name="start" type="datetime-local" required className={inputCls} />
         </div>
@@ -209,7 +209,7 @@ export function SubmitForm() {
 
         <div>
           <label className={labelCls} htmlFor="city">
-            {t.evCity} <span className="text-sunset">*</span>
+            {t.evCity} <span className="text-cosmo">*</span>
           </label>
           <select id="city" name="city" className={inputCls} defaultValue="El Paso, TX">
             <option value="El Paso, TX">El Paso</option>
@@ -232,13 +232,13 @@ export function SubmitForm() {
 
         <div>
           <label className={labelCls} htmlFor="venue">
-            {t.evVenueName} <span className="text-sunset">*</span>
+            {t.evVenueName} <span className="text-cosmo">*</span>
           </label>
           <input id="venue" name="venue" maxLength={120} className={inputCls} />
         </div>
         <div>
           <label className={labelCls} htmlFor="address">
-            {t.evAddress} <span className="text-sunset">*</span>
+            {t.evAddress} <span className="text-cosmo">*</span>
           </label>
           <input id="address" name="address" maxLength={200} className={inputCls} />
         </div>
@@ -257,23 +257,25 @@ export function SubmitForm() {
         </div>
 
         {state === "error" && errMsg && (
-          <p className="text-[13px] text-rose-dusk md:col-span-2">{errMsg}</p>
+          <p className="text-[13px] font-medium text-pop-red md:col-span-2">{errMsg}</p>
         )}
 
         <div className="flex flex-wrap items-center gap-4 md:col-span-2">
           <button
             type="submit"
             disabled={state === "busy"}
-            className="group flex items-center gap-2 rounded-full bg-sand py-1.5 pl-5 pr-1.5 text-sm font-medium text-night transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:scale-[1.02] disabled:opacity-60"
+            className="group flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5 disabled:opacity-60"
           >
             {state === "busy" ? t.submitting : t.submit}
-            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-night text-sand transition-transform duration-300 group-hover:translate-x-0.5">
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white transition-transform duration-300 group-hover:translate-x-0.5">
               <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M5 12h14m-6-6 6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </span>
           </button>
-          <span className="text-[12px] text-sand-faint">{t.pendingNote}</span>
+          <span className="font-condensed text-[12px] uppercase tracking-[0.1em] text-ink-faint">
+            {t.pendingNote}
+          </span>
         </div>
       </div>
     </form>

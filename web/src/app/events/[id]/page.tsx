@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { fetchEvent } from "@/lib/events";
 import { dateLocale, getDict } from "@/lib/i18n";
 import type { Lang } from "@/lib/types";
-import { ImagePlaceholder } from "@/components/image-placeholder";
+import { EventImage } from "@/components/event-image";
 
 export const dynamic = "force-dynamic";
 
@@ -40,12 +40,7 @@ export default async function EventPage({ params }: { params: Promise<{ id: stri
       {/* hero card — double bezel */}
       <div className="rounded-[1.75rem] bg-surface p-1.5 ring-1 ring-line/70">
         <div className="relative aspect-[2/1] overflow-hidden rounded-[1.375rem] bg-surface-2">
-          {event.image_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={event.image_url} alt="" className="h-full w-full object-cover" />
-          ) : (
-            <ImagePlaceholder variant="hero" />
-          )}
+          <EventImage src={event.image_url} variant="hero" className="h-full w-full object-cover" />
         </div>
 
         <div className="px-5 pb-6 pt-5 md:px-7 md:pb-8">

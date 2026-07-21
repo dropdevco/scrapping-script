@@ -69,9 +69,6 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
     <div className="mx-auto max-w-6xl px-4 md:px-6">
       {/* hero */}
       <section className="pb-14 pt-16 md:pb-20 md:pt-28">
-        <p className="mb-4 inline-block rounded-full border border-line px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-sand-dim">
-          {t.tagline}
-        </p>
         <h1 className="max-w-3xl font-display text-5xl font-bold leading-[1.02] tracking-tight text-sand md:text-7xl">
           {t.heroTitle}{" "}
           <span className="bg-gradient-to-r from-sunset to-rose-dusk bg-clip-text text-transparent">

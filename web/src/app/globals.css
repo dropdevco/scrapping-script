@@ -32,16 +32,25 @@
   --ease-swift: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
+/*
+  The dot-texture background lives on <html>, not <body> — this is the true
+  "canvas" paint layer, which always sits beneath ALL content regardless of
+  z-index. If it were on <body> instead, body's own background paint (a
+  normal in-flow box, since body has no stacking context of its own) would
+  land ABOVE any position:fixed negative-z-index child — burying the
+  landmark parallax backdrop under the page background. See:
+  https://stackoverflow.com/q/7043333 (negative z-index hidden by parent bg).
+*/
 html {
-  background: var(--color-paper);
-  color-scheme: light;
-}
-
-body {
   background:
     radial-gradient(var(--color-line) 0.6px, transparent 0.6px) 0 0 / 22px 22px,
     var(--color-paper);
   background-attachment: fixed;
+  color-scheme: light;
+}
+
+body {
+  background: transparent;
   color: var(--color-ink);
   font-family: var(--font-sans), system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;

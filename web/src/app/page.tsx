@@ -8,6 +8,7 @@ import { Filters } from "@/components/filters";
 import { EventCard } from "@/components/event-card";
 import { CutoutText } from "@/components/cutout-text";
 import { SectionDivider } from "@/components/section-divider";
+import { HeroScratch } from "@/components/hero-scratch";
 
 export const dynamic = "force-dynamic";
 
@@ -80,24 +81,26 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
         whatever height the new one ends up being.
       */}
       <div id="hero-block">
-        {/* ── HERO — magazine cover-line, no landmark imagery here ────────── */}
-        <section className="relative min-h-[78vh]">
-          <div className="relative z-10 mx-auto max-w-6xl px-4 pt-16 md:px-6 md:pt-24">
-            {/* cover-line */}
-            <h1 className="max-w-3xl font-display text-[13vw] font-black italic leading-[0.9] tracking-tight text-ink sm:text-7xl md:text-8xl">
-              <span className="block">{t.heroTitle}</span>
-              <CutoutText
-                text={t.heroTitleAccent}
-                seed={42}
-                className="mt-3 text-[10vw] not-italic leading-none sm:text-6xl md:text-7xl"
-              />
+        {/* ── HERO — scratch-off scrapbook: scrape the beige to reveal the photo ── */}
+        <HeroScratch hint={t.scratchHint}>
+          <div className="mx-auto flex min-h-[74vh] max-w-4xl flex-col items-center justify-center px-4 py-24 text-center md:px-6">
+            {/* cover-line — centered "sticker" so it reads on beige AND the photo */}
+            <h1 className="font-display text-5xl font-black italic leading-[0.92] tracking-tight sm:text-7xl md:text-8xl">
+              <span className="hero-title-word block">{t.heroTitle}</span>
+              <span className="mt-4 flex justify-center">
+                <CutoutText
+                  text={t.heroTitleAccent}
+                  seed={42}
+                  className="text-4xl not-italic leading-none sm:text-6xl md:text-7xl"
+                />
+              </span>
             </h1>
 
-            <p className="mt-6 max-w-md text-[15px] leading-relaxed text-ink-soft md:text-base">
+            <p className="mt-7 max-w-md text-[15px] font-semibold leading-relaxed text-ink md:text-base [text-shadow:0_0_10px_var(--color-paper),0_1px_0_var(--color-paper)]">
               {t.heroSub}
             </p>
 
-            <div className="mt-8 flex flex-wrap items-center gap-3">
+            <div className="pointer-events-auto mt-8 flex flex-wrap items-center justify-center gap-3">
               <a
                 href="#events"
                 className="group inline-flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
@@ -111,13 +114,13 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
               </a>
               <Link
                 href="/map"
-                className="rounded-full border-[1.5px] border-ink bg-card px-5 py-2.5 text-sm font-semibold text-ink transition-transform duration-200 hover:-translate-y-0.5"
+                className="rounded-full border-[1.5px] border-ink bg-card px-5 py-2.5 text-sm font-semibold text-ink shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-200 hover:-translate-y-0.5"
               >
                 {t.viewMap}
               </Link>
             </div>
           </div>
-        </section>
+        </HeroScratch>
 
         <SectionDivider />
       </div>

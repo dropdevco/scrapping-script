@@ -61,6 +61,19 @@ body {
   color: #fff;
 }
 
+/* ── Scratch-to-reveal hero title ────────────────────────────────────────
+   The centered cover-line sits over a scratch-off surface that reveals a
+   photo underneath, so it must read on BOTH the beige surface and the photo.
+   Ink fill + a cream halo (paint-order stroke behind the fill) keeps it
+   legible on any background; a hard pop-pink offset shadow gives the pasted
+   "sticker" look. */
+.hero-title-word {
+  color: var(--color-ink);
+  -webkit-text-stroke: 2px var(--color-paper);
+  paint-order: stroke fill;
+  filter: drop-shadow(3px 4px 0 var(--color-cosmo));
+}
+
 /* ── Torn-photo edge masks ───────────────────────────────────────────────
    Applied to real landmark photographs in the parallax backdrop so they
    read as physically torn/cut magazine clippings rather than plain

@@ -7,6 +7,7 @@ import type { Lang } from "@/lib/types";
 import { Filters } from "@/components/filters";
 import { EventCard } from "@/components/event-card";
 import { CutoutText } from "@/components/cutout-text";
+import { SectionDivider } from "@/components/section-divider";
 
 export const dynamic = "force-dynamic";
 
@@ -71,44 +72,55 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
 
   return (
     <>
-      {/* ── HERO — magazine cover-line over the landmark collage ─────────── */}
-      <section className="relative min-h-[78vh]">
-        <div className="relative z-10 mx-auto max-w-6xl px-4 pt-16 md:px-6 md:pt-24">
-          {/* cover-line */}
-          <h1 className="max-w-3xl font-display text-[13vw] font-black italic leading-[0.9] tracking-tight text-ink sm:text-7xl md:text-8xl">
-            <span className="block">{t.heroTitle}</span>
-            <CutoutText
-              text={t.heroTitleAccent}
-              seed={42}
-              className="mt-3 text-[10vw] not-italic leading-none sm:text-6xl md:text-7xl"
-            />
-          </h1>
+      {/*
+        HERO BLOCK — id="hero-block" is measured by LandmarkBackdrop (in the
+        root layout) so the landmark photo collage never renders until the
+        user has scrolled past this whole block. This hero is a placeholder;
+        it'll be replaced, and the measurement adapts automatically to
+        whatever height the new one ends up being.
+      */}
+      <div id="hero-block">
+        {/* ── HERO — magazine cover-line, no landmark imagery here ────────── */}
+        <section className="relative min-h-[78vh]">
+          <div className="relative z-10 mx-auto max-w-6xl px-4 pt-16 md:px-6 md:pt-24">
+            {/* cover-line */}
+            <h1 className="max-w-3xl font-display text-[13vw] font-black italic leading-[0.9] tracking-tight text-ink sm:text-7xl md:text-8xl">
+              <span className="block">{t.heroTitle}</span>
+              <CutoutText
+                text={t.heroTitleAccent}
+                seed={42}
+                className="mt-3 text-[10vw] not-italic leading-none sm:text-6xl md:text-7xl"
+              />
+            </h1>
 
-          <p className="mt-6 max-w-md text-[15px] leading-relaxed text-ink-soft md:text-base">
-            {t.heroSub}
-          </p>
+            <p className="mt-6 max-w-md text-[15px] leading-relaxed text-ink-soft md:text-base">
+              {t.heroSub}
+            </p>
 
-          <div className="mt-8 flex flex-wrap items-center gap-3">
-            <a
-              href="#events"
-              className="group inline-flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
-            >
-              {t.exploreEvents}
-              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white transition-transform duration-300 group-hover:translate-x-0.5">
-                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-                  <path d="M5 12h14m-6-6 6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </span>
-            </a>
-            <Link
-              href="/map"
-              className="rounded-full border-[1.5px] border-ink bg-card px-5 py-2.5 text-sm font-semibold text-ink transition-transform duration-200 hover:-translate-y-0.5"
-            >
-              {t.viewMap}
-            </Link>
+            <div className="mt-8 flex flex-wrap items-center gap-3">
+              <a
+                href="#events"
+                className="group inline-flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
+              >
+                {t.exploreEvents}
+                <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white transition-transform duration-300 group-hover:translate-x-0.5">
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                    <path d="M5 12h14m-6-6 6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </span>
+              </a>
+              <Link
+                href="/map"
+                className="rounded-full border-[1.5px] border-ink bg-card px-5 py-2.5 text-sm font-semibold text-ink transition-transform duration-200 hover:-translate-y-0.5"
+              >
+                {t.viewMap}
+              </Link>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+
+        <SectionDivider />
+      </div>
 
       {/* ── EVENTS — side filter + magazine grid ─────────────────────────── */}
       <section id="events" className="mx-auto max-w-6xl scroll-mt-24 px-4 pb-24 pt-6 md:px-6">

@@ -11,10 +11,12 @@ import { ImagePlaceholder } from "./image-placeholder";
    that race; onError covers failures that happen after hydration. */
 export function EventImage({
   src,
+  alt = "",
   variant = "card",
   className,
 }: {
   src: string | null | undefined;
+  alt?: string;
   variant?: "card" | "hero";
   className?: string;
 }) {
@@ -37,7 +39,7 @@ export function EventImage({
     <img
       ref={imgRef}
       src={src}
-      alt=""
+      alt={alt}
       loading={variant === "hero" ? "eager" : "lazy"}
       onError={() => setFailed(true)}
       className={className}

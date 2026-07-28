@@ -39,6 +39,7 @@ export function EventCard({ event, index }: { event: EventRow; index: number }) 
         <div className="relative aspect-[16/10] overflow-hidden rounded-[0.85rem] bg-paper-2">
           <EventImage
             src={event.image_url}
+            alt={event.title}
             variant="card"
             className="h-full w-full object-cover transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] group-hover:scale-[1.04]"
           />

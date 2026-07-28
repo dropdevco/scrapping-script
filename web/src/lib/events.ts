@@ -41,7 +41,7 @@ function range(when: string | undefined): { from?: Date; to?: Date } {
   return { from: now }; // default: anything upcoming
 }
 
-export async function fetchEvents(filters: EventFilters, limit = 60): Promise<EventRow[]> {
+export async function fetchEvents(filters: EventFilters, limit = 500): Promise<EventRow[]> {
   const supabase = await supabaseServer();
   let q = supabase
     .from("events")
@@ -105,7 +105,7 @@ export async function fetchCategories(): Promise<string[]> {
     .map(([c]) => c);
 }
 
-export async function fetchMappableEvents(limit = 200): Promise<EventRow[]> {
+export async function fetchMappableEvents(limit = 500): Promise<EventRow[]> {
   const supabase = await supabaseServer();
   const { data, error } = await supabase
     .from("events")
@@ -116,5 +116,18 @@ export async function fetchMappableEvents(limit = 200): Promise<EventRow[]> {
     .order("start_time", { ascending: true })
     .limit(limit);
   if (error) throw new Error(`map query failed: ${error.message}`);
+  return (data ?? []) as EventRow[];
+}
+
+export async function fetchCrawlerEvents(limit = 500): Promise<EventRow[]> {
+  const supabase = await supabaseServer();
+  const { data, error } = await supabase
+    .from("events")
+    .select("*, venues(*)")
+    .eq("status", "approved")
+    .gte("start_time", new Date().toISOString())
+    .order("start_time", { ascending: true, nullsFirst: false })
+    .limit(limit);
+  if (error) throw new Error(`crawler events query failed: ${error.message}`);
   return (data ?? []) as EventRow[];
 }

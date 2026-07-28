@@ -55,12 +55,81 @@ async function EventGrid({ searchParams }: { searchParams: Search }) {
       <p className="mb-5 font-condensed text-[13px] font-medium uppercase tracking-[0.16em] text-ink-soft">
         {events.length} {events.length === 1 ? t.eventFound : t.eventsFound}
       </p>
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         {events.map((e, i) => (
           <EventCard key={e.id} event={e} index={i} />
         ))}
       </div>
     </>
+  );
+}
+
+const EVENT_COLLAGE = [
+  {
+    src: "/landmarks/elpasostar.jpg",
+    className: "left-[1%] top-8 w-44 rotate-[-6deg] sm:w-60 xl:left-[14%] xl:w-72",
+    shape: "torn-a",
+    aspect: "3 / 2",
+  },
+  {
+    src: "/landmarks/laequis.jpg",
+    className: "right-[3%] top-20 w-40 rotate-[5deg] sm:w-56 xl:right-[18%] xl:w-64",
+    shape: "torn-b",
+    aspect: "4 / 3",
+  },
+  {
+    src: "/landmarks/muraljuanga.jpg",
+    className: "left-[42%] top-40 hidden w-36 rotate-[-3deg] opacity-70 lg:block xl:w-48",
+    shape: "torn-a",
+    aspect: "4 / 5",
+  },
+  {
+    src: "/landmarks/downtownskyline.jpg",
+    className: "left-[4%] top-[34%] w-52 rotate-[3deg] sm:w-72 xl:left-[23%] xl:w-80",
+    shape: "torn-b",
+    aspect: "3 / 2",
+  },
+  {
+    src: "/landmarks/plazatheatre.jpg",
+    className: "right-[8%] top-[42%] w-36 rotate-[-5deg] sm:w-48 xl:right-[30%] xl:w-56",
+    shape: "torn-b",
+    aspect: "2 / 3",
+  },
+  {
+    src: "/landmarks/sanjacinto.jpg",
+    className: "left-[50%] top-[62%] hidden w-48 rotate-[4deg] opacity-65 lg:block xl:w-64",
+    shape: "torn-a",
+    aspect: "3 / 2",
+  },
+  {
+    src: "/landmarks/juarezcategral.jpg",
+    className: "right-[2%] top-[72%] w-48 rotate-[2deg] sm:w-64 xl:right-[13%] xl:w-80",
+    shape: "torn-a",
+    aspect: "16 / 9",
+  },
+  {
+    src: "/landmarks/benitojuarez.jpg",
+    className: "left-[12%] bottom-8 w-32 rotate-[-4deg] sm:w-44 xl:left-[36%] xl:w-52",
+    shape: "torn-b",
+    aspect: "4 / 5",
+  },
+];
+
+function EventSectionBackdrop() {
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-x-[-5vw] bottom-0 top-0 z-0 overflow-hidden">
+      {EVENT_COLLAGE.map((piece) => (
+        <div
+          key={`${piece.src}-${piece.className}`}
+          className={`paper-shadow-sm absolute opacity-55 mix-blend-multiply ${piece.className}`}
+        >
+          <div className={piece.shape} style={{ aspectRatio: piece.aspect }}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={piece.src} alt="" draggable={false} className="h-full w-full select-none object-cover" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -126,8 +195,12 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
       </div>
 
       {/* ── EVENTS — side filter + magazine grid ─────────────────────────── */}
-      <section id="events" className="mx-auto max-w-6xl scroll-mt-24 px-4 pb-24 pt-6 md:px-6">
-        <div className="lg:grid lg:grid-cols-[264px_1fr] lg:gap-8">
+      <section
+        id="events"
+        className="relative isolate mx-auto max-w-[96rem] scroll-mt-24 px-4 pb-24 pt-6 md:px-6 2xl:px-10"
+      >
+        <EventSectionBackdrop />
+        <div className="relative z-10 lg:grid lg:grid-cols-[300px_minmax(0,1fr)] lg:gap-8 xl:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)] 2xl:gap-10">
           <Suspense>
             <Filters categories={categories} />
           </Suspense>
@@ -135,8 +208,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
             <Suspense
               key={JSON.stringify(sp)}
               fallback={
-                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
-                  {Array.from({ length: 6 }).map((_, i) => (
+                <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                  {Array.from({ length: 8 }).map((_, i) => (
                     <div
                       key={i}
                       className="aspect-[4/3] animate-pulse rounded-[1.5rem] border-[1.5px] border-line bg-card"

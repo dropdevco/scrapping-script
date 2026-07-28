@@ -13,6 +13,7 @@ export type Venue = {
 export type EventRow = {
   id: string;
   source: string;
+  source_id: string | null;
   title: string;
   description: string | null;
   start_time: string | null;
@@ -25,6 +26,8 @@ export type EventRow = {
   status: string;
   venue_id: string | null;
   venues: Venue | null; // joined venue row
+  first_seen?: string | null;
+  last_seen?: string | null;
 };
 
 export type Lang = "en" | "es";

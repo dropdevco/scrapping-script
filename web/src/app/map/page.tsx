@@ -13,7 +13,7 @@ export default async function MapPage() {
   const events = await fetchMappableEvents().catch(() => []);
 
   return (
-    <div className="mx-auto max-w-6xl px-4 pb-24 pt-10 md:px-6 md:pt-14">
+    <div className="mx-auto max-w-[96rem] px-4 pb-24 pt-10 md:px-6 md:pt-14 2xl:px-10">
       <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="font-display text-4xl font-black italic tracking-tight text-ink md:text-5xl">

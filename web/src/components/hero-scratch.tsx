@@ -21,7 +21,47 @@ import { useEffect, useRef, useState } from "react";
 
 const PAPER = "#fbf6ec";
 const DOT = "#e0d5c0";
-const RADIUS = 46;
+const BRUSH_RADIUS = 61;
+const STAMP_SPACING = BRUSH_RADIUS * 0.38;
+
+function scratchStamp(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(Math.random() * Math.PI);
+
+  for (let i = 0; i < 11; i += 1) {
+    const angle = Math.random() * Math.PI * 2;
+    const distance = Math.random() * BRUSH_RADIUS * 0.42;
+    const rx = BRUSH_RADIUS * (0.36 + Math.random() * 0.32);
+    const ry = BRUSH_RADIUS * (0.18 + Math.random() * 0.26);
+    ctx.beginPath();
+    ctx.ellipse(
+      Math.cos(angle) * distance,
+      Math.sin(angle) * distance,
+      rx,
+      ry,
+      Math.random() * Math.PI,
+      0,
+      Math.PI * 2,
+    );
+    ctx.fill();
+  }
+
+  for (let i = 0; i < 18; i += 1) {
+    const angle = Math.random() * Math.PI * 2;
+    const inner = BRUSH_RADIUS * (0.28 + Math.random() * 0.54);
+    const length = BRUSH_RADIUS * (0.18 + Math.random() * 0.32);
+    const sx = Math.cos(angle) * inner;
+    const sy = Math.sin(angle) * inner;
+    ctx.lineWidth = 2 + Math.random() * 7;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(sx + Math.cos(angle) * length, sy + Math.sin(angle) * length);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
 
 export function HeroScratch({ hint, children }: { hint: string; children: React.ReactNode }) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -83,14 +123,24 @@ export function HeroScratch({ hint, children }: { hint: string; children: React.
       ctx.fillStyle = "rgba(0,0,0,1)";
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      ctx.lineWidth = RADIUS * 2;
-      ctx.beginPath();
-      ctx.moveTo(lastX ?? x, lastY ?? y);
-      ctx.lineTo(x, y);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(x, y, RADIUS, 0, Math.PI * 2);
-      ctx.fill();
+
+      const fromX = lastX ?? x;
+      const fromY = lastY ?? y;
+      const dx = x - fromX;
+      const dy = y - fromY;
+      const distance = Math.hypot(dx, dy);
+      const steps = Math.max(1, Math.ceil(distance / STAMP_SPACING));
+
+      for (let i = 0; i <= steps; i += 1) {
+        const t = i / steps;
+        const jitter = BRUSH_RADIUS * 0.08;
+        scratchStamp(
+          ctx,
+          fromX + dx * t + (Math.random() - 0.5) * jitter,
+          fromY + dy * t + (Math.random() - 0.5) * jitter,
+        );
+      }
+
       lastX = x;
       lastY = y;
       if (!firstDone) {

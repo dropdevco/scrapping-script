@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { cookies } from "next/headers";
+import Link from "next/link";
 import {
   Fraunces,
   Archivo,
@@ -14,6 +15,7 @@ import { LangProvider } from "@/components/lang-context";
 import { Header } from "@/components/header";
 import { LandmarkBackdrop } from "@/components/landmark-backdrop";
 import { getDict } from "@/lib/i18n";
+import { siteOrigin } from "@/lib/site";
 import "./globals.css";
 
 /* Editorial didone — headlines, hero cover-line, event titles. */
@@ -67,6 +69,7 @@ const fontVars = [
 ].join(" ");
 
 export const metadata: Metadata = {
+  metadataBase: new URL(siteOrigin()),
   title: "Chisme — El Paso + Juárez events",
   description:
     "Concerts, ballgames, markets, meetups — every event on both sides of the border, in one place.",
@@ -91,9 +94,15 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 <span className="font-display text-2xl font-black italic tracking-tight">
                   chisme<span className="text-cosmo">.</span>
                 </span>
-                <span className="max-w-md text-xs leading-relaxed text-paper/60">
-                  {t.footerNote}
-                </span>
+                <div className="flex max-w-md flex-col gap-2 text-xs leading-relaxed text-paper/60">
+                  <span>{t.footerNote}</span>
+                  <Link
+                    href="/crawler/events"
+                    className="font-condensed uppercase tracking-[0.14em] text-paper/50 transition-colors hover:text-cosmo"
+                  >
+                    Event index
+                  </Link>
+                </div>
               </div>
             </div>
           </footer>

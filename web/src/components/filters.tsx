@@ -83,20 +83,57 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function FilterPanel({ categories }: { categories: string[] }) {
-  const { t } = useLang();
-  const { q, city, when, selected, setParam, toggleCategory, clearAll, activeCount } =
-    useFilterState();
-
-  const [search, setSearch] = useState(q);
+function SearchField({
+  initialValue,
+  placeholder,
+  setParam,
+}: {
+  initialValue: string;
+  placeholder: string;
+  setParam: (key: string, value: string) => void;
+}) {
+  const [search, setSearch] = useState(initialValue);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => setSearch(q), [q]);
+
+  useEffect(
+    () => () => {
+      if (debounce.current) clearTimeout(debounce.current);
+    },
+    [],
+  );
 
   function onSearch(value: string) {
     setSearch(value);
     if (debounce.current) clearTimeout(debounce.current);
     debounce.current = setTimeout(() => setParam("q", value.trim()), 350);
   }
+
+  return (
+    <div className="relative">
+      <svg
+        className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-faint"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.75"
+      >
+        <circle cx="11" cy="11" r="7" />
+        <path d="m20 20-3-3" strokeLinecap="round" />
+      </svg>
+      <input
+        value={search}
+        onChange={(e) => onSearch(e.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-full border-[1.5px] border-ink bg-card py-2.5 pl-10 pr-4 text-[14px] text-ink placeholder:text-ink-faint outline-none transition-shadow duration-200 focus:shadow-[3px_3px_0_var(--color-cosmo)]"
+      />
+    </div>
+  );
+}
+
+function FilterPanel({ categories }: { categories: string[] }) {
+  const { t } = useLang();
+  const { q, city, when, selected, setParam, toggleCategory, clearAll, activeCount } =
+    useFilterState();
 
   const cities = [
     { key: "", label: t.allCities },
@@ -128,24 +165,7 @@ function FilterPanel({ categories }: { categories: string[] }) {
       </div>
 
       {/* search */}
-      <div className="relative">
-        <svg
-          className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-faint"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.75"
-        >
-          <circle cx="11" cy="11" r="7" />
-          <path d="m20 20-3-3" strokeLinecap="round" />
-        </svg>
-        <input
-          value={search}
-          onChange={(e) => onSearch(e.target.value)}
-          placeholder={t.searchPlaceholder}
-          className="w-full rounded-full border-[1.5px] border-ink bg-card py-2.5 pl-10 pr-4 text-[14px] text-ink placeholder:text-ink-faint outline-none transition-shadow duration-200 focus:shadow-[3px_3px_0_var(--color-cosmo)]"
-        />
-      </div>
+      <SearchField key={q} initialValue={q} placeholder={t.searchPlaceholder} setParam={setParam} />
 
       {/* cities */}
       <div>

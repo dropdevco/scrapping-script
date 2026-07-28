@@ -1,5 +1,6 @@
 import { supabaseServer } from "./supabase/server";
 import type { EventRow } from "./types";
+import { CANONICAL_CATEGORIES, expandedCategoryAliases } from "./categories";
 
 export type EventFilters = {
   q?: string;
@@ -63,7 +64,7 @@ function applyEventFilters<T>(query: T, filters: EventFilters): T {
 
   if (filters.categories && filters.categories.length > 0) {
     // OR semantics: event matches if it carries ANY selected category.
-    q = q.overlaps("categories", filters.categories);
+    q = q.overlaps("categories", expandedCategoryAliases(filters.categories));
   }
 
   return q as T;
@@ -95,23 +96,7 @@ export async function fetchEvent(id: string): Promise<EventRow | null> {
 }
 
 export async function fetchCategories(): Promise<string[]> {
-  const supabase = await supabaseServer();
-  const { data } = await supabase
-    .from("events")
-    .select("categories")
-    .eq("status", "approved")
-    .gte("start_time", new Date().toISOString())
-    .limit(500);
-  const counts = new Map<string, number>();
-  for (const row of data ?? []) {
-    for (const c of (row.categories as string[] | null) ?? []) {
-      counts.set(c, (counts.get(c) ?? 0) + 1);
-    }
-  }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 8)
-    .map(([c]) => c);
+  return CANONICAL_CATEGORIES;
 }
 
 /* Same filter contract as fetchEvents, additionally restricted to events whose

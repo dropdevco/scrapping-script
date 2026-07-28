@@ -5,17 +5,7 @@ import type { User } from "@supabase/supabase-js";
 import { supabaseBrowser } from "@/lib/supabase/client";
 import { sha1Hex, venueAddressHash } from "@/lib/hash";
 import { useLang } from "./lang-context";
-
-const CATEGORIES = [
-  "Music",
-  "Sports",
-  "Arts & Theatre",
-  "Family",
-  "Community",
-  "Food & Drink",
-  "Tech",
-  "Other",
-];
+import { CANONICAL_CATEGORIES } from "@/lib/categories";
 
 const inputCls =
   "w-full rounded-[0.9rem] border-[1.5px] border-ink bg-card px-4 py-3 text-[15px] text-ink placeholder:text-ink-faint outline-none transition-shadow duration-200 focus:shadow-[3px_3px_0_var(--color-cosmo)]";
@@ -222,7 +212,7 @@ export function SubmitForm() {
             {t.evCategory}
           </label>
           <select id="category" name="category" className={inputCls} defaultValue="Community">
-            {CATEGORIES.map((c) => (
+            {CANONICAL_CATEGORIES.map((c) => (
               <option key={c} value={c}>
                 {c}
               </option>

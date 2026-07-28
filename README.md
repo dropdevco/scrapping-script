@@ -24,6 +24,16 @@ provide light up more sources; the rest self-disable and the run continues.
 | Trends | Reddit, Hacker News, YouTube, Google Trends |
 | Web research | DuckDuckGo (keyless) + optional Tavily/Brave, with main-content extraction |
 
+The dedicated `events_directories` source covers the requested borderland calendars and venues:
+Visit El Paso, El Paso Live, City of El Paso events, El Paso County, Southwest University Park,
+UTEP Special Events, Lowbrow Palace, El Paso County Coliseum, RockHouse, best-effort AXS El Paso,
+Don Boleton, Boletia Juarez, guarded Ticketmaster Mexico Juarez search, Visita Juarez, Chihuahua
+culture/CCPN, Juarez municipal pages, and UACJ agenda. AXS is also included in the indexed
+open-web search supplement because direct AXS fetches can return an access-protection page. The
+`local_news_feeds` source checks common RSS/Atom feeds for
+El Paso Times, KVIA, KTSM, KFOX14/KDBC, El Paso Matters, El Heraldo de Juarez, El Diario de Juarez,
+Norte Digital, and Puente Libre.
+
 **Event addresses:** the `events.location` column holds the fullest address each source actually
 publishes — usually a complete street address (`"125 Pioneer Plaza, El Paso, TX 79901, US"`) for
 Ticketmaster and most web-sourced venues. When a source only publishes a city/region (or the event

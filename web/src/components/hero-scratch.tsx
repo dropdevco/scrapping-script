@@ -2,27 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 
-/*
-  Scratch-to-reveal "scrapbook" hero.
-
-  Layers (back → front):
-    1. the photo (/background.webp)
-    2. a <canvas> painted the page's beige paper (+ faint dot texture) — moving
-       the cursor erases it with destination-out compositing, revealing the
-       photo along the path; scrape it all and the whole image shows.
-    3. the headline / CTAs (passed as children), on top and always legible.
-
-  The pointer listener lives on the wrapper (not the canvas), and the content
-  layer is pointer-events-none (except interactive controls, which opt back in
-  via .pointer-events-auto), so you can scrape even "under" the headline while
-  buttons stay clickable. No-JS / reduced setups gracefully degrade to a plain
-  beige hero (the photo simply stays hidden).
-*/
-
 const PAPER = "#fbf6ec";
 const DOT = "#e0d5c0";
 const BRUSH_RADIUS = 61;
 const STAMP_SPACING = BRUSH_RADIUS * 0.38;
+const COMPLETE_THRESHOLD = 0.025;
 
 function scratchStamp(ctx: CanvasRenderingContext2D, x: number, y: number) {
   ctx.save();
@@ -63,10 +47,123 @@ function scratchStamp(ctx: CanvasRenderingContext2D, x: number, y: number) {
   ctx.restore();
 }
 
-export function HeroScratch({ hint, children }: { hint: string; children: React.ReactNode }) {
+export function HeroScratch({
+  hint,
+  loadingLabel,
+  children,
+}: {
+  hint: string;
+  loadingLabel: string;
+  children: React.ReactNode;
+}) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+  const fireworkRef = useRef<HTMLCanvasElement>(null);
+  const fireworkFrameRef = useRef(0);
+  const completeRef = useRef(false);
   const [scratched, setScratched] = useState(false);
+  const [imageReady, setImageReady] = useState(false);
+  const [surfaceReady, setSurfaceReady] = useState(false);
+  const [complete, setComplete] = useState(false);
+
+  const ready = imageReady && surfaceReady;
+
+  useEffect(() => {
+    const image = imageRef.current;
+    if (!image) return;
+    if (image.complete && image.naturalWidth > 0) {
+      if (typeof image.decode === "function") {
+        image.decode().catch(() => undefined).finally(() => setImageReady(true));
+      } else {
+        setImageReady(true);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    completeRef.current = complete;
+  }, [complete]);
+
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(fireworkFrameRef.current);
+    },
+    [],
+  );
+
+  function launchFireworks() {
+    const canvas = fireworkRef.current;
+    const wrap = wrapRef.current;
+    if (!canvas || !wrap || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const fireworkCtx = ctx;
+
+    const rect = wrap.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+    fireworkCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const colors = ["#e6117f", "#ffd21e", "#1e63ff", "#f5232b", "#fbf6ec"];
+    const particles: Array<{
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      life: number;
+      age: number;
+      color: string;
+      size: number;
+    }> = [];
+
+    for (let burst = 0; burst < 6; burst += 1) {
+      const cx = rect.width * (0.18 + Math.random() * 0.64);
+      const cy = rect.height * (0.18 + Math.random() * 0.42);
+      for (let i = 0; i < 42; i += 1) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 1.7 + Math.random() * 4.5;
+        particles.push({
+          x: cx,
+          y: cy,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 0.7,
+          life: 55 + Math.random() * 28,
+          age: 0,
+          color: colors[(Math.random() * colors.length) | 0],
+          size: 2 + Math.random() * 3.5,
+        });
+      }
+    }
+
+    function tick() {
+      fireworkCtx.clearRect(0, 0, rect.width, rect.height);
+      for (const p of particles) {
+        p.age += 1;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.045;
+        const alpha = Math.max(0, 1 - p.age / p.life);
+        fireworkCtx.globalAlpha = alpha;
+        fireworkCtx.fillStyle = p.color;
+        fireworkCtx.beginPath();
+        fireworkCtx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+        fireworkCtx.fill();
+      }
+      fireworkCtx.globalAlpha = 1;
+      if (particles.some((p) => p.age < p.life)) {
+        fireworkFrameRef.current = requestAnimationFrame(tick);
+      } else {
+        fireworkCtx.clearRect(0, 0, rect.width, rect.height);
+      }
+    }
+
+    cancelAnimationFrame(fireworkFrameRef.current);
+    fireworkFrameRef.current = requestAnimationFrame(tick);
+  }
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -74,55 +171,86 @@ export function HeroScratch({ hint, children }: { hint: string; children: React.
     if (!wrap || !canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    const scratchWrap = wrap;
+    const scratchCanvas = canvas;
+    const scratchCtx = ctx;
 
     function paintSurface(w: number, h: number) {
-      if (!ctx) return;
-      ctx.globalCompositeOperation = "source-over";
-      ctx.fillStyle = PAPER;
-      ctx.fillRect(0, 0, w, h);
-      // faint dot texture to match the rest of the paper page
-      ctx.fillStyle = DOT;
+      scratchCtx.globalCompositeOperation = "source-over";
+      scratchCtx.fillStyle = PAPER;
+      scratchCtx.fillRect(0, 0, w, h);
+      scratchCtx.fillStyle = DOT;
       for (let y = 0; y < h; y += 22) {
         for (let x = 0; x < w; x += 22) {
-          ctx.beginPath();
-          ctx.arc(x, y, 0.7, 0, Math.PI * 2);
-          ctx.fill();
+          scratchCtx.beginPath();
+          scratchCtx.arc(x, y, 0.7, 0, Math.PI * 2);
+          scratchCtx.fill();
         }
       }
     }
 
     let raf = 0;
     function resize() {
-      if (!wrap || !canvas || !ctx) return;
-      const r = wrap.getBoundingClientRect();
+      const r = scratchWrap.getBoundingClientRect();
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.round(r.width * dpr);
-      canvas.height = Math.round(r.height * dpr);
-      canvas.style.width = `${r.width}px`;
-      canvas.style.height = `${r.height}px`;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      paintSurface(r.width, r.height); // NB: repaint resets the scratch on resize
+      scratchCanvas.width = Math.round(r.width * dpr);
+      scratchCanvas.height = Math.round(r.height * dpr);
+      scratchCanvas.style.width = `${r.width}px`;
+      scratchCanvas.style.height = `${r.height}px`;
+      scratchCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (completeRef.current) {
+        scratchCtx.clearRect(0, 0, r.width, r.height);
+      } else {
+        paintSurface(r.width, r.height);
+      }
+      setSurfaceReady(true);
     }
     resize();
 
     let lastX: number | null = null;
     let lastY: number | null = null;
     let firstDone = false;
+    let coverageCheck = 0;
+
+    function checkCompletion() {
+      coverageCheck = 0;
+      if (completeRef.current) return;
+      const { width, height } = scratchCanvas;
+      if (!width || !height) return;
+      const data = scratchCtx.getImageData(0, 0, width, height).data;
+      let covered = 0;
+      let total = 0;
+      const stride = 16;
+      for (let i = 3; i < data.length; i += 4 * stride) {
+        total += 1;
+        if (data[i] > 12) covered += 1;
+      }
+      if (total > 0 && covered / total <= COMPLETE_THRESHOLD) {
+        completeRef.current = true;
+        scratchCtx.clearRect(0, 0, width, height);
+        setComplete(true);
+        launchFireworks();
+      }
+    }
+
+    function scheduleCompletionCheck() {
+      if (coverageCheck || completeRef.current) return;
+      coverageCheck = window.setTimeout(checkCompletion, 220);
+    }
 
     function scratchAt(clientX: number, clientY: number) {
-      if (!canvas || !ctx) return;
-      const r = canvas.getBoundingClientRect();
+      const r = scratchCanvas.getBoundingClientRect();
       const x = clientX - r.left;
       const y = clientY - r.top;
       if (x < 0 || y < 0 || x > r.width || y > r.height) {
         lastX = lastY = null;
         return;
       }
-      ctx.globalCompositeOperation = "destination-out";
-      ctx.strokeStyle = "rgba(0,0,0,1)";
-      ctx.fillStyle = "rgba(0,0,0,1)";
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
+      scratchCtx.globalCompositeOperation = "destination-out";
+      scratchCtx.strokeStyle = "rgba(0,0,0,1)";
+      scratchCtx.fillStyle = "rgba(0,0,0,1)";
+      scratchCtx.lineCap = "round";
+      scratchCtx.lineJoin = "round";
 
       const fromX = lastX ?? x;
       const fromY = lastY ?? y;
@@ -135,7 +263,7 @@ export function HeroScratch({ hint, children }: { hint: string; children: React.
         const t = i / steps;
         const jitter = BRUSH_RADIUS * 0.08;
         scratchStamp(
-          ctx,
+          scratchCtx,
           fromX + dx * t + (Math.random() - 0.5) * jitter,
           fromY + dy * t + (Math.random() - 0.5) * jitter,
         );
@@ -147,6 +275,7 @@ export function HeroScratch({ hint, children }: { hint: string; children: React.
         firstDone = true;
         setScratched(true);
       }
+      scheduleCompletionCheck();
     }
 
     function onMove(e: PointerEvent) {
@@ -160,40 +289,61 @@ export function HeroScratch({ hint, children }: { hint: string; children: React.
       raf = requestAnimationFrame(resize);
     }
 
-    wrap.addEventListener("pointermove", onMove);
-    wrap.addEventListener("pointerleave", onLeave);
+    scratchWrap.addEventListener("pointermove", onMove);
+    scratchWrap.addEventListener("pointerleave", onLeave);
     window.addEventListener("resize", onResize);
 
     return () => {
       cancelAnimationFrame(raf);
-      wrap.removeEventListener("pointermove", onMove);
-      wrap.removeEventListener("pointerleave", onLeave);
+      if (coverageCheck) window.clearTimeout(coverageCheck);
+      scratchWrap.removeEventListener("pointermove", onMove);
+      scratchWrap.removeEventListener("pointerleave", onLeave);
       window.removeEventListener("resize", onResize);
     };
   }, []);
 
   return (
     <div ref={wrapRef} className="relative isolate overflow-hidden">
-      {/* revealed photo */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
+        ref={imageRef}
         src="/background.webp"
         alt=""
         aria-hidden
-        className="absolute inset-0 -z-10 h-full w-full select-none object-cover"
+        onLoad={() => setImageReady(true)}
+        className={`absolute inset-0 -z-10 h-full w-full select-none object-cover transition-opacity duration-500 ${
+          ready ? "opacity-100" : "opacity-0"
+        }`}
         draggable={false}
       />
-      {/* scratch surface — no touch-action override, so mobile can still scroll past */}
+
       <canvas ref={canvasRef} aria-hidden className="absolute inset-0 z-0" />
+      <canvas ref={fireworkRef} aria-hidden className="pointer-events-none absolute inset-0 z-30" />
 
-      {/* content */}
-      <div className="pointer-events-none relative z-10">{children}</div>
+      <div
+        className={`pointer-events-none relative z-10 transition-opacity duration-500 ${
+          ready ? "visible opacity-100" : "invisible opacity-0"
+        }`}
+      >
+        {children}
+      </div>
 
-      {/* discoverability hint — fades out after the first scrape */}
+      <div
+        aria-hidden={ready}
+        className={`pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-paper transition-opacity duration-500 ${
+          ready ? "opacity-0" : "opacity-100"
+        }`}
+      >
+        <span className="flex items-center gap-3 rounded-full border-[1.5px] border-ink bg-card px-5 py-2 font-condensed text-[11px] font-semibold uppercase tracking-[0.16em] text-ink shadow-[3px_3px_0_var(--color-ink)]">
+          <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-cosmo" />
+          {loadingLabel}
+        </span>
+      </div>
+
       <div
         aria-hidden
         className={`pointer-events-none absolute inset-x-0 bottom-6 z-20 flex justify-center transition-opacity duration-500 ${
-          scratched ? "opacity-0" : "opacity-100"
+          scratched || !ready ? "opacity-0" : "opacity-100"
         }`}
       >
         <span className="flex items-center gap-2 rounded-full border-[1.5px] border-ink bg-card/90 px-4 py-1.5 font-condensed text-[11px] font-semibold uppercase tracking-[0.16em] text-ink shadow-[2px_2px_0_var(--color-ink)] backdrop-blur-sm">

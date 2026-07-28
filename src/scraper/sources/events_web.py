@@ -3,7 +3,8 @@
 Strategy: fetch city listing pages on platforms that were empirically verified to serve
 crawlable ``schema.org/Event`` JSON-LD to a plain (non-JS) scraper AND allow it in
 robots.txt — Eventbrite, Ticketmaster's public pages, and Meetup — then extract the
-structured events. A ``site:``-scoped DuckDuckGo search adds extra detail pages. Sites that
+structured events. A ``site:``-scoped DuckDuckGo search adds extra detail pages, including AXS
+pages that are indexed but often bot-protected on direct fetch. Sites that
 bot-block or render events only via JavaScript (allevents.in, 10times, bandsintown, seatgeek,
 dice.fm…) are intentionally skipped because a keyless fetch gets nothing from them.
 
@@ -176,6 +177,35 @@ def _iter_jsonld_events(html: str):
         except (json.JSONDecodeError, ValueError):
             continue
         yield from _walk_for_events(data)
+
+
+def _page_event_from_jsonld(node: Any, url: str, source: str) -> Optional[Event]:
+    if not isinstance(node, dict):
+        return None
+    venue, location = _as_location(node.get("location"))
+    lat, lng = _as_geo(node.get("location"))
+    image = node.get("image")
+    if isinstance(image, list):
+        image = image[0] if image else None
+    if isinstance(image, dict):
+        image = image.get("url")
+    title = str(node.get("name") or "Untitled event")
+    return Event(
+        source=source,
+        source_id=node.get("@id") if isinstance(node.get("@id"), str) else None,
+        title=title,
+        description=node.get("description"),
+        start_time=_dt(node.get("startDate")),
+        end_time=_dt(node.get("endDate")),
+        venue=venue,
+        location=location,
+        lat=lat,
+        lng=lng,
+        url=(node.get("url") if isinstance(node.get("url"), str) else None) or url,
+        image_url=clean_image_url(image),
+        categories=[guess_category(title)],
+        raw=node,
+    )
 
 
 def _in_window(event: Event, start: Optional[date], end: Optional[date]) -> bool:
@@ -390,7 +420,7 @@ class EventsWebSource(Source):
         # Supplement with a site:-scoped search for extra detail pages on the good domains.
         topic = params.query or "events"
         loc = params.location or ""
-        search_q = f"{topic} {loc} (site:eventbrite.com OR site:meetup.com)".strip()
+        search_q = f"{topic} {loc} (site:eventbrite.com OR site:meetup.com OR site:axs.com)".strip()
         urls += await asyncio.to_thread(_ddg_site_search, search_q, 6)
 
         urls = list(dict.fromkeys(u for u in urls if u))[:_MAX_PAGES]
@@ -430,33 +460,9 @@ class EventsWebSource(Source):
 
         out: list[Event] = []
         for node in _iter_jsonld_events(html):
-            if not isinstance(node, dict):
-                continue
-            venue, location = _as_location(node.get("location"))
-            lat, lng = _as_geo(node.get("location"))
-            image = node.get("image")
-            if isinstance(image, list):
-                image = image[0] if image else None
-            if isinstance(image, dict):
-                image = image.get("url")
-            title = str(node.get("name") or "Untitled event")
-            out.append(
-                Event(
-                    source=self.name,
-                    title=title,
-                    description=node.get("description"),
-                    start_time=_dt(node.get("startDate")),
-                    end_time=_dt(node.get("endDate")),
-                    venue=venue,
-                    location=location,
-                    lat=lat,
-                    lng=lng,
-                    url=(node.get("url") if isinstance(node.get("url"), str) else None) or url,
-                    image_url=clean_image_url(image),
-                    categories=[guess_category(title)],
-                    raw=node,
-                )
-            )
+            event = _page_event_from_jsonld(node, url, source=self.name)
+            if event is not None:
+                out.append(event)
         return out
 
 

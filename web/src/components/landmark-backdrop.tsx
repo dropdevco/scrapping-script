@@ -102,19 +102,23 @@ function buildLayout({ lanes, perLane, width }: Layout): { pieces: Placed[]; wid
   return { pieces, width };
 }
 
-/* Height (px) of #hero-block, kept live via ResizeObserver so this adapts
-   automatically when the hero is redesigned. */
-function useGateOffset(): number {
-  const [offset, setOffset] = useState(0);
+/* Document-space top (px) of #events, kept live via ResizeObserver so this
+   adapts automatically when the hero is redesigned. */
+function useEventsGateOffset(): number | null {
+  const [offset, setOffset] = useState<number | null>(null);
 
   useEffect(() => {
-    const el = document.getElementById("hero-block");
+    const el = document.getElementById("events");
     if (!el) return;
-    const update = () => setOffset(el.getBoundingClientRect().height);
+    const update = () => setOffset(el.getBoundingClientRect().top + window.scrollY);
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
-    return () => ro.disconnect();
+    window.addEventListener("resize", update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", update);
+    };
   }, []);
 
   return offset;
@@ -193,10 +197,10 @@ function Cutout({
 export function LandmarkBackdrop() {
   const { scrollY } = useScroll();
   const reduce = useReducedMotion() ?? false;
-  const gateOffset = useGateOffset();
+  const gateOffset = useEventsGateOffset();
   const layout = useLayout();
 
-  if (!layout) return null;
+  if (!layout || gateOffset === null) return null;
   const { pieces, width } = buildLayout(layout);
 
   return (

@@ -265,6 +265,31 @@ For web changes:
 
 Newest entry first. One entry per session/meaningful change; trivial fixes get one line.
 
+### 2026-07-28 (session 7)
+
+- Added `src/scraper/sources/events_directories.py`, a keyless source for the requested El Paso/Juarez primary calendars, venue pages, and ticketing portals: Visit El Paso, El Paso Live, City of El Paso events, El Paso County, Southwest University Park, UTEP Special Events, Lowbrow Palace, El Paso County Coliseum, RockHouse, best-effort AXS El Paso, Don Boleton, Boletia Juarez, guarded Ticketmaster Mexico Juarez search, Visita Juarez, Chihuahua culture/CCPN, Juarez municipal pages, and UACJ agenda.
+- Added `src/scraper/sources/local_news_feeds.py`, a keyless RSS/Atom web-research source for El Paso Times, KVIA, KTSM, KFOX14/KDBC, El Paso Matters, El Heraldo de Juarez, El Diario de Juarez, Norte Digital, and Puente Libre. News remains live `Document` output because the current database schema persists events/trends, not web documents.
+- Expanded `src/scraper/core/categorize.py` with Spanish event/category terms so Juarez sources normalize into the same internal category taxonomy as El Paso sources.
+- Registered both new sources in `src/scraper/sources/registry.py`. Focused live checks returned El Paso events from Visit El Paso/City of El Paso, Juarez events from Visita Juarez plus a Ciudad Juarez Ticketmaster venue, and El Paso news from local RSS feeds. AXS direct fetches returned an access-protection page during verification, so AXS is also included in the indexed `events_web` site-search supplement. `www.cultura.chihuahua.gob.mx` and `rockhousebarandgrill.com` had DNS failures during verification but were isolated by source-level error handling.
+
+### 2026-07-28 (session 6)
+
+- Added `web/src/lib/categories.ts` as the canonical category taxonomy. Filters and the submit form now use stable main buckets instead of exposing raw source-specific category strings.
+- Category filtering now expands a selected canonical bucket into known raw aliases before the Supabase `overlaps("categories", ...)` query, so list and map filters still match scraped events carrying source-specific labels.
+- Event cards now display canonical category badges. When category filters are active, cards prefer showing the selected matching category; the `+` chip still exposes the detailed raw category list.
+
+### 2026-07-28 (session 5)
+
+- Changed `LandmarkBackdrop` to gate on the measured document-space top of `#events` and return `null` until that measurement exists, preventing parallax landmark images from briefly rendering over the hero or divider before the events section.
+- Added a matching magenta `+` chip to event cards when an event has multiple categories; the visible primary category remains unchanged and the chip exposes the full category list via title text.
+
+### 2026-07-28 (session 4)
+
+- Removed the hard 8-category cap from `fetchCategories()` so every upcoming approved event category appears in the shared homepage/map filter rail, ordered by frequency and then name.
+- Added a hero loading veil that stays up until `/background.webp` is loaded/decoded and the scratch canvas cover has been painted, preventing the revealed image from flashing before hydration.
+- Added scratch completion detection: when the remaining cover is effectively gone, the canvas clears and a short fireworks animation plays over the hero.
+- Reworked `LangToggle` to keep the existing cookie + `router.refresh()` effect pattern while adding an immediate sliding-pill active state and avoiding redundant same-language refreshes.
+
 ### 2026-07-28 (session 3)
 
 - Fixed the map showing only ~40 of 117 events. Root cause was missing data, not a bad query: `events` has no coordinates of its own, and 80 of 153 venues had null `lat/lng`, so their events could never be mapped.

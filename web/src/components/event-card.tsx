@@ -1,11 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { motion } from "motion/react";
 import type { EventRow } from "@/lib/types";
 import { useLang } from "./lang-context";
 import { dateLocale } from "@/lib/i18n";
 import { EventImage } from "./event-image";
+import { canonicalCategoriesForEvent } from "@/lib/categories";
 
 function fmtDate(iso: string | null, locale: string): { day: string; time: string } | null {
   if (!iso) return null;
@@ -18,10 +20,18 @@ function fmtDate(iso: string | null, locale: string): { day: string; time: strin
 
 export function EventCard({ event, index }: { event: EventRow; index: number }) {
   const { lang, t } = useLang();
+  const searchParams = useSearchParams();
   const when = fmtDate(event.start_time, dateLocale(lang));
   const venueName = event.venues?.name ?? event.venue;
   const city = event.venues?.city;
-  const category = event.categories?.[0];
+  const rawCategories = event.categories?.filter(Boolean) ?? [];
+  const categories = canonicalCategoriesForEvent(rawCategories);
+  const selectedCategories = (searchParams.get("categories") ?? "")
+    .split(",")
+    .map((category) => category.trim())
+    .filter(Boolean);
+  const category = selectedCategories.find((selected) => categories.includes(selected)) ?? categories[0];
+  const hasMoreCategories = rawCategories.length > 1 || categories.length > 1;
 
   return (
     <motion.article
@@ -49,9 +59,20 @@ export function EventCard({ event, index }: { event: EventRow; index: number }) 
             </span>
           )}
           {category && (
-            <span className="absolute bottom-2 left-2 rounded-full bg-cosmo px-2.5 py-1 font-condensed text-[10px] font-bold uppercase tracking-[0.14em] text-white shadow-[2px_2px_0_var(--color-ink)]">
-              {category}
-            </span>
+            <div className="absolute bottom-2 left-2 flex max-w-[calc(100%-1rem)] items-center gap-1.5">
+              <span className="min-w-0 truncate rounded-full bg-cosmo px-2.5 py-1 font-condensed text-[10px] font-bold uppercase tracking-[0.14em] text-white shadow-[2px_2px_0_var(--color-ink)]">
+                {category}
+              </span>
+              {hasMoreCategories && (
+                <span
+                  aria-label={`${rawCategories.length} categories`}
+                  title={rawCategories.join(", ")}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-[1.5px] border-ink bg-cosmo font-condensed text-[15px] font-bold leading-none text-white shadow-[2px_2px_0_var(--color-ink)]"
+                >
+                  +
+                </span>
+              )}
+            </div>
           )}
         </div>
 

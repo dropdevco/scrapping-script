@@ -19,11 +19,13 @@ log = logging.getLogger("scraper.registry")
 _MODULES = [
     "events_ticketmaster",
     "events_web",
+    "events_directories",
     "trends_reddit",
     "trends_hackernews",
     "trends_google",
     "trends_youtube",
     "web_search",
+    "local_news_feeds",
     "social_instagram",
     "social_threads",
 ]

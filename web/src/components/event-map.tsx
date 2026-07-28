@@ -41,12 +41,15 @@ export function EventMap({ events }: { events: EventRow[] }) {
   const locale = dateLocale(lang);
 
   const pins = useMemo(() => {
-    const byVenue = new Map<string, VenuePin>();
+    // Grouped by COORDINATE, not venue id: the same physical place often has
+    // several venue rows (different address spellings hash to different
+    // venues), which would otherwise stack identical pins on one spot.
+    const bySpot = new Map<string, VenuePin>();
     for (const e of events) {
       const v = e.venues;
       if (!v || v.lat == null || v.lng == null) continue;
-      const key = v.id;
-      const pin = byVenue.get(key) ?? {
+      const key = `${v.lat.toFixed(5)},${v.lng.toFixed(5)}`;
+      const pin = bySpot.get(key) ?? {
         key,
         lat: v.lat,
         lng: v.lng,
@@ -55,9 +58,9 @@ export function EventMap({ events }: { events: EventRow[] }) {
         events: [],
       };
       pin.events.push(e);
-      byVenue.set(key, pin);
+      bySpot.set(key, pin);
     }
-    return [...byVenue.values()];
+    return [...bySpot.values()];
   }, [events]);
 
   return (

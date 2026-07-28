@@ -7,59 +7,100 @@ import { motion, useScroll, useTransform, useReducedMotion, type MotionValue } f
   Site-wide cut-paper collage of real El Paso + Juárez landmark photographs
   (/public/landmarks). A single FIXED viewport layer behind all content
   (negative z, pointer-events-none) so it never affects document flow or the
-  Suspense boundaries.
+  Suspense boundaries. This is the ONLY landmark collage on the site — section
+  -scoped copies were removed because two layers sharing the same photos always
+  collided with each other.
 
-  Nothing renders until the user has scrolled past #hero-block (measured
-  live via ResizeObserver, so this keeps working correctly once the hero is
-  redesigned) — the hero is a clean placeholder for now, no imagery behind
-  it. Past that point, cutouts are spread across ~4 screens of virtual
-  space; each drifts upward at its own rate on scroll (parallax), so
-  landmarks keep entering from below as you go down the page. Frozen under
-  prefers-reduced-motion.
+  Nothing renders until the user has scrolled past #hero-block (measured live
+  via ResizeObserver, so this keeps working when the hero is redesigned) — no
+  imagery behind the hero, ever.
 
-  Photos are real images (not drawn), cropped into a fixed aspect box and
-  clipped with a jagged "torn edge" mask so they read as physically torn
-  magazine clippings pasted onto the paper, rather than plain rectangles.
+  ── Guaranteed non-overlap ─────────────────────────────────────────────────
+  Pieces are laid out in vertical LANES spanning the full viewport width, not
+  pinned to the left/right corners. Two rules make collisions impossible at any
+  scroll position:
+
+    1. Pieces in DIFFERENT lanes never overlap horizontally. Each lane is
+       100/lanes vw wide and every piece is sized so that its rotated bounding
+       width (w·cosθ + h·sinθ, θ ≤ MAX_ROTATE) stays well inside its lane.
+    2. Pieces in the SAME lane share ONE parallax factor, so their vertical
+       spacing is constant forever — scrolling can never close the gap. That
+       gap (STRIDE) is larger than the tallest rotated piece can ever be.
+
+  Because lanes are horizontally disjoint, each lane is free to parallax at its
+  own rate without any cross-lane collision risk.
+
+  Photos are cropped into a fixed aspect box and clipped with a jagged "torn
+  edge" mask so they read as physically torn magazine clippings pasted onto
+  the paper rather than plain rectangles.
 */
-
-type Piece = {
-  src: string;
-  top: string; // % of viewport height, offset past the hero-block gate
-  left?: string;
-  right?: string;
-  w: string; // responsive width classes
-  aspect: string; // "3/2" etc
-  torn: "a" | "b";
-  rotate?: number;
-  factor: number; // parallax speed (px moved per px scrolled, once past the gate)
-  opacity?: number;
-};
 
 const L = "/landmarks";
 
-const PIECES: Piece[] = [
-  // El Paso: the Star on the Mountain
-  { src: `${L}/elpasostar.jpg`, top: "2%", right: "-2%", w: "w-60 sm:w-80 lg:w-[26rem]", aspect: "3/2", torn: "a", rotate: -3, factor: 0.28, opacity: 0.92 },
-  // Juárez: La Equis
-  { src: `${L}/laequis.jpg`, top: "20%", left: "-3%", w: "w-40 sm:w-56 lg:w-72", aspect: "4/3", torn: "b", rotate: 5, factor: 0.55, opacity: 0.88 },
-  // Juárez: mural
-  { src: `${L}/muraljuanga.jpg`, top: "42%", right: "1%", w: "w-32 sm:w-44 lg:w-56", aspect: "4/5", torn: "a", rotate: -4, factor: 0.42, opacity: 0.88 },
-  // El Paso: downtown at night
-  { src: `${L}/downtownskyline.jpg`, top: "64%", left: "-4%", w: "w-48 sm:w-64 lg:w-80", aspect: "3/2", torn: "b", rotate: 2, factor: 0.5, opacity: 0.85 },
-  // Juárez: Cathedral
-  { src: `${L}/juarezcategral.jpg`, top: "88%", right: "-3%", w: "w-48 sm:w-64 lg:w-80", aspect: "16/9", torn: "a", rotate: -2, factor: 0.45, opacity: 0.85 },
-  // El Paso: Plaza Theatre
-  { src: `${L}/plazatheatre.jpg`, top: "112%", left: "2%", w: "w-32 sm:w-40 lg:w-52", aspect: "2/3", torn: "b", rotate: 4, factor: 0.6, opacity: 0.85 },
-  // Juárez: Monumento a Benito Juárez
-  { src: `${L}/benitojuarez.jpg`, top: "136%", right: "4%", w: "w-28 sm:w-36 lg:w-48", aspect: "4/5", torn: "a", rotate: -5, factor: 0.5, opacity: 0.82 },
-  // El Paso: San Jacinto Plaza
-  { src: `${L}/sanjacinto.jpg`, top: "160%", left: "-2%", w: "w-40 sm:w-52 lg:w-64", aspect: "3/2", torn: "b", rotate: 3, factor: 0.42, opacity: 0.82 },
-  // El Paso: downtown (second angle)
-  { src: `${L}/elpasodowntown.jpg`, top: "184%", right: "-2%", w: "w-44 sm:w-56 lg:w-72", aspect: "3/2", torn: "a", rotate: -2, factor: 0.48, opacity: 0.8 },
-  // repeats, smaller, for continuity further down the page
-  { src: `${L}/elpasostar.jpg`, top: "208%", left: "-3%", w: "w-32 sm:w-40 lg:w-52", aspect: "3/2", torn: "b", rotate: 2, factor: 0.5, opacity: 0.75 },
-  { src: `${L}/laequis.jpg`, top: "232%", right: "2%", w: "w-24 sm:w-32 lg:w-40", aspect: "4/3", torn: "a", rotate: -4, factor: 0.55, opacity: 0.75 },
+/* Photo pool, drawn round-robin so neighbouring lanes never repeat an image. */
+const PHOTOS: { src: string; aspect: string; torn: "a" | "b" }[] = [
+  { src: `${L}/elpasostar.jpg`, aspect: "3/2", torn: "a" },
+  { src: `${L}/laequis.jpg`, aspect: "4/3", torn: "b" },
+  { src: `${L}/muraljuanga.jpg`, aspect: "4/5", torn: "a" },
+  { src: `${L}/downtownskyline.jpg`, aspect: "3/2", torn: "b" },
+  { src: `${L}/juarezcategral.jpg`, aspect: "16/9", torn: "a" },
+  { src: `${L}/plazatheatre.jpg`, aspect: "2/3", torn: "b" },
+  { src: `${L}/benitojuarez.jpg`, aspect: "4/5", torn: "a" },
+  { src: `${L}/sanjacinto.jpg`, aspect: "3/2", torn: "b" },
+  { src: `${L}/elpasodowntown.jpg`, aspect: "3/2", torn: "a" },
 ];
+
+/* Layout per breakpoint. `width` is deliberately narrower than the lane
+   (100/lanes vw) — see rule 1 above. The rem cap keeps pieces sane on ultra
+   -wide displays and, because it only ever shrinks them, preserves the
+   guarantee. Widening any of these without widening the lane would break
+   non-overlap. */
+type Layout = { lanes: number; perLane: number; width: string };
+
+const MOBILE: Layout = { lanes: 2, perLane: 3, width: "min(34vw, 15rem)" }; // lane 50vw
+const TABLET: Layout = { lanes: 3, perLane: 2, width: "min(23vw, 17rem)" }; // lane 33.3vw
+const DESKTOP: Layout = { lanes: 4, perLane: 2, width: "min(17vw, 20rem)" }; // lane 25vw
+
+const MAX_ROTATE = 4; // degrees — factored into the lane-width budget
+const BASE_TOP = 6; // vh, first piece in lane 0
+const STRIDE = 95; // vh between pieces WITHIN a lane (> tallest rotated piece)
+const STAGGER = 19; // vh each lane is pushed down, so lanes read diagonally
+
+type Placed = {
+  src: string;
+  aspect: string;
+  torn: "a" | "b";
+  leftPct: number;
+  top: number; // vh past the hero gate
+  rotate: number;
+  factor: number;
+  opacity: number;
+};
+
+function buildLayout({ lanes, perLane, width }: Layout): { pieces: Placed[]; width: string } {
+  const pieces: Placed[] = [];
+
+  for (let lane = 0; lane < lanes; lane++) {
+    // One factor per lane — this is what freezes intra-lane spacing.
+    const factor = 0.3 + lane * 0.09;
+
+    for (let j = 0; j < perLane; j++) {
+      const n = lane * perLane + j;
+      const photo = PHOTOS[n % PHOTOS.length];
+      pieces.push({
+        ...photo,
+        leftPct: ((lane + 0.5) / lanes) * 100,
+        top: BASE_TOP + j * STRIDE + lane * STAGGER,
+        // Alternating tilt, always within the rotation budget.
+        rotate: (n % 2 === 0 ? 1 : -1) * (2 + (n % 3)) * (MAX_ROTATE / 4),
+        factor,
+        opacity: 0.88 - j * 0.05,
+      });
+    }
+  }
+
+  return { pieces, width };
+}
 
 /* Height (px) of #hero-block, kept live via ResizeObserver so this adapts
    automatically when the hero is redesigned. */
@@ -79,13 +120,37 @@ function useGateOffset(): number {
   return offset;
 }
 
+/* Returns null until mounted so the server and first client render agree
+   (this layer is decorative and aria-hidden, so rendering nothing initially
+   costs nothing). */
+function useLayout(): Layout | null {
+  const [layout, setLayout] = useState<Layout | null>(null);
+
+  useEffect(() => {
+    const sm = window.matchMedia("(min-width: 640px)");
+    const lg = window.matchMedia("(min-width: 1024px)");
+    const pick = () => setLayout(lg.matches ? DESKTOP : sm.matches ? TABLET : MOBILE);
+    pick();
+    sm.addEventListener("change", pick);
+    lg.addEventListener("change", pick);
+    return () => {
+      sm.removeEventListener("change", pick);
+      lg.removeEventListener("change", pick);
+    };
+  }, []);
+
+  return layout;
+}
+
 function Cutout({
   piece,
+  width,
   scrollY,
   gateOffset,
   reduce,
 }: {
-  piece: Piece;
+  piece: Placed;
+  width: string;
   scrollY: MotionValue<number>;
   gateOffset: number;
   reduce: boolean;
@@ -103,13 +168,14 @@ function Cutout({
       aria-hidden
       style={{
         y,
-        top: `calc(${piece.top} + ${gateOffset}px)`,
-        left: piece.left,
-        right: piece.right,
-        rotate: piece.rotate ?? 0,
-        opacity: piece.opacity ?? 0.8,
+        x: "-50%", // centre the piece on its lane
+        top: `calc(${piece.top}vh + ${gateOffset}px)`,
+        left: `${piece.leftPct}%`,
+        width,
+        rotate: piece.rotate,
+        opacity: piece.opacity,
       }}
-      className={`paper-shadow absolute ${piece.w}`}
+      className="paper-shadow absolute"
     >
       <div className={piece.torn === "a" ? "torn-a" : "torn-b"} style={{ aspectRatio: piece.aspect }}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -128,11 +194,22 @@ export function LandmarkBackdrop() {
   const { scrollY } = useScroll();
   const reduce = useReducedMotion() ?? false;
   const gateOffset = useGateOffset();
+  const layout = useLayout();
+
+  if (!layout) return null;
+  const { pieces, width } = buildLayout(layout);
 
   return (
     <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
-      {PIECES.map((p, i) => (
-        <Cutout key={i} piece={p} scrollY={scrollY} gateOffset={gateOffset} reduce={reduce} />
+      {pieces.map((p, i) => (
+        <Cutout
+          key={`${p.src}-${i}`}
+          piece={p}
+          width={width}
+          scrollY={scrollY}
+          gateOffset={gateOffset}
+          reduce={reduce}
+        />
       ))}
     </div>
   );

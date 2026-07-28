@@ -235,6 +235,7 @@ class Storage:
                     by_hash[row["address_hash"]] = row
             if not by_hash:
                 return {}
+            self._resolve_coords(by_hash)
             self._client.table("venues").upsert(
                 list(by_hash.values()), on_conflict="address_hash"
             ).execute()
@@ -248,6 +249,68 @@ class Storage:
         except Exception as exc:  # noqa: BLE001 - venues must never break the event upsert
             log.error("venue upsert failed, storing events without venue_id: %s", exc)
             return {}
+
+    def _resolve_coords(self, by_hash: dict[str, dict[str, Any]]) -> None:
+        """Fill in venue lat/lng in place, before the upsert.
+
+        Two jobs, both mattering for the map:
+
+        1. PRESERVE. The upsert writes every column it is given, so a row carrying
+           lat=None would blank out coordinates the venue already has in the DB
+           (from a previous geocode or backfill). Existing values are copied into
+           the outgoing row so a coordinate-less source can never erase them.
+        2. GEOCODE. Venues still without coordinates are geocoded from their
+           address, capped per run because Nominatim allows ~1 req/s. Anything
+           left over is picked up next run or by `scraper.backfill_geocode`.
+
+        Best-effort throughout: any failure leaves coordinates as-is.
+        """
+        missing = [h for h, r in by_hash.items() if r.get("lat") is None or r.get("lng") is None]
+        if not missing:
+            return
+
+        # 1. preserve whatever the DB already knows
+        try:
+            res = (
+                self._client.table("venues")
+                .select("address_hash,lat,lng")
+                .in_("address_hash", missing)
+                .execute()
+            )
+            for r in res.data or []:
+                if r.get("lat") is not None and r.get("lng") is not None:
+                    row = by_hash.get(r["address_hash"])
+                    if row is not None:
+                        row["lat"], row["lng"] = r["lat"], r["lng"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read existing venue coords (skipping preserve): %s", exc)
+
+        if not settings.geocode_venues:
+            return
+
+        # 2. geocode what's still blank
+        todo = [h for h in missing if by_hash[h].get("lat") is None][: settings.geocode_max_per_run]
+        if not todo:
+            return
+
+        try:
+            from .geocode import geocode
+        except Exception as exc:  # noqa: BLE001
+            log.warning("geocoding unavailable: %s", exc)
+            return
+
+        found = 0
+        for h in todo:
+            row = by_hash[h]
+            try:
+                hit = geocode(row.get("address"), row.get("name"))
+            except Exception as exc:  # noqa: BLE001 - never break a scrape over a map pin
+                log.warning("geocode failed for %r: %s", row.get("name"), exc)
+                continue
+            if hit:
+                row["lat"], row["lng"] = hit
+                found += 1
+        log.info("geocoded %d/%d new venue(s)", found, len(todo))
 
     def _upsert(self, table: str, rows: list[dict[str, Any]], on_conflict: str) -> None:
         try:

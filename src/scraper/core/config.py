@@ -30,6 +30,13 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
 def _csv(name: str) -> set[str]:
     raw = os.getenv(name, "") or ""
     return {p.strip() for p in raw.split(",") if p.strip()}
@@ -52,6 +59,13 @@ class Settings:
         )
         self.enabled_sources = _csv("ENABLED_SOURCES")    # allowlist (empty = all)
         self.disabled_sources = _csv("DISABLED_SOURCES")  # denylist
+
+        # Venue geocoding. Sources rarely supply coordinates, and a venue without
+        # them can never appear on the map, so new venues are geocoded at upsert
+        # time. Nominatim is ~1 req/s, hence the per-run cap; leftovers are picked
+        # up by the next run (or `python -m scraper.backfill_geocode`).
+        self.geocode_venues = _bool("GEOCODE_VENUES", True)
+        self.geocode_max_per_run = _int("GEOCODE_MAX_PER_RUN", 25)
 
         # Events
         self.ticketmaster_api_key = _clean(os.getenv("TICKETMASTER_API_KEY"))

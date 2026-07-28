@@ -64,75 +64,6 @@ async function EventGrid({ searchParams }: { searchParams: Search }) {
   );
 }
 
-const EVENT_COLLAGE = [
-  {
-    src: "/landmarks/elpasostar.jpg",
-    className: "left-[1%] top-8 w-44 rotate-[-6deg] sm:w-60 xl:left-[14%] xl:w-72",
-    shape: "torn-a",
-    aspect: "3 / 2",
-  },
-  {
-    src: "/landmarks/laequis.jpg",
-    className: "right-[3%] top-20 w-40 rotate-[5deg] sm:w-56 xl:right-[18%] xl:w-64",
-    shape: "torn-b",
-    aspect: "4 / 3",
-  },
-  {
-    src: "/landmarks/muraljuanga.jpg",
-    className: "left-[42%] top-40 hidden w-36 rotate-[-3deg] opacity-70 lg:block xl:w-48",
-    shape: "torn-a",
-    aspect: "4 / 5",
-  },
-  {
-    src: "/landmarks/downtownskyline.jpg",
-    className: "left-[4%] top-[34%] w-52 rotate-[3deg] sm:w-72 xl:left-[23%] xl:w-80",
-    shape: "torn-b",
-    aspect: "3 / 2",
-  },
-  {
-    src: "/landmarks/plazatheatre.jpg",
-    className: "right-[8%] top-[42%] w-36 rotate-[-5deg] sm:w-48 xl:right-[30%] xl:w-56",
-    shape: "torn-b",
-    aspect: "2 / 3",
-  },
-  {
-    src: "/landmarks/sanjacinto.jpg",
-    className: "left-[50%] top-[62%] hidden w-48 rotate-[4deg] opacity-65 lg:block xl:w-64",
-    shape: "torn-a",
-    aspect: "3 / 2",
-  },
-  {
-    src: "/landmarks/juarezcategral.jpg",
-    className: "right-[2%] top-[72%] w-48 rotate-[2deg] sm:w-64 xl:right-[13%] xl:w-80",
-    shape: "torn-a",
-    aspect: "16 / 9",
-  },
-  {
-    src: "/landmarks/benitojuarez.jpg",
-    className: "left-[12%] bottom-8 w-32 rotate-[-4deg] sm:w-44 xl:left-[36%] xl:w-52",
-    shape: "torn-b",
-    aspect: "4 / 5",
-  },
-];
-
-function EventSectionBackdrop() {
-  return (
-    <div aria-hidden className="pointer-events-none absolute inset-x-[-5vw] bottom-0 top-0 z-0 overflow-hidden">
-      {EVENT_COLLAGE.map((piece) => (
-        <div
-          key={`${piece.src}-${piece.className}`}
-          className={`paper-shadow-sm absolute opacity-55 mix-blend-multiply ${piece.className}`}
-        >
-          <div className={piece.shape} style={{ aspectRatio: piece.aspect }}>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={piece.src} alt="" draggable={false} className="h-full w-full select-none object-cover" />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export default async function Home({ searchParams }: { searchParams: Promise<Search> }) {
   const sp = await searchParams;
   const cookieStore = await cookies();
@@ -165,11 +96,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
               </span>
             </h1>
 
-            <p className="mt-7 max-w-md text-[15px] font-semibold leading-relaxed text-ink md:text-base [text-shadow:0_0_10px_var(--color-paper),0_1px_0_var(--color-paper)]">
-              {t.heroSub}
-            </p>
-
-            <div className="pointer-events-auto mt-8 flex flex-wrap items-center justify-center gap-3">
+            <div className="pointer-events-auto mt-10 flex flex-wrap items-center justify-center gap-3">
               <a
                 href="#events"
                 className="group inline-flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
@@ -197,10 +124,13 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
       {/* ── EVENTS — side filter + magazine grid ─────────────────────────── */}
       <section
         id="events"
-        className="relative isolate mx-auto max-w-[96rem] scroll-mt-24 px-4 pb-24 pt-6 md:px-6 2xl:px-10"
+        className="relative mx-auto max-w-[96rem] scroll-mt-24 px-4 pb-24 pt-6 md:px-6 2xl:px-10"
       >
-        <EventSectionBackdrop />
-        <div className="relative z-10 lg:grid lg:grid-cols-[300px_minmax(0,1fr)] lg:gap-8 xl:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)] 2xl:gap-10">
+        {/* No section-scoped collage here: the site-wide <LandmarkBackdrop />
+            (root layout) is the single source of landmark imagery. Two
+            independent collages sharing the same photos always ended up
+            overlapping each other. */}
+        <div className="lg:grid lg:grid-cols-[300px_minmax(0,1fr)] lg:gap-8 xl:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)] 2xl:gap-10">
           <Suspense>
             <Filters categories={categories} />
           </Suspense>

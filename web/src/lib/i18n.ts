@@ -6,8 +6,6 @@ const dict = {
     tagline: "What's happening across El Paso + Juárez",
     heroTitle: "The borderland,",
     heroTitleAccent: "live.",
-    heroSub:
-      "Concerts, ballgames, markets, meetups — every event on both sides of the border, in one place.",
     exploreEvents: "Explore events",
     viewMap: "Map view",
     scratchHint: "Move your cursor to reveal",
@@ -76,8 +74,6 @@ const dict = {
     tagline: "Lo que está pasando en El Paso + Juárez",
     heroTitle: "La frontera,",
     heroTitleAccent: "en vivo.",
-    heroSub:
-      "Conciertos, partidos, mercados, encuentros — todos los eventos de ambos lados de la frontera, en un solo lugar.",
     exploreEvents: "Explorar eventos",
     viewMap: "Ver mapa",
     scratchHint: "Mueve el cursor para revelar",

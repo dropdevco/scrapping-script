@@ -41,14 +41,11 @@ function range(when: string | undefined): { from?: Date; to?: Date } {
   return { from: now }; // default: anything upcoming
 }
 
-export async function fetchEvents(filters: EventFilters, limit = 500): Promise<EventRow[]> {
-  const supabase = await supabaseServer();
-  let q = supabase
-    .from("events")
-    .select("*, venues(*)")
-    .eq("status", "approved")
-    .order("start_time", { ascending: true, nullsFirst: false })
-    .limit(limit);
+/* Shared by the list view and the map view so both surfaces interpret the
+   same URL params identically. `q` is a PostgrestFilterBuilder. */
+function applyEventFilters<T>(query: T, filters: EventFilters): T {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let q = query as any;
 
   const { from, to } = range(filters.when);
   if (from) q = q.gte("start_time", from.toISOString());
@@ -69,7 +66,19 @@ export async function fetchEvents(filters: EventFilters, limit = 500): Promise<E
     q = q.overlaps("categories", filters.categories);
   }
 
-  const { data, error } = await q;
+  return q as T;
+}
+
+export async function fetchEvents(filters: EventFilters, limit = 500): Promise<EventRow[]> {
+  const supabase = await supabaseServer();
+  const base = supabase
+    .from("events")
+    .select("*, venues(*)")
+    .eq("status", "approved")
+    .order("start_time", { ascending: true, nullsFirst: false })
+    .limit(limit);
+
+  const { data, error } = await applyEventFilters(base, filters);
   if (error) throw new Error(`events query failed: ${error.message}`);
   return (data ?? []) as EventRow[];
 }
@@ -105,16 +114,23 @@ export async function fetchCategories(): Promise<string[]> {
     .map(([c]) => c);
 }
 
-export async function fetchMappableEvents(limit = 500): Promise<EventRow[]> {
+/* Same filter contract as fetchEvents, additionally restricted to events whose
+   venue carries coordinates. `range()` inside applyEventFilters supplies the
+   upcoming-only lower bound, so no separate start_time clause is needed. */
+export async function fetchMappableEvents(
+  filters: EventFilters = {},
+  limit = 500,
+): Promise<EventRow[]> {
   const supabase = await supabaseServer();
-  const { data, error } = await supabase
+  const base = supabase
     .from("events")
     .select("*, venues!inner(*)")
     .eq("status", "approved")
-    .gte("start_time", new Date().toISOString())
     .not("venues.lat", "is", null)
     .order("start_time", { ascending: true })
     .limit(limit);
+
+  const { data, error } = await applyEventFilters(base, filters);
   if (error) throw new Error(`map query failed: ${error.message}`);
   return (data ?? []) as EventRow[];
 }

@@ -49,6 +49,10 @@ class Settings:
         # Storage
         self.supabase_url = _clean(os.getenv("SUPABASE_URL"))
         self.supabase_key = _clean(os.getenv("SUPABASE_KEY"))
+        # Direct Postgres connection (pooler recommended) — NOT used by the scraper
+        # at runtime (that goes through the REST API above); only for admin/migration
+        # scripts that need raw SQL, e.g. `python -m scraper.apply_migration`.
+        self.supabase_db_url = _clean(os.getenv("SUPABASE_DB_URL"))
 
         # Behavior
         self.freshness_hours = _int("FRESHNESS_HOURS", 24)

@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import L from "leaflet";
 import type { EventRow } from "@/lib/types";
 import { useLang } from "./lang-context";
@@ -34,6 +34,76 @@ function dot(count: number) {
       box-shadow:2px 2px 0 rgba(20,17,24,.9);
     ">${count > 1 ? count : ""}</div>`,
   });
+}
+
+/*
+  Two-finger panning on touch devices.
+
+  The map card is 62dvh — on a phone that is most of the screen, so with
+  Leaflet's default one-finger dragging there is almost nowhere left to put
+  your thumb to scroll the PAGE: every swipe gets eaten by the map and the
+  user is stranded. Same reasoning as the hero scratch surface.
+
+  So on coarse pointers we hand one-finger swipes back to the page and only
+  enable dragging while two fingers are down (the convention embedded maps
+  use), with a brief hint the first time a one-finger drag is swallowed.
+  Pointer devices are untouched — dragging stays on for the mouse.
+*/
+function TouchPanGate({ hint }: { hint: string }) {
+  const map = useMap();
+  const [nudge, setNudge] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!window.matchMedia("(pointer: coarse)").matches) return;
+    const container = map.getContainer();
+    map.dragging.disable();
+
+    const showNudge = () => {
+      setNudge(true);
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setNudge(false), 1600);
+    };
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length >= 2) {
+        map.dragging.enable();
+        setNudge(false);
+        if (timer.current) clearTimeout(timer.current);
+      } else {
+        map.dragging.disable();
+      }
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length < 2) showNudge();
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      if (e.touches.length < 2) map.dragging.disable();
+    };
+
+    container.addEventListener("touchstart", onTouchStart, { passive: true });
+    container.addEventListener("touchmove", onTouchMove, { passive: true });
+    container.addEventListener("touchend", onTouchEnd, { passive: true });
+    container.addEventListener("touchcancel", onTouchEnd, { passive: true });
+
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+      container.removeEventListener("touchstart", onTouchStart);
+      container.removeEventListener("touchmove", onTouchMove);
+      container.removeEventListener("touchend", onTouchEnd);
+      container.removeEventListener("touchcancel", onTouchEnd);
+    };
+  }, [map]);
+
+  if (!nudge) return null;
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-[500] flex items-center justify-center">
+      <span className="rounded-full border-[1.5px] border-ink bg-card/95 px-4 py-2 font-condensed text-[12px] font-semibold uppercase tracking-[0.14em] text-ink shadow-[2px_2px_0_var(--color-ink)]">
+        {hint}
+      </span>
+    </div>
+  );
 }
 
 export function EventMap({ events }: { events: EventRow[] }) {
@@ -71,6 +141,7 @@ export function EventMap({ events }: { events: EventRow[] }) {
       className="h-full w-full"
       attributionControl
     >
+      <TouchPanGate hint={t.mapTwoFinger} />
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
         url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"

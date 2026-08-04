@@ -6,7 +6,7 @@ from datetime import datetime, time
 from typing import Any, Optional
 
 from ..core.address import format_address
-from ..core.categorize import guess_category
+from ..core.categorize import guess_categories
 from ..core.config import settings
 from ..core.http import HttpClient
 from ..core.media import clean_image_url
@@ -106,7 +106,7 @@ class TicketmasterSource(Source):
             lng=_coord(coords.get("longitude")),
             url=e.get("url"),
             image_url=image_url,
-            categories=categories or [guess_category(title)],
+            categories=categories or guess_categories(title),
             raw=e,
         )
 

@@ -51,7 +51,7 @@ export function LangToggle() {
           onClick={() => {
             if (l !== activeLang) setPendingLang(l);
           }}
-          className={`relative z-10 rounded-full px-2.5 py-1 uppercase transition-[color,transform] duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] ${
+          className={`relative z-10 rounded-full px-2.5 py-1.5 uppercase transition-[color,transform] duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] md:py-1 ${
             activeLang === l ? "text-paper" : "text-ink-soft hover:text-ink hover:-translate-y-px"
           }`}
           aria-pressed={activeLang === l}

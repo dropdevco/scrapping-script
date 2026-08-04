@@ -67,6 +67,16 @@ export default async function EventPage({ params }: EventPageProps) {
   const sourceName = event.source.replace("events_", "");
   const canonicalUrl = eventUrl(event.id);
   const ticketUrl = absoluteUrl(event.url);
+  // Multiple ticketing sites can carry the same real event — show one button
+  // per source instead of just the first one found. Older rows scraped before
+  // ticket_links existed (or user submissions) fall back to the single `url`.
+  const ticketLinks = (event.ticket_links ?? []).filter((l) => l.url);
+  const links =
+    ticketLinks.length > 0
+      ? ticketLinks
+      : ticketUrl
+        ? [{ source: event.source, label: t.getTickets, url: ticketUrl }]
+        : [];
   const jsonLd = buildEventJsonLd(event);
   const mapsUrl = address
     ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`
@@ -85,7 +95,9 @@ export default async function EventPage({ params }: EventPageProps) {
 
       <Link
         href="/"
-        className="mb-8 inline-flex items-center gap-1.5 font-condensed text-[12px] font-medium uppercase tracking-[0.14em] text-ink-soft transition-colors hover:text-cosmo"
+        /* -ml-1 px-1 py-2 keeps the text optically flush while giving the link
+           a finger-sized hit area (the 12px caps alone were ~18px tall). */
+        className="-ml-1 mb-6 inline-flex items-center gap-1.5 px-1 py-2 font-condensed text-[12px] font-medium uppercase tracking-[0.14em] text-ink-soft transition-colors hover:text-cosmo"
       >
         <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M19 12H5m6 6-6-6 6-6" strokeLinecap="round" strokeLinejoin="round" />
@@ -240,22 +252,33 @@ export default async function EventPage({ params }: EventPageProps) {
       )}
 
       <footer className="mt-10">
-        <div className="flex flex-wrap items-center gap-4">
-          {ticketUrl && (
+        <div className="flex flex-wrap items-center gap-3">
+          {links.map((link, i) => (
             <a
-              href={ticketUrl}
+              key={link.url}
+              href={link.url}
               target="_blank"
               rel="noreferrer"
-              className="group inline-flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
+              className={
+                i === 0
+                  ? "group inline-flex items-center gap-2 rounded-full bg-cosmo py-1.5 pl-5 pr-1.5 text-sm font-semibold text-white shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
+                  : "group inline-flex items-center gap-2 rounded-full border-[1.5px] border-ink bg-card py-1.5 pl-5 pr-1.5 text-sm font-semibold text-ink shadow-[3px_3px_0_var(--color-ink)] transition-transform duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] hover:-translate-y-0.5"
+              }
             >
-              {t.getTickets}
-              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white transition-transform duration-300 group-hover:translate-x-0.5">
+              {links.length > 1 ? link.label : t.getTickets}
+              <span
+                className={
+                  i === 0
+                    ? "flex h-8 w-8 items-center justify-center rounded-full bg-ink text-white transition-transform duration-300 group-hover:translate-x-0.5"
+                    : "flex h-8 w-8 items-center justify-center rounded-full bg-ink/90 text-white transition-transform duration-300 group-hover:translate-x-0.5"
+                }
+              >
                 <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M7 17 17 7m0 0H8m9 0v9" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </span>
             </a>
-          )}
+          ))}
           <span className="font-condensed text-[11px] uppercase tracking-[0.14em] text-ink-faint">
             {t.source}: {sourceName}
           </span>
@@ -270,13 +293,20 @@ export default async function EventPage({ params }: EventPageProps) {
               </a>
             </dd>
           </div>
-          {ticketUrl && (
+          {links.length > 0 && (
             <div>
-              <dt className="font-condensed uppercase tracking-[0.14em] text-ink-faint">Ticket link</dt>
-              <dd>
-                <a href={ticketUrl} className="break-all underline decoration-cosmo decoration-2 underline-offset-4">
-                  {ticketUrl}
-                </a>
+              <dt className="font-condensed uppercase tracking-[0.14em] text-ink-faint">
+                {links.length > 1 ? "Ticket links" : "Ticket link"}
+              </dt>
+              <dd className="space-y-1">
+                {links.map((link) => (
+                  <div key={link.url}>
+                    {links.length > 1 && <span className="text-ink-faint">{link.label}: </span>}
+                    <a href={link.url} className="break-all underline decoration-cosmo decoration-2 underline-offset-4">
+                      {link.url}
+                    </a>
+                  </div>
+                ))}
               </dd>
             </div>
           )}

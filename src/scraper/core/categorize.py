@@ -9,6 +9,11 @@ share one filterable taxonomy.
 Title only, deliberately - event descriptions are marketing boilerplate
 ("Lunch and Learn", "grab a coffee and network") whose incidental words
 produce false positives; titles describe what the event actually is.
+
+An event can genuinely belong to more than one bucket ("Beer & Live Music
+Festival" is Food & Drink, Music, AND Festivals), and the storage layer keeps
+``categories`` as an array end to end, so ``guess_categories`` returns every
+matching bucket rather than stopping at the first hit.
 """
 
 from __future__ import annotations
@@ -16,7 +21,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-# Ordered: first matching bucket wins.
+# Every bucket whose pattern matches is included (order only affects the
+# fallback single-category path below).
 _RULES: list[tuple[str, re.Pattern[str]]] = [
     (
         "Food & Drink",
@@ -72,7 +78,10 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
             r"\b(hackathon|developer|coding|startup|mcp server|ai|artificial intelligence|"
             r"machine learning|web3|cybersecurity|tech meetup|software|data science|"
             r"python|javascript|aws|scrum|agile|tecnolog[ií]a|programaci[oó]n|"
-            r"emprendimiento|universidad|conferencia)\b",
+            # "universidad"/"conferencia" removed: too generic (any subject can
+            # have a university event or a conference) — was mistagging things
+            # like a wellness conference as Tech purely for saying "conferencia".
+            r"emprendimiento)\b",
             re.IGNORECASE,
         ),
     ),
@@ -81,10 +90,15 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
 DEFAULT_CATEGORY = "Community"
 
 
-def guess_category(title: Optional[str]) -> str:
-    """Best-effort category from an event title. Falls back to 'Community'."""
+def guess_categories(title: Optional[str]) -> list[str]:
+    """Every matching category bucket for an event title. Falls back to
+    ['Community'] when nothing matches, so an event is never uncategorized."""
     text = title or ""
-    for category, pattern in _RULES:
-        if pattern.search(text):
-            return category
-    return DEFAULT_CATEGORY
+    matches = [category for category, pattern in _RULES if pattern.search(text)]
+    return matches or [DEFAULT_CATEGORY]
+
+
+def guess_category(title: Optional[str]) -> str:
+    """Single best-effort category — kept for callers that only want one
+    label (e.g. a UI badge slot). Prefer guess_categories() when storing."""
+    return guess_categories(title)[0]

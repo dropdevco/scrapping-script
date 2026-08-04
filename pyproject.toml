@@ -24,6 +24,7 @@ dependencies = [
 # Heavier / flaky extras. Sources lazily import these and self-disable if missing.
 trends = ["pytrends>=4.9"]    # Google Trends (pulls in pandas)
 dev = ["ruff>=0.5", "pytest>=8.0", "pytest-asyncio>=0.23"]
+admin = ["psycopg[binary]>=3.1"]  # direct Postgres access for `scraper.apply_migration` (DDL)
 
 [project.scripts]
 scraper-mcp = "scraper.mcp_server:main"

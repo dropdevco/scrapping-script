@@ -103,20 +103,56 @@ function buildLayout({ lanes, perLane, width }: Layout): { pieces: Placed[]; wid
 }
 
 /* Document-space top (px) of #events, kept live via ResizeObserver so this
-   adapts automatically when the hero is redesigned. */
+   adapts automatically when the hero is redesigned.
+
+   This component lives in the ROOT LAYOUT, so it survives client-side route
+   changes while #events belongs to the page and gets swapped in and out under
+   it. Two consequences drive the design here:
+
+     1. The node must be re-resolved when the DOM changes. Binding once on
+        mount leaves the observer watching a DETACHED node, and a detached node
+        measures as 0 — which drags the gate to the top of the document and
+        paints the whole collage straight over the hero.
+     2. #events may not exist yet when a route first commits (it streams in
+        behind Suspense), so "not found" has to be retried rather than treated
+        as final.
+
+   A MutationObserver covers both: it re-attaches when the node appears, is
+   replaced, or goes away — no route-change plumbing needed. */
 function useEventsGateOffset(): number | null {
   const [offset, setOffset] = useState<number | null>(null);
 
   useEffect(() => {
-    const el = document.getElementById("events");
-    if (!el) return;
-    const update = () => setOffset(el.getBoundingClientRect().top + window.scrollY);
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
+    let el: HTMLElement | null = null;
+    let ro: ResizeObserver | null = null;
+
+    const update = () => {
+      if (!el || !el.isConnected) return; // never measure a detached node
+      setOffset(el.getBoundingClientRect().top + window.scrollY);
+    };
+
+    const attach = () => {
+      const found = document.getElementById("events");
+      if (found === el) return;
+      el = found;
+      ro?.disconnect();
+      ro = null;
+      if (!el) {
+        setOffset(null); // no gate on this route — render nothing
+        return;
+      }
+      ro = new ResizeObserver(update);
+      ro.observe(el);
+      update();
+    };
+
+    attach();
+    const mo = new MutationObserver(attach);
+    mo.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("resize", update);
     return () => {
-      ro.disconnect();
+      mo.disconnect();
+      ro?.disconnect();
       window.removeEventListener("resize", update);
     };
   }, []);
@@ -200,11 +236,38 @@ export function LandmarkBackdrop() {
   const gateOffset = useEventsGateOffset();
   const layout = useLayout();
 
+  // Belt-and-suspenders hero guard: the pieces' resting position (pre-gate)
+  // is a viewport-relative pixel value frozen at `gateOffset`, which is only
+  // off-screen as long as gateOffset exceeds the current viewport height.
+  // On a short viewport (small browser window, zoomed-in, a shorter hero in
+  // another locale) that isn't guaranteed, so also hard-gate on scrollY —
+  // nothing paints until the user has actually scrolled past the hero.
+  //
+  // This is deliberately plain state driven by a scroll listener, NOT a
+  // useTransform off the scroll MotionValue: a transform only recomputes when
+  // its input fires, so after a client-side route change back to this page
+  // (scroll already at 0, nothing to fire) it would keep whatever value it
+  // last latched and let the collage paint straight over the hero. Re-running
+  // on every gateOffset change makes the gate correct on mount too.
+  const [pastGate, setPastGate] = useState(false);
+
+  useEffect(() => {
+    if (gateOffset === null) return;
+    const check = () => setPastGate(window.scrollY >= gateOffset);
+    check();
+    window.addEventListener("scroll", check, { passive: true });
+    return () => window.removeEventListener("scroll", check);
+  }, [gateOffset]);
+
   if (!layout || gateOffset === null) return null;
   const { pieces, width } = buildLayout(layout);
 
   return (
-    <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
+    <div
+      aria-hidden
+      style={{ opacity: pastGate ? 1 : 0, visibility: pastGate ? "visible" : "hidden" }}
+      className="pointer-events-none fixed inset-0 -z-10 overflow-hidden"
+    >
       {pieces.map((p, i) => (
         <Cutout
           key={`${p.src}-${i}`}

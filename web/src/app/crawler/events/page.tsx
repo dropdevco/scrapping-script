@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { fetchCrawlerEvents } from "@/lib/events";
-import { eventDescription } from "@/lib/event-schema";
+import { eventDescription, eventImageUrl } from "@/lib/event-schema";
 
 export const dynamic = "force-dynamic";
 
@@ -30,16 +30,44 @@ export default async function CrawlerEventsPage() {
           const start = event.start_time ? new Date(event.start_time) : null;
           const venueName = event.venues?.name ?? event.venue;
           const address = event.venues?.address ?? event.location;
+          const image = eventImageUrl(event);
 
           return (
             <li key={event.id}>
               <article className="rounded-[1.125rem] border border-line bg-card p-5">
+                {image && (
+                  // Plain server-rendered <img>, not the client EventImage
+                  // component: this page exists for scrapers, and a real src
+                  // attribute in the initial HTML is what they read — a
+                  // client component that swaps the src after hydration (its
+                  // broken-image fallback) buys nothing here and only risks
+                  // scrapers that don't run JS seeing an empty tag.
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={image}
+                    alt={`${event.title} event image`}
+                    loading="lazy"
+                    className="mb-4 aspect-[2/1] w-full rounded-[0.75rem] object-cover"
+                  />
+                )}
                 <h2 className="font-display text-2xl font-bold leading-tight text-ink">
                   <Link href={`/events/${event.id}`} className="underline decoration-cosmo decoration-2 underline-offset-4">
                     {event.title}
                   </Link>
                 </h2>
                 <dl className="mt-3 grid grid-cols-1 gap-2 text-sm text-ink-soft md:grid-cols-2">
+                  {image && (
+                    <div className="md:col-span-2">
+                      <dt className="font-condensed text-[10px] uppercase tracking-[0.14em] text-ink-faint">
+                        Image URL
+                      </dt>
+                      <dd>
+                        <a href={image} className="break-all underline decoration-cosmo decoration-2 underline-offset-4">
+                          {image}
+                        </a>
+                      </dd>
+                    </div>
+                  )}
                   <div>
                     <dt className="font-condensed text-[10px] uppercase tracking-[0.14em] text-ink-faint">
                       Start date
@@ -77,7 +105,12 @@ export default async function CrawlerEventsPage() {
                     </div>
                   )}
                 </dl>
-                <p className="mt-3 line-clamp-3 text-sm leading-relaxed text-ink-soft">
+                {/* No line-clamp here on purpose: -webkit-line-clamp uses
+                    overflow:hidden, and headless-browser scrapers that read
+                    rendered/visible text (innerText, not textContent) stop
+                    exactly at the visual cutoff — this page exists to be
+                    machine-read in full, so nothing here should be clipped. */}
+                <p className="mt-3 whitespace-pre-line text-sm leading-relaxed text-ink-soft">
                   {eventDescription(event)}
                 </p>
               </article>

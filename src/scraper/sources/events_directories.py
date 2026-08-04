@@ -17,7 +17,7 @@ from datetime import date, datetime
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 
-from ..core.categorize import guess_category
+from ..core.categorize import guess_categories
 from ..core.http import HttpClient
 from ..core.models import Event, Kind, SearchParams
 from .base import Source
@@ -122,15 +122,43 @@ def _dedupe_events(events: list[Event]) -> list[Event]:
     return out
 
 
+# National touring-show listings (Ticketmaster MX, ticket resellers) mention
+# Ciudad Juarez in a "also playing in: ..." blurb even when the specific event
+# on the page is in a different city entirely — so a hard negative on the
+# *place* fields always wins, regardless of what the free-text blurb says.
+_OTHER_CITY_MARKERS = (
+    "cdmx",
+    "mexico-cdmx",
+    "ciudad de mexico",
+    "ciudad de méxico",
+    "distrito federal",
+    ", df,",
+    "monterrey",
+    "guadalajara",
+    "chihuahua, chihuahua",  # the state capital, a different city from Cd. Juarez
+    "chihuahua capital",
+)
+
+
 def _event_matches_directory_region(event: Event, directory: Directory) -> bool:
     if directory.city_hint != "juarez":
         return True
-    # City/venue-owned Juarez sites are already geographically scoped.
+
+    # Place fields only — NOT description. Touring-show blurbs routinely list
+    # "now playing in: Ciudad Juarez, Monterrey, CDMX..." for a show whose
+    # title/venue/location are some other city; description would make that
+    # incidental mention look like a positive regional match.
+    place = " ".join(str(part or "") for part in (event.venue, event.location)).lower()
+    if any(marker in place for marker in _OTHER_CITY_MARKERS):
+        return False
+
+    # City/venue-owned Juarez sites are already geographically scoped, once the
+    # negative check above has ruled out an obviously-mislabeled event.
     if directory.name in {"visita_juarez", "juarez_municipal_events", "uacj_agenda"}:
         return True
+
     haystack = " ".join(
-        str(part or "")
-        for part in (event.title, event.venue, event.location, event.url, event.description)
+        str(part or "") for part in (event.title, event.venue, event.location, event.url)
     ).lower()
     if directory.name in {"don_boleton_juarez", "boletia_juarez", "ticketmaster_mx_juarez"}:
         return any(
@@ -238,7 +266,7 @@ class EventDirectoriesSource(Source):
                 continue
             event.source_id = f"{source_name}:{event.source_id or event.url or event.title}"
             if not event.categories:
-                event.categories = [guess_category(event.title)]
+                event.categories = guess_categories(event.title)
             event.raw = {"directory": source_name, "jsonld": event.raw}
             out.append(event)
         if source_name == "el_paso_live":
@@ -290,7 +318,7 @@ class EventDirectoriesSource(Source):
                     venue="El Paso Live",
                     location="One Civic Center Plaza, El Paso, TX 79901",
                     url=link_by_title.get(title, url),
-                    categories=[guess_category(title)],
+                    categories=guess_categories(title),
                     raw={"directory": "el_paso_live", "date": current_date, "time": start},
                 )
             )
@@ -315,7 +343,7 @@ class EventDirectoriesSource(Source):
                     venue=venue,
                     location=f"{venue}, El Paso, TX, United States",
                     url=url,
-                    categories=[guess_category(title)],
+                    categories=guess_categories(title),
                     raw={"directory": "axs_el_paso", "date": date_text, "time": match.group("time")},
                 )
             )
@@ -352,7 +380,7 @@ class EventDirectoriesSource(Source):
                     venue=None,
                     location="El Paso, TX",
                     url=urljoin(url, anchor["href"]),
-                    categories=[category, guess_category(title)],
+                    categories=[category, *guess_categories(title)],
                     raw={"directory": "city_of_el_paso_events", "listing_text": text},
                 )
             )

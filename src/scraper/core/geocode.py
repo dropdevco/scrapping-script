@@ -75,6 +75,56 @@ def is_virtual(*values: Optional[str]) -> bool:
     return any(VIRTUAL_RE.search(v) for v in values if v)
 
 
+# "Juárez" alone is ambiguous — Mexico City's "Benito Juárez" borough, "Av.
+# Juárez" streets in many Mexican cities, and Ciudad Juárez, Chihuahua all
+# contain the bare word. Only an unambiguous marker should steer a fallback
+# venue-name query toward the border city; a bare "juarez" should not, or a
+# Mexico City venue silently gets geocoded as if it were on the border.
+_CIUDAD_JUAREZ_RE = re.compile(
+    r"\bciudad\s*ju[aá]rez\b|\bcd\.?\s*ju[aá]rez\b|\bju[aá]rez[,\s]+chih\b|\bchihuahua\b",
+    re.I,
+)
+_OTHER_MX_CITY_RE = re.compile(
+    r"\bcdmx\b|\bciudad\s+de\s+m[eé]xico\b|\bdistrito\s+federal\b|\bbenito\s+ju[aá]rez\b"
+    r"|\bmonterrey\b|\bguadalajara\b",
+    re.I,
+)
+
+
+def looks_like_ciudad_juarez(addr: str) -> bool:
+    """Unambiguous signal that an address is Ciudad Juarez, not just any
+    place with 'Juarez' in the name (Mexico City's Benito Juarez borough,
+    'Av. Juarez' streets elsewhere, etc.)."""
+    if _OTHER_MX_CITY_RE.search(addr):
+        return False
+    return bool(_CIUDAD_JUAREZ_RE.search(addr))
+
+
+def _fallback_anchor_city(addr: str) -> Optional[str]:
+    """Which city (if any) to inject for the venue-name-only geocode query.
+
+    This only fires once every address-based candidate has already failed, so
+    it is the last resort — and forcing a wrong city here is worse than
+    forcing nothing: with `bounded=1` Nominatim will happily return SOME match
+    inside the border bbox for "<venue>, El Paso, TX" even when the venue's
+    real address (e.g. a Mexico City neighborhood) has nothing to do with the
+    border region, producing a confident, in-bbox, wrong pin. So a city is
+    only injected when the address gives a real signal: no address text at
+    all defaults to El Paso (this site's dominant city, and the same behavior
+    this fallback always had), an explicit "El Paso" mention confirms it, and
+    an unambiguous Juarez marker confirms the other side — anything else
+    (e.g. a CDMX address) is left with no injected city, which yields no
+    geocode candidate rather than a fabricated one.
+    """
+    if looks_like_ciudad_juarez(addr):
+        return "Ciudad Juárez"
+    if not addr.strip():
+        return "El Paso, TX"
+    if re.search(r"\bel paso\b", addr, re.I):
+        return "El Paso, TX"
+    return None
+
+
 def is_city_only(addr: str) -> bool:
     """True when an address carries nothing more specific than a city/state/zip.
 
@@ -154,8 +204,9 @@ def _candidates(address: Optional[str], venue: Optional[str]) -> list[str]:
         # Some "venue" values are sentences ("All tours meet at ..."), and some are
         # just a city name — neither identifies a place.
         if 3 < len(v) <= 60 and not is_city_only(v):
-            city = "Ciudad Juárez" if re.search(r"ju[aá]rez|chih", addr, re.I) else "El Paso, TX"
-            add(f"{v}, {city}")
+            city = _fallback_anchor_city(addr)
+            if city:
+                add(f"{v}, {city}")
 
     return out
 

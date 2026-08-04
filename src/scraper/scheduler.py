@@ -5,7 +5,11 @@ Runs a set of curated jobs (force-refreshed) and writes results to Supabase so t
 (see .github/workflows/scheduled_scrape.yml) or any scheduler.
 
 Configure via env:
-  SCHEDULE_LOCATION   default event location            (default "El Paso, TX")
+  SCHEDULE_LOCATIONS  semicolon list of event locations  (default "El Paso, TX;Ciudad Juarez, Chihuahua, Mexico")
+                       each location gets its own events pass, so both cities are
+                       scraped every run — see `_locations()`.
+  SCHEDULE_LOCATION   single-location override (back-compat; wins over the default
+                       list above if set, but SCHEDULE_LOCATIONS wins over this)
   SCHEDULE_TOPICS     comma list of trend topics         (default "AI,technology,business")
   SCHEDULE_DAYS       event look-ahead window in days    (default 7)
 
@@ -27,9 +31,28 @@ from .core.models import Kind, SearchParams
 
 log = logging.getLogger("scraper.scheduler")
 
+_DEFAULT_LOCATIONS = ("El Paso, TX", "Ciudad Juarez, Chihuahua, Mexico")
 
-def _location() -> str:
-    return (os.getenv("SCHEDULE_LOCATION") or "El Paso, TX").strip()
+
+def _locations() -> list[str]:
+    """One or more event locations to scrape, each getting its own pass.
+
+    `events_directories.py` and `events_web.py` both scope which calendars they
+    hit to the requested `location`, so a single "El Paso, TX" run (the old
+    default) only ever exercised the El Paso directories — the 7 Ciudad Juarez
+    calendars in `events_directories.DIRECTORIES` were reachable but never
+    actually invoked by the scheduled job. Running one pass per city is what
+    makes them run at all.
+    """
+    plural = os.getenv("SCHEDULE_LOCATIONS")
+    if plural:
+        locs = [p.strip() for p in plural.split(";") if p.strip()]
+        if locs:
+            return locs
+    single = os.getenv("SCHEDULE_LOCATION")
+    if single and single.strip():
+        return [single.strip()]
+    return list(_DEFAULT_LOCATIONS)
 
 
 def _topics() -> list[str]:
@@ -46,17 +69,18 @@ def _days() -> int:
 
 async def run_events() -> None:
     today = date.today()
-    params = SearchParams(
-        kind=Kind.EVENTS,
-        location=_location(),
-        start_date=today,
-        end_date=today + timedelta(days=_days()),
-        limit=100,
-        force_refresh=True,
-    )
-    result = await orchestrator.run(params)
-    log.info("events @ %s: %s stored (sources ok: %s)",
-             _location(), result["count"], result.get("sources_ok"))
+    for location in _locations():
+        params = SearchParams(
+            kind=Kind.EVENTS,
+            location=location,
+            start_date=today,
+            end_date=today + timedelta(days=_days()),
+            limit=100,
+            force_refresh=True,
+        )
+        result = await orchestrator.run(params)
+        log.info("events @ %s: %s stored (sources ok: %s, failed: %s)",
+                 location, result["count"], result.get("sources_ok"), result.get("sources_failed"))
 
 
 async def run_trends() -> None:

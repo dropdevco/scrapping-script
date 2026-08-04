@@ -31,7 +31,7 @@ from typing import Any, Optional
 from urllib.parse import quote, urljoin
 
 from ..core.address import format_address
-from ..core.categorize import guess_category
+from ..core.categorize import guess_categories
 from ..core.http import HttpClient
 from ..core.media import clean_image_url
 from ..core.models import Event, Kind, SearchParams
@@ -203,7 +203,7 @@ def _page_event_from_jsonld(node: Any, url: str, source: str) -> Optional[Event]
         lng=lng,
         url=(node.get("url") if isinstance(node.get("url"), str) else None) or url,
         image_url=clean_image_url(image),
-        categories=[guess_category(title)],
+        categories=guess_categories(title),
         raw=node,
     )
 
@@ -397,7 +397,7 @@ async def _lanube_events(http: HttpClient) -> list[Event]:
                 location=fields["address"],
                 url=href,
                 image_url=clean_image_url(fields["image"]),
-                categories=fields["categories"] or [guess_category(fields["title"])],
+                categories=fields["categories"] or guess_categories(fields["title"]),
                 raw=fields,
             )
         )

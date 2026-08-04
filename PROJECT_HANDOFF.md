@@ -1,6 +1,6 @@
 # Project Handoff
 
-Last updated: 2026-07-28
+Last updated: 2026-07-29 (later)
 
 This file is the durable context document for this repo, meant to replace re-exploration. Read this file FIRST, before grepping the codebase, when starting a new session/harness on this repo — it should answer "what is this, how is it built, what's the current state" without needing to re-derive it from source. Update it every time you make a meaningful change, especially when changing architecture, data contracts, setup steps, UI style, source behavior, migrations, or testing expectations.
 
@@ -30,17 +30,21 @@ source connectors -> Python orchestrator -> normalization/dedupe -> Supabase -> 
 ```text
 src/scraper/
   mcp_server.py            Agent-facing MCP tools.
-  scheduler.py             Curated recurring scrape jobs.
+  scheduler.py             Curated recurring scrape jobs — one pass per SCHEDULE_LOCATIONS entry.
+  apply_migration.py       CLI: run a .sql migration file via direct Postgres (DDL; SUPABASE_KEY/PostgREST can't).
   backfill_geocode.py      CLI to repair/fill venue coordinates.
+  backfill_merge_duplicates.py  CLI: one-off sweep to merge pre-existing duplicate event rows.
+  backfill_categories.py  CLI: upgrade old single-guess categories to the multi-category classifier.
   core/
-    models.py              Shared Pydantic models and request params.
+    models.py              Shared Pydantic models and request params. TicketLink model lives here.
     orchestrator.py        Cache check, source fan-out, dedupe, persistence, run summary.
-    storage.py             Supabase upserts, queries, and run logging.
+    storage.py             Supabase upserts, queries, run logging, and cross-run duplicate-event merge.
     config.py              Env-driven optional configuration.
     http.py                Async HTTP client, robots/backoff/concurrency handling.
-    dedupe.py              Content hashes and in-memory dedupe.
+    dedupe.py              Content hashes, in-batch same-event merge, ticket_link/category union.
+    ticket_labels.py        URL domain -> human ticket-source label ("Ticketmaster", "Eventbrite", ...).
     address.py             Address formatting helpers.
-    categorize.py          Category normalization.
+    categorize.py          Multi-category keyword classifier (guess_categories).
     geocode.py             Venue address -> lat/lng (Nominatim) + safety guards.
   sources/
     base.py                Source interface.
@@ -53,6 +57,7 @@ src/scraper/
 supabase/migrations/
   0001_init.sql            Base events, trends, runs tables.
   0002_venues.sql          Venue-centric schema and event venue links.
+  0003_ticket_links.sql    events.ticket_links jsonb — multiple ticketing links per event.
 
 web/
   src/app/                 Next.js App Router pages and route handlers.
@@ -106,7 +111,7 @@ Important conventions:
 - Event detail pages must keep full visible event facts and schema.org Event JSON-LD in sync. Do not add fields to one without considering the other.
 - Shared row types live in `web/src/lib/types.ts`.
 - Bilingual copy lives in `web/src/lib/i18n.ts`; do not hard-code user-facing copy in components when it belongs in the dictionary.
-- Supabase browser/server clients live in `web/src/lib/supabase/`.
+- Supabase browser/server clients live in `web/src/lib/supabase/`. `web/src/lib/supabase/admin.ts` is a THIRD client — server-only, service-role, RLS-bypassing — used exclusively by `/admin`. Never import it from a `"use client"` file.
 
 Current main routes:
 
@@ -115,8 +120,19 @@ Current main routes:
 - `/map`: interactive venue/event map.
 - `/submit`: Google-authenticated event submission.
 - `/auth/callback`: OAuth callback route.
+- `/admin`: moderation queue for pending submissions (approve/reject). NOT linked from nav — reach by typing the URL. Email-allowlist gated via `ADMIN_EMAILS`; see "Event moderation" below.
 - `/crawler/events`: plain public index of upcoming approved event links for knowledge-base crawlers.
 - `/sitemap.xml` and `/robots.txt`: generated metadata routes for search/crawler discovery (`web/src/app/sitemap.ts`, `web/src/app/robots.ts`).
+
+### Google OAuth (sign-in / event submission)
+
+Fully implemented in code (`auth-button.tsx`, `submit-form.tsx`, `/auth/callback/route.ts`) — enabling it is pure dashboard configuration, no code changes needed. The flow: Google → Supabase's own `/auth/v1/callback` (NOT the app's) → Supabase redirects to the app's `/auth/callback` (registered separately in Supabase's own Redirect URLs allowlist, distinct from what's registered in Google Cloud Console). Live in production as of 2026-07-29 on `epchisme.com`. If reconfiguring: Google Cloud Console now uses a restructured "Google Auth Platform" UI (Clients / Audience / Branding tabs replacing the old single "Credentials" + "OAuth consent screen" pages) — check "Audience" → Publishing status is "In production", not "Testing" (Testing mode silently blocks every non-allowlisted Google account from signing in).
+
+### Event moderation (`/admin`)
+
+Submissions land as `status='pending'` and are invisible until approved. **No RLS policy grants UPDATE/DELETE on `events` to any authenticated role** — not even for a user to edit their own pending submission — so moderation cannot go through the normal anon-key client. `/admin` uses `supabaseAdmin()` (service-role key, bypasses RLS) inside Server Actions (`web/src/app/admin/actions.ts`) that independently re-verify `isAdminEmail()` before every write — never trust the page component's own gate alone, Server Actions are directly callable. Approve sets `status='approved'`; Reject sets `status='rejected'` (kept, not deleted — audit trail, and `events_select_approved`'s filter already keeps it non-public forever).
+
+Env (server-only, no `NEXT_PUBLIC_` prefix, never sent to the browser): `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_EMAILS` (comma-separated). Must be set on the hosting platform for production, not just `web/.env.local`. See `web/SETUP.md` "Admin / Moderation" for full setup steps.
 
 App name is still "Chisme" (`web/src/app/layout.tsx` title: "Chisme — El Paso + Juárez events"). The 2026-07-28 commit titled "rebrand" did NOT rename the app — it bundled the crawler/SEO feature work plus filter and hero-scratch refinements; treat that commit message as inaccurate/misleading, not as evidence of a brand change.
 
@@ -167,14 +183,61 @@ Python `Event` fields that feed Supabase and the web app include:
 - `start_time`, `end_time`
 - `venue`, `location`, `lat`, `lng`
 - `url`, `image_url`
-- `categories`, `raw`, `content_hash`
+- `categories` (list — an event can be more than one bucket), `ticket_links` (list of `{source, label, url}`), `raw`, `content_hash`
 
 Web `EventRow` expects:
 
-- Event columns including `id`, `source`, `title`, `description`, `start_time`, `end_time`, `venue`, `location`, `url`, `image_url`, `categories`, `status`, `venue_id`
+- Event columns including `id`, `source`, `title`, `description`, `start_time`, `end_time`, `venue`, `location`, `url`, `image_url`, `categories`, `ticket_links`, `status`, `venue_id`
 - Joined `venues` row with `id`, `name`, `address`, `city`, `region`, `postal`, `country`, `lat`, `lng`
 
 Approved events are visible publicly. User-submitted events are inserted as `pending` and need moderation before normal public visibility.
+
+### Duplicate events across ticketing sites are merged, not shown twice (important)
+
+The same real event is routinely scraped from more than one site (Ticketmaster + Eventbrite, or a venue's own calendar + Visit El Paso). Rather than one card per site, the scraper detects the same real event and merges duplicates into ONE row carrying every source's link in `events.ticket_links` (jsonb array of `{source, label, url}`, added in `0003_ticket_links.sql`). The frontend renders one button per `ticket_links` entry (`web/src/app/events/[id]/page.tsx`), falling back to the single legacy `url` field for older/un-migrated rows or user submissions (which don't set `ticket_links` at all).
+
+Two merge passes, matched by **same venue + same calendar day + near-identical title**:
+
+- **In-batch** (`core/dedupe.py::dedupe_events`) — catches duplicates arriving in the SAME scrape (e.g. Ticketmaster and Eventbrite both returning tonight's concert in one orchestrator run). Merges `ticket_links` and `categories` by union, never by picking a "winner" and discarding the loser's link.
+- **Cross-run** (`core/storage.py::Storage._merge_with_existing`, called from `upsert_events`) — catches the same real event showing up in a LATER scrape via a source that didn't have it before. Queries existing `approved` events at the same `venue_id` within the incoming batch's day range, and folds a title match into the existing row via a targeted UPDATE instead of a new insert. This is why a new event scraped tomorrow that turns out to be something already on the site gets an extra ticket link instead of a duplicate card.
+
+**Title matching is NOT plain string similarity.** `SequenceMatcher` ratio on raw title text is unreliable for short event titles — verified empirically that "Salsa Night" vs "Bachata Night" scores *higher* (0.67) than genuine same-event pairs like "Machetes - World Tour 2026" vs "Machetes Live in Concierto" (0.54), because short titles sharing generic filler words dominate the ratio. The actual signal used:
+
+1. `title_sim >= 0.9` (near-identical full strings) → merge on title alone, no venue check needed.
+2. Otherwise, strip stopwords/filler (`_TITLE_STOPWORDS` in `dedupe.py` — "live", "tour", "night", "concierto", EN+ES) from both titles and compute containment: what fraction of the SHORTER title's remaining distinctive words also appear in the other. `>= 0.8` (near-total overlap) + venue similarity `>= 0.6` (in-batch) or same `venue_id` (cross-run, already an exact match) → merge.
+
+If you touch these thresholds, re-verify against adversarial pairs (two genuinely different recurring events at the same venue/day, e.g. differently-themed weekly nights) — a false merge silently hides a real event, which is worse than an unmerged duplicate card. `ticket_labels.py` derives the human label from the URL's domain (Ticketmaster, Eventbrite, AXS, Boletia, Don Boletón, ...), not the internal scraper source module — one module (`events_web`) fetches several different real platforms.
+
+One-off backfills for data that predates this feature:
+
+    python -m scraper.backfill_merge_duplicates --dry-run   # merge existing duplicate rows already stored
+    python -m scraper.backfill_categories --dry-run         # upgrade old single-guess categories to multi-category
+
+### Multi-category events
+
+`core/categorize.py::guess_categories()` returns EVERY matching bucket for a title, not just the first ("Beer & Live Music Festival" → Food & Drink + Music + Festivals). `guess_category()` (singular) still exists as a thin `guess_categories()[0]` wrapper for anywhere that only wants one label. The `categories` column has always been a Postgres array and the frontend (`event-card.tsx`'s "+N" badge, `filters.tsx`'s `.overlaps()` multi-select, `web/src/lib/categories.ts`'s canonicalization) already fully supported multiple categories — the only gap was the classifier only ever assigning one. The submission form (`submit-form.tsx`) now uses multi-select toggle pills instead of a single `<select>`, matching what scraped events already do.
+
+Ticketmaster-sourced events keep using the provider's own segment/genre/subGenre classification (richer than the keyword guesser) and only fall back to `guess_categories()` when TM gives nothing.
+
+If you add a keyword rule to `_RULES`, keep it specific — a Tech-bucket regression was found and fixed here: bare "conferencia"/"universidad" (conference/university) matched almost anything and mistagged unrelated events as Tech.
+
+### Scheduler covers multiple cities now (important)
+
+`src/scraper/scheduler.py::run_events()` runs one events pass **per location** in `_locations()`, not a single hardcoded location. This matters because both `events_directories.py` and `events_web.py` scope which calendars they hit to the request's `location` string — a single "El Paso, TX" run (the old default, and the only thing the scheduler ever ran) never invoked the 7 Ciudad Juarez directories in `events_directories.DIRECTORIES` at all, even though they were fully implemented. That was the actual root cause of Juarez being under-represented, not a scraping/parsing failure.
+
+Configure via `SCHEDULE_LOCATIONS` (semicolon-separated — a plain comma is already used inside one location, e.g. "City, State"). Default: `"El Paso, TX;Ciudad Juarez, Chihuahua, Mexico"`. `SCHEDULE_LOCATION` (singular) still works as a back-compat single-location override if `SCHEDULE_LOCATIONS` is unset — if the GitHub Actions repo has a `SCHEDULE_LOCATION` variable already set from before, it will silently limit the job back to one city; check `vars.SCHEDULE_LOCATION` in repo settings if Juarez coverage regresses.
+
+**Region-filter precision, not just coverage.** `events_directories._event_matches_directory_region()` decides whether a scraped item is really Ciudad Juarez before accepting it. Two classes of false positive were found and fixed live (via `python -m scraper.scheduler events` against production Supabase) after wiring Juarez in:
+
+- National touring-show / ticketing sites (`ticketmaster_mx_juarez`, `boletia_juarez`, `don_boleton_juarez`) list shows in many cities; a page can mention "Ciudad Juarez" in a "now playing in: ..." blurb for an event whose actual venue is CDMX, Guadalajara, Los Cabos, etc. Region matching now checks only `venue`/`location` (not `description`, which is where those incidental mentions live), and a hard negative list (`_OTHER_CITY_MARKERS`: cdmx, ciudad de méxico, monterrey, guadalajara, the Chihuahua **state capital** — a different city from Cd. Juarez despite the same state name) rejects a match regardless of any positive token found elsewhere.
+- The "trusted, always-in-region" domains (`visita_juarez`, `juarez_municipal_events`, `uacj_agenda`) are no longer exempt from that negative check — a state/university portal can still syndicate an out-of-region item.
+- Separately, `geocode.py`'s last-resort venue-name-only fallback used to *unconditionally* inject a city ("Ciudad Juárez" or else "El Paso, TX") into the query. Because Nominatim is called with `bounded=1`, forcing a wrong city into the query can still return *some* in-region match — a confident, wrong, in-bbox pin — for a venue that has nothing to do with either city (e.g. a Mexico City address containing "Benito Juárez", the CDMX borough name, which the old bare `juarez` regex misread as Ciudad Juárez). `_fallback_anchor_city()` now only injects a city when there's real signal for it (an unambiguous Ciudad Juarez marker via `looks_like_ciudad_juarez()`, an explicit "El Paso" mention, or no address text at all — this site's dominant-city default); anything else yields no candidate rather than a fabricated one.
+
+If you add a new Juarez-side directory or touch region matching again, re-run a live pass and eyeball `location` on the output for stray other-city addresses — the failure mode here doesn't throw, it just quietly geocodes into the wrong city.
+
+### Junk events never get stored (orchestrator)
+
+`orchestrator._is_showable()` drops any scraped `Event` with no `start_time` AND no `venue`/`location` before it's ever upserted — such rows are unrenderable everywhere (no date for the list, no place for the map) and were previously scraper parsing artifacts (e.g. a directory listing's stray link text mistaken for an event title) silently accumulating as `status='approved'`. Keep this guard when touching orchestrator normalization.
 
 ### Venue coordinates and the map (important)
 
@@ -228,6 +291,14 @@ Environment:
 - Source allow/deny behavior is controlled by `ENABLED_SOURCES` and `DISABLED_SOURCES`.
 - Venue geocoding is controlled by `GEOCODE_VENUES` (default true) and `GEOCODE_MAX_PER_RUN` (default 25).
 
+### Running schema migrations (DDL) against Supabase
+
+`SUPABASE_KEY` (used everywhere else) only grants PostgREST access — it can insert/update/delete rows but CANNOT run `ALTER TABLE`/DDL; the Supabase MCP tool available in this environment is also read-only, including its `apply_migration` action. Confirmed by hitting both walls directly in session.
+
+The working path: a **direct Postgres connection** via `SUPABASE_DB_URL` (optional env var, `admin` extra: `pip install -e ".[admin]"` for `psycopg`) + `python -m scraper.apply_migration <path-to-sql>`. Get the connection string from Supabase Dashboard → **Connect** button (top of the project page, NOT under Settings) → **Direct** tab → **Session pooler** variant specifically — the plain "Direct connection" hostname (`db.<ref>.supabase.co`) did not resolve from this environment (IPv6-only), while the pooler hostname (`aws-<n>-<region>.pooler.supabase.com`) worked. The password in that URI is a literal `[YOUR-PASSWORD]` placeholder — Supabase never shows the real one; get it from the user or use "Reset database password" in the same dashboard area. URL-encode special characters in the password before building the URI (`urllib.parse.quote(pw, safe="")`).
+
+New migration files go in `supabase/migrations/NNNN_name.sql` (numbered, matches existing `0001`/`0002`/`0003`) and get applied the same way. `SUPABASE_DB_URL` is admin-only — the scraper's normal runtime never touches it.
+
 ## Testing And Verification Expectations
 
 For scraper changes:
@@ -265,6 +336,23 @@ For web changes:
 
 Newest entry first. One entry per session/meaningful change; trivial fixes get one line.
 
+### 2026-07-29 (later)
+
+- Wired up Google OAuth end to end with the user (Google Cloud Console's new "Google Auth Platform" UI, Supabase provider config, redirect URL allowlists) — pure dashboard config, no code changes; the app already fully implemented the sign-in flow. Live on `epchisme.com`.
+- Discovered doing this that event moderation had no actual mechanism — submissions land as `status='pending'` with no RLS UPDATE policy for anyone, not even the submitter, to change that. Built `/admin`: an email-allowlisted moderation queue using a new service-role Supabase client (`web/src/lib/supabase/admin.ts`) inside Server Actions that independently re-check admin auth. See "Event moderation" above for the full design and why a service-role bypass was the right call over adding RLS policies.
+- Added `SUPABASE_SERVICE_ROLE_KEY` and `ADMIN_EMAILS` (server-only) to `web/.env.local`; created `web/.env.example` (didn't exist before) documenting all web env vars.
+- `status` can now also be `'rejected'` (previously only `'approved'`/`'pending'`) — no migration needed since the column was always free text, but worth knowing if you write a query assuming only two status values.
+
+### 2026-07-29
+
+- Built cross-source duplicate-event merging: the same real event scraped from multiple ticketing sites (Ticketmaster + Eventbrite, a venue's own calendar + Visit El Paso, etc.) now shows as ONE card with multiple "buy tickets" buttons instead of one card per site. New `events.ticket_links` jsonb column (migration `0003_ticket_links.sql`); matching logic in `core/dedupe.py` (same scrape) and `core/storage.py::_merge_with_existing` (across scrapes, by venue_id + day + title).
+- Had to build a real title-similarity metric for this — plain `SequenceMatcher` on raw strings was proven unreliable ("Salsa Night" vs "Bachata Night" scored higher than genuine duplicate pairs). Replaced with stopword-stripped token-containment for the venue-assisted tier; see the Duplicate events section above for the exact thresholds and why.
+- Built multi-category support: `categorize.guess_categories()` returns every matching bucket instead of the first. The DB column and frontend (badges, "+N" indicator, multi-select filter) already supported arrays — only the classifier needed the fix. Submission form's category `<select>` replaced with multi-select toggle pills to match.
+- Along the way, fixed a pre-existing Tech-bucket false positive: bare "conferencia"/"universidad" matched almost any event.
+- Backfilled existing data: `backfill_merge_duplicates` found and merged 1 pre-existing duplicate pair (142 rows checked, most cross-source dupes were already being caught by the in-batch merge, which fires every scheduled run since all sources for a location run together); `backfill_categories` upgraded 2 rows whose classification would change under the new fixed rules (459 checked) — conservative by design, only touches rows that still look like the old single-guess output.
+- Hit a real capability wall applying the schema migration: neither `SUPABASE_KEY` (PostgREST, no DDL) nor the Supabase MCP tool (read-only, including its own `apply_migration` action) can run `ALTER TABLE`. Solved by asking the user for a direct Postgres connection string (the pooler variant — the plain direct-connection hostname doesn't resolve from this environment) and adding `SUPABASE_DB_URL` + `python -m scraper.apply_migration` as a permanent admin path for future migrations. See "Running schema migrations" above — don't attempt DDL via the normal `SUPABASE_KEY`/MCP path again, it will not work.
+- Verified live end-to-end against production: ran the full two-city scheduler after all changes (El Paso 100 stored, Ciudad Juarez 41 stored, merges logged and spot-checked correct), confirmed rendering in-browser (multi ticket-link buttons, multi-category badges, single-link fallback still says "Get tickets" not a domain name).
+
 ### 2026-07-28 (session 7)
 
 - Added `src/scraper/sources/events_directories.py`, a keyless source for the requested El Paso/Juarez primary calendars, venue pages, and ticketing portals: Visit El Paso, El Paso Live, City of El Paso events, El Paso County, Southwest University Park, UTEP Special Events, Lowbrow Palace, El Paso County Coliseum, RockHouse, best-effort AXS El Paso, Don Boleton, Boletia Juarez, guarded Ticketmaster Mexico Juarez search, Visita Juarez, Chihuahua culture/CCPN, Juarez municipal pages, and UACJ agenda.
@@ -289,6 +377,17 @@ Newest entry first. One entry per session/meaningful change; trivial fixes get o
 - Added a hero loading veil that stays up until `/background.webp` is loaded/decoded and the scratch canvas cover has been painted, preventing the revealed image from flashing before hydration.
 - Added scratch completion detection: when the remaining cover is effectively gone, the canvas clears and a short fireworks animation plays over the hero.
 - Reworked `LangToggle` to keep the existing cookie + `router.refresh()` effect pattern while adding an immediate sliding-pill active state and avoiding redundant same-language refreshes.
+
+### 2026-07-29 (session 4)
+
+- Reviewed whether all DB events reach the frontend: they do, for the default view. `web/src/lib/events.ts::fetchEvents()` with no filters resolves to "everything upcoming" (`range()` returns `{from: now}`, no `to`), and the current volume (~150 future approved rows) is well under the 500-row `limit`, so nothing is silently truncated today. Past events (hundreds of rows) are correctly excluded by design — there's no "past events" browse mode, which is worth knowing if that's ever wanted, but wasn't asked for here.
+- Found and fixed the actual reason Ciudad Juarez coverage was thin: the scheduler (`src/scraper/scheduler.py`) only ever ran ONE events pass, hardcoded to "El Paso, TX". The 7 Ciudad Juarez calendars in `events_directories.DIRECTORIES` were fully implemented but never invoked, because both `events_directories.py` and `events_web.py` scope their fetch to the request's `location`. Added `SCHEDULE_LOCATIONS` (semicolon-separated) so the scheduler runs one pass per city; default is now `"El Paso, TX;Ciudad Juarez, Chihuahua, Mexico"`. Wired the same var into `.github/workflows/scheduled_scrape.yml`.
+- While live-testing the new Juarez pass against production Supabase, found and fixed two classes of false positive in `events_directories._event_matches_directory_region()`: national touring-show pages mentioning "Ciudad Juarez" in a multi-city description for an event actually in CDMX/Guadalajara/Los Cabos/etc, and three "trusted" Juarez-domain directories that skipped region validation entirely. See the Region-filter precision note above for the fix.
+- Fixed the same root problem in `geocode.py`'s last-resort venue-only fallback: it used to always inject "Ciudad Juárez" or "El Paso, TX" into the query, and `bounded=1` meant a wrong injected city could still return *some* in-region match (e.g. a real Mexico City address containing "Benito Juárez" — a CDMX borough — misread as the border city by a bare `juarez` regex). Now only injects a city when there's real signal for it; added `looks_like_ciudad_juarez()` / `_fallback_anchor_city()`.
+- Added `orchestrator._is_showable()`: drops events with no start_time AND no venue/location before storage — these are unrenderable parsing artifacts, not real events short one field.
+- Cleaned up production data found bad during this review: 2 pre-existing junk rows (no date, no place), 1 mis-geocoded venue ("Indiana 46" — a Mexico City address that had been pinned inside the border bbox), and 13 CDMX/Guadalajara/Los Cabos/León event rows that had slipped in from `ticketmaster_mx_juarez` over time (found via a full re-validation of every `events_directories` row against the fixed filter, not just the ones surfaced by today's test runs).
+- Net result verified against production: Ciudad Juarez went from 6 to 5 *clean* upcoming events (several loose false positives removed, a handful of genuine new ones added — the 7 Juarez directories are real but thin: `cultura.chihuahua.gob.mx` doesn't resolve/DNS-fails, and most of the rest either have no crawlable JSON-LD or few upcoming events at all). El Paso held steady at ~117. Coverage is real now but modest — most Juarez sites need bespoke HTML parsers (like El Paso's `el_paso_live`/`axs_el_paso`/`city_of_el_paso_events`) to do meaningfully better, since generic JSON-LD scraping is what's actually running for all 7 of them today.
+- Verified: Python modules import cleanly; scheduler runs both cities end-to-end (`python -m scraper.scheduler events` — El Paso 100 stored, Ciudad Juarez 42 stored, both `sources_failed: []`).
 
 ### 2026-07-28 (session 3)
 

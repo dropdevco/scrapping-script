@@ -40,6 +40,7 @@ jobs:
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           REDDIT_USER_AGENT: ${{ vars.REDDIT_USER_AGENT }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          SCHEDULE_LOCATIONS: ${{ vars.SCHEDULE_LOCATIONS }}
           SCHEDULE_LOCATION: ${{ vars.SCHEDULE_LOCATION }}
           SCHEDULE_TOPICS: ${{ vars.SCHEDULE_TOPICS }}
           SCHEDULE_DAYS: ${{ vars.SCHEDULE_DAYS }}

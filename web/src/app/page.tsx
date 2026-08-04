@@ -83,7 +83,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<Sea
       <div id="hero-block">
         {/* ── HERO — scratch-off scrapbook: scrape the beige to reveal the photo ── */}
         <HeroScratch hint={t.scratchHint} loadingLabel={t.heroLoading}>
-          <div className="mx-auto flex min-h-[74vh] max-w-4xl flex-col items-center justify-center px-4 py-24 text-center md:px-6">
+          <div className="mx-auto flex min-h-[74dvh] max-w-4xl flex-col items-center justify-center px-4 py-20 text-center md:px-6 md:py-24">
             {/* cover-line — centered "sticker" so it reads on beige AND the photo */}
             <h1 className="font-display text-5xl font-black italic leading-[0.92] tracking-tight sm:text-7xl md:text-8xl">
               <span className="hero-title-word block">{t.heroTitle}</span>

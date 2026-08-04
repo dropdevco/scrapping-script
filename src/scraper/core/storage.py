@@ -17,7 +17,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .config import settings
-from .models import Event, Trend
+from .dedupe import _TITLE_ONLY_THRESHOLD, _TOKEN_OVERLAP_THRESHOLD, _norm, _similar, _title_token_overlap
+from .dedupe import merge_ticket_links as _merge_ticket_links
+from .models import Event, TicketLink, Trend
 
 log = logging.getLogger("scraper.storage")
 
@@ -59,9 +61,19 @@ def _event_row(e: Event) -> dict[str, Any]:
         "url": e.url,
         "image_url": e.image_url,
         "categories": e.categories,
+        "ticket_links": [tl.model_dump() for tl in e.ticket_links],
         "raw": e.raw,
         "content_hash": e.content_hash,
     }
+
+
+def _is_same_event_title(a: str, b: str) -> bool:
+    """Title check for the cross-run merge, where venue+day are already an
+    exact match (same venue_id, same calendar day) — so unlike dedupe.py's
+    in-batch check, no separate venue-similarity confirmation is needed here."""
+    if _similar(_norm(a), _norm(b)) >= _TITLE_ONLY_THRESHOLD:
+        return True
+    return _title_token_overlap(a, b) >= _TOKEN_OVERLAP_THRESHOLD
 
 
 def _trend_row(t: Trend) -> dict[str, Any]:
@@ -112,7 +124,17 @@ class Storage:
                 else None
             )
             rows.append(row)
-        await asyncio.to_thread(self._upsert, "events", rows, "content_hash")
+
+        # dedupe.py already merges same-real-event duplicates that arrive in
+        # THIS batch (e.g. Ticketmaster + Eventbrite for the same concert in
+        # one scrape). This second pass catches the same real event showing up
+        # in a LATER scrape via a source that didn't have it before — without
+        # it, every new ticketing site a venue's event is later found on would
+        # create a second card for the same happening instead of adding a
+        # ticket link to the existing one.
+        rows = await asyncio.to_thread(self._merge_with_existing, rows)
+        if rows:
+            await asyncio.to_thread(self._upsert, "events", rows, "content_hash")
 
     async def upsert_trends(self, trends: list[Trend]) -> None:
         if not self.enabled or not trends:
@@ -217,6 +239,107 @@ class Storage:
         return rows or None
 
     # ── internals ───────────────────────────────────────────────────────────────
+    def _merge_with_existing(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Fold rows that are the same real event as something already stored
+        (same venue, same calendar day, near-identical title) into that
+        existing row's ticket_links instead of inserting a second card for
+        it. Returns the rows that should still go through the normal
+        content_hash upsert — new events, plus any row with no resolved venue
+        (a venue-less title-only cross-run match would be unreliable, so
+        those are left to the plain upsert path unmerged).
+        """
+        candidates = [r for r in rows if r.get("venue_id") and r.get("start_time")]
+        if not candidates:
+            return rows
+
+        venue_ids = list({r["venue_id"] for r in candidates})
+        days = [datetime.fromisoformat(r["start_time"]).date() for r in candidates]
+        window_start = datetime.combine(min(days), datetime.min.time(), tzinfo=timezone.utc)
+        window_end = datetime.combine(
+            max(days) + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        )
+
+        try:
+            existing = (
+                self._client.table("events")
+                .select(
+                    "id,title,venue_id,start_time,description,image_url,end_time,"
+                    "categories,ticket_links"
+                )
+                .eq("status", "approved")
+                .in_("venue_id", venue_ids)
+                .gte("start_time", window_start.isoformat())
+                .lt("start_time", window_end.isoformat())
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed lookup must not break the upsert
+            log.warning("existing-event lookup failed, skipping cross-run merge: %s", exc)
+            return rows
+
+        by_venue: dict[str, list[dict[str, Any]]] = {}
+        for e in existing:
+            by_venue.setdefault(e["venue_id"], []).append(e)
+
+        kept: list[dict[str, Any]] = []
+        merged_count = 0
+        for row in rows:
+            match = self._find_duplicate(row, by_venue.get(row.get("venue_id"), []))
+            if match is None:
+                kept.append(row)
+            else:
+                self._apply_merge(match, row)
+                merged_count += 1
+        if merged_count:
+            log.info("merged %d event(s) into existing rows (new ticket link, not a new card)", merged_count)
+        return kept
+
+    @staticmethod
+    def _find_duplicate(
+        row: dict[str, Any], same_venue_existing: list[dict[str, Any]]
+    ) -> Optional[dict[str, Any]]:
+        if not same_venue_existing or not row.get("start_time"):
+            return None
+        row_day = datetime.fromisoformat(row["start_time"]).date()
+        row_title = row.get("title") or ""
+        for existing in same_venue_existing:
+            existing_start = existing.get("start_time")
+            if not existing_start:
+                continue
+            existing_day = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).date()
+            if existing_day != row_day:
+                continue
+            if _is_same_event_title(row_title, existing.get("title") or ""):
+                return existing
+        return None
+
+    def _apply_merge(self, existing: dict[str, Any], row: dict[str, Any]) -> None:
+        """Targeted UPDATE of an already-stored event: union ticket_links and
+        categories, backfill fields the existing row is missing. Never
+        overwrites a field the existing row already has, and never touches
+        the row's id/content_hash, so links elsewhere (the /events/[id] URL,
+        anything already pointing at this row) keep working."""
+        existing_links = [TicketLink(**tl) for tl in (existing.get("ticket_links") or [])]
+        new_links = [TicketLink(**tl) for tl in (row.get("ticket_links") or [])]
+        patch: dict[str, Any] = {
+            "ticket_links": [tl.model_dump() for tl in _merge_ticket_links(existing_links, new_links)]
+        }
+
+        existing_categories = existing.get("categories") or []
+        merged_categories = list(dict.fromkeys([*existing_categories, *(row.get("categories") or [])]))
+        if merged_categories != existing_categories:
+            patch["categories"] = merged_categories
+
+        for field in ("description", "image_url", "end_time"):
+            if not existing.get(field) and row.get(field):
+                patch[field] = row[field]
+
+        try:
+            self._client.table("events").update(patch).eq("id", existing["id"]).execute()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("merge-update failed for event %s: %s", existing["id"], exc)
+
     def _upsert_venues(self, events: list[Event]) -> dict[str, str]:
         """Upsert one venue row per distinct address_hash; return hash -> venue id.
 

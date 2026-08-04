@@ -124,7 +124,10 @@ function SearchField({
         value={search}
         onChange={(e) => onSearch(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-full border-[1.5px] border-ink bg-card py-2.5 pl-10 pr-4 text-[14px] text-ink placeholder:text-ink-faint outline-none transition-shadow duration-200 focus:shadow-[3px_3px_0_var(--color-cosmo)]"
+        /* 16px on touch layouts is deliberate: iOS Safari auto-zooms the whole
+           page when a focused input is under 16px, and never zooms back out.
+           The compact 14px is kept for the desktop filter rail. */
+        className="w-full rounded-full border-[1.5px] border-ink bg-card py-2.5 pl-10 pr-4 text-[16px] text-ink placeholder:text-ink-faint outline-none transition-shadow duration-200 focus:shadow-[3px_3px_0_var(--color-cosmo)] lg:text-[14px]"
       />
     </div>
   );

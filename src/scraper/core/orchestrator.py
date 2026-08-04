@@ -25,6 +25,17 @@ from .storage import Storage
 log = logging.getLogger("scraper.orchestrator")
 
 
+def _is_showable(e: Event) -> bool:
+    """Drop events too threadbare to ever render meaningfully.
+
+    An event with no date AND no venue/location can't appear on the list (no
+    "when"), the map (no "where"), or search (nothing to filter by) — it's a
+    scraper parsing artifact (e.g. a directory listing's stray link text
+    mistaken for an event), not a real event that's merely missing one field.
+    """
+    return bool(e.start_time or e.venue or e.location)
+
+
 def _event_sort_key(e: Event) -> tuple[int, float]:
     """Sort undated events last; normalize naive/aware datetimes so comparison never raises."""
     dt = e.start_time
@@ -87,6 +98,7 @@ async def run(params: SearchParams) -> dict[str, Any]:
     try:
         if params.kind is Kind.EVENTS:
             events: list[Event] = [i for i in raw_items if isinstance(i, Event)]
+            events = [e for e in events if _is_showable(e)]
             events = dedupe_events(assign_hashes_events(events))
             # Chronological, not by source registration order — otherwise a source
             # that returns lots of events crowds out other sources before storage.

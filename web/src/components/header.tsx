@@ -52,15 +52,17 @@ export function Header() {
         </div>
       </div>
 
-      {/* mobile nav */}
-      <nav className="flex items-center gap-4 overflow-x-auto px-4 pb-2.5 md:hidden">
+      {/* mobile nav — this IS the primary navigation on phones, so the links
+          carry vertical padding to give them a real tap target. The text is
+          only 12px tall; without it the whole hit area was ~18px. */}
+      <nav className="flex items-center gap-3 overflow-x-auto px-4 pb-1 md:hidden">
         {nav.map((item) => {
           const active = pathname === item.href;
           return (
             <Link
               key={item.href}
               href={item.href}
-              className={`whitespace-nowrap font-condensed text-[12px] font-medium uppercase tracking-[0.16em] transition-colors ${
+              className={`whitespace-nowrap px-1 py-2.5 font-condensed text-[12px] font-medium uppercase tracking-[0.16em] transition-colors ${
                 active
                   ? "text-ink underline decoration-cosmo decoration-2 underline-offset-4"
                   : "text-ink-soft"

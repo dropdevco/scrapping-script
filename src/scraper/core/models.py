@@ -37,6 +37,17 @@ class SearchParams(BaseModel):
     force_refresh: bool = False            # bypass the freshness cache
 
 
+class TicketLink(BaseModel):
+    """One place to buy/RSVP for an event. Events that turn out to be the same
+    real-world happening scraped from multiple ticketing sites are merged into
+    a single stored row (see dedupe.py / storage.py) with one TicketLink per
+    source instead of one row per site."""
+
+    source: str                            # scraper source module, e.g. "events_ticketmaster"
+    label: str                             # human label, e.g. "Ticketmaster", "Eventbrite"
+    url: str
+
+
 class Event(BaseModel):
     source: str
     source_id: Optional[str] = None        # stable id from the provider, if any
@@ -51,6 +62,7 @@ class Event(BaseModel):
     url: Optional[str] = None
     image_url: Optional[str] = None
     categories: list[str] = Field(default_factory=list)
+    ticket_links: list[TicketLink] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
     content_hash: Optional[str] = None     # filled in by the dedupe step
 

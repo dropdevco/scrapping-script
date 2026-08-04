@@ -18,6 +18,11 @@ export function SubmitForm() {
   const [ready, setReady] = useState(false);
   const [state, setState] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [categories, setCategories] = useState<string[]>([]);
+
+  function toggleCategory(c: string) {
+    setCategories((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
+  }
 
   useEffect(() => {
     const supabase = supabaseBrowser();
@@ -108,7 +113,7 @@ export function SubmitForm() {
         location: isOnline ? null : `${address}${address.includes(city) ? "" : `, ${city}`}`,
         url: String(form.get("url") ?? "").trim() || null,
         image_url: String(form.get("image") ?? "").trim() || null,
-        categories: [String(form.get("category") ?? "Other")],
+        categories: categories.length > 0 ? categories : ["Other"],
         content_hash: contentHash,
         venue_id: venueId,
         status: "pending",
@@ -117,6 +122,7 @@ export function SubmitForm() {
       if (eErr) throw eErr;
 
       setState("done");
+      setCategories([]);
     } catch (err) {
       console.error(err);
       setState("error");
@@ -207,17 +213,28 @@ export function SubmitForm() {
             <option value="online">{t.virtual}</option>
           </select>
         </div>
-        <div>
-          <label className={labelCls} htmlFor="category">
-            {t.evCategory}
-          </label>
-          <select id="category" name="category" className={inputCls} defaultValue="Community">
-            {CANONICAL_CATEGORIES.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
+        <div className="md:col-span-2">
+          <span className={labelCls}>{t.evCategory}</span>
+          <div className="flex flex-wrap gap-2" role="group" aria-label={t.evCategory}>
+            {CANONICAL_CATEGORIES.map((c) => {
+              const active = categories.includes(c);
+              return (
+                <button
+                  key={c}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => toggleCategory(c)}
+                  className={`rounded-full border-[1.5px] px-3 py-1.5 text-[13px] transition-all duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] ${
+                    active
+                      ? "border-ink bg-cosmo font-semibold text-white shadow-[2px_2px_0_var(--color-ink)]"
+                      : "border-line bg-card text-ink-soft hover:border-ink hover:text-ink"
+                  }`}
+                >
+                  {c}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div>

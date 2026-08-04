@@ -141,9 +141,10 @@ web/
 
 ### Event Submission
 - Google OAuth required
-- Form: title, description, start/end time, venue, address, city, URL, image
+- Form: title, description, start/end time, venue, address, city, URL, image, one or more categories
 - Venue deduplication via address_hash (reuses existing if found)
-- Event status: "pending" (awaits review) → "approved" (visible)
+- Event status: `"pending"` (awaits review) → `"approved"` (visible) or `"rejected"` (declined, kept for audit, never public)
+- Moderated at `/admin` — see "Admin / Moderation" below
 
 ### Bilingual UI
 - Toggle: EN ↔ ES (top-right)
@@ -182,7 +183,8 @@ location text (nullable)  -- formatted full address
 url text (nullable)
 image_url text (nullable)
 categories text[]
-status text               -- "approved" or "pending"
+ticket_links jsonb        -- [{source, label, url}, ...] — multiple ticketing sites for the same event
+status text               -- "approved", "pending", or "rejected"
 venue_id uuid (nullable, FK venues)
 submitted_by uuid (nullable, user ID who submitted)
 content_hash text unique  -- dedupe key
@@ -193,12 +195,23 @@ last_seen timestamp
 
 ### Row-Level Security (RLS)
 
-**events** table:
-- Anonymous: SELECT approved events only
-- Authenticated: SELECT all; INSERT own submissions (status='pending'); UPDATE own submissions
-- Admin (future): full access
+**events** table — actual policies (`supabase/migrations/0002_venues.sql`):
+- `events_select_approved` (anon, authenticated): SELECT where `status='approved'`
+- `events_select_own` (authenticated): SELECT own submissions, any status
+- `events_insert_pending` (authenticated): INSERT own submissions, must be `status='pending'`
+- **No UPDATE/DELETE policy exists for anyone under RLS** — not even to edit your own pending submission. Moderation (approve/reject) is done by `/admin`, which uses the Supabase **service-role key** server-side to bypass RLS entirely (see below), not a database policy.
 
-This allows anyone to browse, logged-in users to submit, and submissions appear after moderation.
+This allows anyone to browse, logged-in users to submit, and submissions stay invisible until moderated.
+
+## Admin / Moderation
+
+`/admin` is a review queue for pending submissions — approve or reject with one click. It is NOT linked from the site nav (no "Admin" link anywhere); reach it by typing the URL directly. Access control is an email allowlist, not a database role:
+
+1. Set `ADMIN_EMAILS` in `web/.env.local` (and on your hosting platform for production) — comma-separated list of the Google account email(s) allowed in. Checked against `auth.users.email` after Google sign-in.
+2. Set `SUPABASE_SERVICE_ROLE_KEY` in the same places — **Settings → API → service_role key** in the Supabase dashboard. Deliberately has NO `NEXT_PUBLIC_` prefix so Next.js never sends it to the browser; only used inside Server Actions (`web/src/app/admin/actions.ts`), which independently re-check `ADMIN_EMAILS` before touching the database (never trust the page's own gate alone — Server Actions are directly callable).
+3. Visit `/admin` while signed in with an allowlisted email. Approve sets `status='approved'` (goes live immediately); Reject sets `status='rejected'` (stays hidden forever, kept for audit rather than deleted).
+
+The service-role key bypasses RLS completely — treat it with the same care as any other production secret. If you ever need a full moderation history UI (not just the pending queue), extend `/admin` rather than adding a second admin surface.
 
 ## 7. Deployment
 

@@ -31,6 +31,7 @@ export function buildEventJsonLd(event: EventRow) {
   const image = eventImageUrl(event);
   const url = eventUrl(event.id);
   const ticketUrl = absoluteUrl(event.url);
+  const ticketLinks = (event.ticket_links ?? []).filter((l) => l.url);
   const hasPhysicalLocation = Boolean(address || venueName);
 
   const postalAddress = address || venue?.city || venue?.region || venue?.postal || venue?.country
@@ -79,13 +80,20 @@ export function buildEventJsonLd(event: EventRow) {
     image: image ? [image] : undefined,
     url,
     sameAs: ticketUrl && ticketUrl !== url ? ticketUrl : undefined,
-    offers: ticketUrl
-      ? {
-          "@type": "Offer",
-          url: ticketUrl,
-          availability: "https://schema.org/InStock",
-        }
-      : undefined,
+    // schema.org/Event.offers accepts either one Offer or an array — reflect
+    // every known ticketing source when there's more than one, falling back
+    // to the single legacy `url` field for older/un-migrated rows.
+    offers:
+      ticketLinks.length > 0
+        ? ticketLinks.map((link) => ({
+            "@type": "Offer" as const,
+            url: absoluteUrl(link.url),
+            seller: { "@type": "Organization" as const, name: link.label },
+            availability: "https://schema.org/InStock",
+          }))
+        : ticketUrl
+          ? { "@type": "Offer" as const, url: ticketUrl, availability: "https://schema.org/InStock" }
+          : undefined,
     category: event.categories?.filter(Boolean) ?? undefined,
     identifier: event.source_id ?? event.id,
     provider: {

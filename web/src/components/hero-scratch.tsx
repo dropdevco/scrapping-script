@@ -66,8 +66,34 @@ export function HeroScratch({
   const [imageReady, setImageReady] = useState(false);
   const [surfaceReady, setSurfaceReady] = useState(false);
   const [complete, setComplete] = useState(false);
+  // null until measured on the client, so SSR and first paint agree.
+  const [canScratch, setCanScratch] = useState<boolean | null>(null);
 
-  const ready = imageReady && surfaceReady;
+  const scratchEnabled = canScratch === true;
+  // On touch there is no scratch surface to paint, so the photo alone gates
+  // the reveal — derived rather than pushed through setState in an effect.
+  const ready = imageReady && (surfaceReady || canScratch === false);
+
+  /*
+    The scratch-off is a POINTER-HOVER interaction: it reveals the photo as
+    the cursor passes over it, with no click required. That has no touch
+    equivalent — a finger drag over the hero is a SCROLL gesture, so the
+    browser fires pointercancel and stops delivering pointermove, and the
+    surface never gets scratched. Forcing it to work (touch-action: none)
+    would be worse: the hero is ~74dvh, so swallowing vertical swipes there
+    would trap the user at the top of the page with no way to scroll down.
+
+    So on touch/coarse-pointer devices we skip the scratch layer entirely and
+    show the cover photo directly. Phones get the hero the scratching was
+    there to reveal; pointer devices still get the interaction.
+  */
+  useEffect(() => {
+    const mq = window.matchMedia("(hover: hover) and (pointer: fine)");
+    const pick = () => setCanScratch(mq.matches);
+    pick();
+    mq.addEventListener("change", pick);
+    return () => mq.removeEventListener("change", pick);
+  }, []);
 
   useEffect(() => {
     const image = imageRef.current;
@@ -166,6 +192,7 @@ export function HeroScratch({
   }
 
   useEffect(() => {
+    if (!scratchEnabled) return;
     const wrap = wrapRef.current;
     const canvas = canvasRef.current;
     if (!wrap || !canvas) return;
@@ -190,8 +217,20 @@ export function HeroScratch({
     }
 
     let raf = 0;
+    // Last painted CSS size. Repainting resets scratch progress, so only redo
+    // it when the box genuinely changed size.
+    let lastW = -1;
+    let lastH = -1;
+
     function resize() {
       const r = scratchWrap.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      const w = Math.round(r.width);
+      const h = Math.round(r.height);
+      if (w === lastW && h === lastH) return;
+      lastW = w;
+      lastH = h;
+
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       scratchCanvas.width = Math.round(r.width * dpr);
       scratchCanvas.height = Math.round(r.height * dpr);
@@ -279,6 +318,9 @@ export function HeroScratch({
     }
 
     function onMove(e: PointerEvent) {
+      // Ignore touch even on hybrid (touch + mouse) machines: a finger drag
+      // here is the user trying to scroll, not to scratch.
+      if (e.pointerType === "touch") return;
       scratchAt(e.clientX, e.clientY);
     }
     function onLeave() {
@@ -291,16 +333,24 @@ export function HeroScratch({
 
     scratchWrap.addEventListener("pointermove", onMove);
     scratchWrap.addEventListener("pointerleave", onLeave);
+    // Observe the WRAPPER, not just window resize: the canvas is sized from
+    // the wrapper's box, which also changes when a scrollbar appears, when
+    // fonts finish loading, or when streamed content reflows the hero. A
+    // window-only listener misses those and leaves the canvas smaller than
+    // the photo it covers — the photo then shows through along the edge.
+    const ro = new ResizeObserver(onResize);
+    ro.observe(scratchWrap);
     window.addEventListener("resize", onResize);
 
     return () => {
       cancelAnimationFrame(raf);
       if (coverageCheck) window.clearTimeout(coverageCheck);
+      ro.disconnect();
       scratchWrap.removeEventListener("pointermove", onMove);
       scratchWrap.removeEventListener("pointerleave", onLeave);
       window.removeEventListener("resize", onResize);
     };
-  }, []);
+  }, [scratchEnabled]);
 
   return (
     <div ref={wrapRef} className="relative isolate overflow-hidden">
@@ -317,8 +367,16 @@ export function HeroScratch({
         draggable={false}
       />
 
-      <canvas ref={canvasRef} aria-hidden className="absolute inset-0 z-0" />
-      <canvas ref={fireworkRef} aria-hidden className="pointer-events-none absolute inset-0 z-30" />
+      {scratchEnabled && (
+        <>
+          <canvas ref={canvasRef} aria-hidden className="absolute inset-0 z-0" />
+          <canvas
+            ref={fireworkRef}
+            aria-hidden
+            className="pointer-events-none absolute inset-0 z-30"
+          />
+        </>
+      )}
 
       <div
         className={`pointer-events-none relative z-10 transition-opacity duration-500 ${
@@ -343,7 +401,7 @@ export function HeroScratch({
       <div
         aria-hidden
         className={`pointer-events-none absolute inset-x-0 bottom-6 z-20 flex justify-center transition-opacity duration-500 ${
-          scratched || !ready ? "opacity-0" : "opacity-100"
+          scratched || !ready || !scratchEnabled ? "opacity-0" : "opacity-100"
         }`}
       >
         <span className="flex items-center gap-2 rounded-full border-[1.5px] border-ink bg-card/90 px-4 py-1.5 font-condensed text-[11px] font-semibold uppercase tracking-[0.16em] text-ink shadow-[2px_2px_0_var(--color-ink)] backdrop-blur-sm">

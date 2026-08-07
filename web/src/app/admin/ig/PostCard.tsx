@@ -3,6 +3,21 @@
    visually. `actions` is omitted/null to render read-only (already handled,
    or viewed by someone without write access to it). */
 
+// Must match scraper.core.config's IG_TIMEZONE default — this is display
+// only (the actual scheduling decision happens server-side in Python), but a
+// mismatched timezone here would show the admin the wrong hour.
+const TZ = "America/Denver";
+
+function formatScheduledFor(iso: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ,
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(iso));
+}
+
 export type IgPostSummary = {
   id: string;
   post_date: string;
@@ -10,11 +25,13 @@ export type IgPostSummary = {
   caption: string | null;
   event_ids: string[] | null;
   error: string | null;
+  scheduled_for?: string | null;
 };
 
 export type PostCardActions = {
   approve: () => Promise<void>;
   reject: () => Promise<void>;
+  publishNow?: () => Promise<void>;
 };
 
 export function PostCard({
@@ -41,18 +58,35 @@ export function PostCard({
             {post.status} · {slides.length} slide{slides.length === 1 ? "" : "s"} ·{" "}
             {(post.event_ids ?? []).length} event{(post.event_ids ?? []).length === 1 ? "" : "s"}
           </p>
+          {post.scheduled_for && (
+            <p className="mt-1 text-[13px] text-ink-soft">
+              {new Date(post.scheduled_for) <= new Date()
+                ? "Ready to publish — next sweep will ship it"
+                : `Scheduled for ${formatScheduledFor(post.scheduled_for)}`}
+            </p>
+          )}
         </div>
 
         {actions && (
-          <div className="flex shrink-0 gap-2">
+          <div className="flex flex-wrap shrink-0 gap-2">
             <form action={actions.approve}>
               <button
                 type="submit"
                 className="rounded-full bg-cosmo px-4 py-1.5 text-sm font-semibold text-white shadow-[2px_2px_0_var(--color-ink)] transition-transform duration-200 hover:-translate-y-0.5"
               >
-                Approve &amp; publish
+                Approve
               </button>
             </form>
+            {actions.publishNow && (
+              <form action={actions.publishNow}>
+                <button
+                  type="submit"
+                  className="rounded-full bg-pop-yellow px-4 py-1.5 text-sm font-semibold text-ink shadow-[2px_2px_0_var(--color-ink)] transition-transform duration-200 hover:-translate-y-0.5"
+                >
+                  Publish now
+                </button>
+              </form>
+            )}
             <form action={actions.reject}>
               <button
                 type="submit"

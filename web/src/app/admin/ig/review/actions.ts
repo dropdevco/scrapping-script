@@ -1,7 +1,12 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { approveIgPostRow, rejectIgPostRow } from "@/lib/ig/moderate";
+import {
+  approveIgPostRow,
+  publishIgPostNowRow,
+  rejectIgPostRow,
+  rescheduleIgPostRow,
+} from "@/lib/ig/moderate";
 import { verifyReviewToken } from "@/lib/ig/reviewToken";
 
 /* Server Actions are directly callable, so each one re-verifies the token
@@ -23,5 +28,22 @@ export async function rejectIgPostByToken(token: string): Promise<void> {
   const res = await rejectIgPostRow(claim.postId);
   if (!res.ok) throw new Error(res.message);
   revalidatePath("/admin/ig");
+  revalidatePath(`/admin/ig/review/${token}`);
+}
+
+export async function publishIgPostNowByToken(token: string): Promise<void> {
+  const claim = verifyReviewToken(token);
+  if (!claim) throw new Error("This link has expired or is invalid.");
+  const res = await publishIgPostNowRow(claim.postId);
+  if (!res.ok) throw new Error(res.message);
+  revalidatePath("/admin/ig");
+  revalidatePath(`/admin/ig/review/${token}`);
+}
+
+export async function rescheduleIgPostByToken(token: string, isoTime: string): Promise<void> {
+  const claim = verifyReviewToken(token);
+  if (!claim) throw new Error("This link has expired or is invalid.");
+  const res = await rescheduleIgPostRow(claim.postId, isoTime);
+  if (!res.ok) throw new Error(res.message);
   revalidatePath(`/admin/ig/review/${token}`);
 }

@@ -11,7 +11,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -32,6 +32,18 @@ CITY = "El Paso"
 
 def _today(tz_name: str) -> date:
     return datetime.now(ZoneInfo(tz_name)).date()
+
+
+def _suggested_schedule(day: date, tz_name: str, hour: int) -> str:
+    """A best-effort publish time: `hour` local on the post's own day, or
+    right now if that's already in the past (a same-day post can't wait for
+    tomorrow's slot — the staleness guard would just expire it)."""
+    tz = ZoneInfo(tz_name)
+    now = datetime.now(tz)
+    suggested = datetime.combine(day, time(hour, 0), tzinfo=tz)
+    if suggested <= now:
+        suggested = now
+    return suggested.astimezone(timezone.utc).isoformat()
 
 
 # ── build ──────────────────────────────────────────────────────────────────────
@@ -110,6 +122,7 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
         log.info("dry run: not uploading or inserting a draft")
         return 0
 
+    scheduled_for = _suggested_schedule(day, tz_name, settings.ig_suggested_publish_hour)
     draft = await storage.create_ig_draft(
         {
             "post_date": day.isoformat(),
@@ -117,6 +130,7 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
             "event_ids": [str(c.row["id"]) for c in picked],
             "slide_keys": [c.key for c in picked],
             "caption": text,
+            "scheduled_for": scheduled_for,
         }
     )
     if draft is None:
@@ -148,6 +162,7 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
                 day=day,
                 slide_paths=paths,
                 caption=text,
+                scheduled_for=scheduled_for,
             )
 
     # Phase 2: same code path, no separate flag plumbing.
@@ -181,7 +196,7 @@ async def publish(day: Optional[date], dry_run: bool) -> int:
         log.error("IG_BUSINESS_ACCOUNT_ID / IG_ACCESS_TOKEN are not set.")
         return 1
 
-    pending = await storage.ig_posts_by_status("approved", day.isoformat() if day else None)
+    pending = await storage.approved_ready_to_publish(day.isoformat() if day else None)
     if not pending:
         log.info("nothing approved to publish")
         return 0

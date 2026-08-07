@@ -2,7 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { isAdminEmail } from "@/lib/admin";
-import { approveIgPostRow, rejectIgPostRow } from "@/lib/ig/moderate";
+import {
+  approveIgPostRow,
+  publishIgPostNowRow,
+  rejectIgPostRow,
+  rescheduleIgPostRow,
+} from "@/lib/ig/moderate";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { supabaseServer } from "@/lib/supabase/server";
 
@@ -46,6 +51,20 @@ export async function approveIgPost(id: string): Promise<void> {
 export async function rejectIgPost(id: string): Promise<void> {
   await requireAdmin();
   const res = await rejectIgPostRow(id);
+  if (!res.ok) throw new Error(res.message);
+  revalidatePath("/admin/ig");
+}
+
+export async function publishIgPostNow(id: string): Promise<void> {
+  await requireAdmin();
+  const res = await publishIgPostNowRow(id);
+  if (!res.ok) throw new Error(res.message);
+  revalidatePath("/admin/ig");
+}
+
+export async function rescheduleIgPost(id: string, isoTime: string): Promise<void> {
+  await requireAdmin();
+  const res = await rescheduleIgPostRow(id, isoTime);
   if (!res.ok) throw new Error(res.message);
   revalidatePath("/admin/ig");
 }

@@ -378,6 +378,30 @@ class Storage:
 
         return await asyncio.to_thread(_q)
 
+    async def approved_ready_to_publish(
+        self, post_date: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Approved rows whose scheduled_for has arrived (or was never set —
+        NULL means no restriction, so old rows and IG_AUTOPOST's immediate
+        approve both publish on the very next sweep, same as before this
+        existed)."""
+        if not self.enabled:
+            return []
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _q() -> list[dict[str, Any]]:
+            q = (
+                self._client.table("ig_posts")
+                .select("*")
+                .eq("status", "approved")
+                .or_(f"scheduled_for.is.null,scheduled_for.lte.{now}")
+            )
+            if post_date:
+                q = q.eq("post_date", post_date)
+            return q.order("post_date", desc=False).execute().data or []
+
+        return await asyncio.to_thread(_q)
+
     # ── internals ───────────────────────────────────────────────────────────────
     def _merge_with_existing(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Fold rows that are the same real event as something already stored

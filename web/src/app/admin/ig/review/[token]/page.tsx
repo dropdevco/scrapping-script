@@ -2,7 +2,13 @@ import Link from "next/link";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { verifyReviewToken } from "@/lib/ig/reviewToken";
 import { PostCard, type IgPostSummary } from "../../PostCard";
-import { approveIgPostByToken, rejectIgPostByToken } from "../actions";
+import {
+  approveIgPostByToken,
+  publishIgPostNowByToken,
+  rejectIgPostByToken,
+  rescheduleIgPostByToken,
+} from "../actions";
+import { RescheduleForm } from "../RescheduleForm";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +41,7 @@ export default async function ReviewByTokenPage({
   const admin = supabaseAdmin();
   const { data, error } = await admin
     .from("ig_posts")
-    .select("id, post_date, status, slide_paths, caption, event_ids, error")
+    .select("id, post_date, status, slide_paths, caption, event_ids, error, scheduled_for")
     .eq("id", claim.postId)
     .maybeSingle();
 
@@ -70,8 +76,15 @@ export default async function ReviewByTokenPage({
           actions={{
             approve: approveIgPostByToken.bind(null, token),
             reject: rejectIgPostByToken.bind(null, token),
+            publishNow: publishIgPostNowByToken.bind(null, token),
           }}
         />
+        {post.scheduled_for && (
+          <RescheduleForm
+            scheduledFor={post.scheduled_for}
+            onSave={rescheduleIgPostByToken.bind(null, token)}
+          />
+        )}
       </div>
     </div>
   );

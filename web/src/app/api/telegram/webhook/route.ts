@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { approveIgPostRow, rejectIgPostRow } from "@/lib/ig/moderate";
+import { approveIgPostRow, publishIgPostNowRow, rejectIgPostRow } from "@/lib/ig/moderate";
 
 /* Telegram is its own auth boundary here — no token in the callback_data.
    Two independent checks stand in for it:
@@ -40,6 +40,7 @@ export async function POST(request: Request) {
   const [action, postId] = String(cb.data ?? "").split(":");
   let result: { ok: boolean; message?: string } | null = null;
   if (action === "apv" && postId) result = await approveIgPostRow(postId);
+  else if (action === "now" && postId) result = await publishIgPostNowRow(postId);
   else if (action === "rej" && postId) result = await rejectIgPostRow(postId);
 
   await tg("answerCallbackQuery", {

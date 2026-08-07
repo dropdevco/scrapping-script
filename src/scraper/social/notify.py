@@ -22,6 +22,7 @@ import hmac
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from ..core.config import settings
 from ..core.http import HttpClient
@@ -30,6 +31,16 @@ from . import slides_store
 log = logging.getLogger("scraper.social.notify")
 
 TELEGRAM_MAX_MEDIA_GROUP = 10
+
+
+def _format_local_time(iso: str, tz_name: str) -> str:
+    """12-hour clock without a leading zero, e.g. '5:00 PM'. Deliberately not
+    strftime's %-I / %#I — those are platform-specific (glibc vs MSVC) and
+    this needs to run identically in CI (Linux) and local dev (Windows)."""
+    dt = datetime.fromisoformat(iso).astimezone(ZoneInfo(tz_name))
+    hour12 = dt.hour % 12 or 12
+    ampm = "AM" if dt.hour < 12 else "PM"
+    return f"{hour12}:{dt.minute:02d} {ampm}"
 
 
 def _b64url(data: bytes) -> str:
@@ -60,14 +71,17 @@ async def notify_draft_ready(
     day: date,
     slide_paths: list[str],
     caption: str,
+    scheduled_for: Optional[str] = None,
 ) -> None:
     review_url: Optional[str] = None
     token = make_review_token(post_id)
     if token:
         review_url = f"{settings.site_base_url}/admin/ig/review/{token}"
 
-    await _notify_telegram(http, storage_client, post_id, day, slide_paths, caption, review_url)
-    await _notify_email(http, day, review_url)
+    await _notify_telegram(
+        http, storage_client, post_id, day, slide_paths, caption, review_url, scheduled_for
+    )
+    await _notify_email(http, day, review_url, scheduled_for)
 
 
 async def _notify_telegram(
@@ -78,6 +92,7 @@ async def _notify_telegram(
     slide_paths: list[str],
     caption: str,
     review_url: Optional[str],
+    scheduled_for: Optional[str],
 ) -> None:
     if not (settings.telegram_bot_token and settings.telegram_chat_id):
         return
@@ -91,14 +106,18 @@ async def _notify_telegram(
             f"{base}/sendMediaGroup", json={"chat_id": settings.telegram_chat_id, "media": media}
         )
 
+        approve_label = "✅ Approve"
+        if scheduled_for:
+            approve_label += f" for {_format_local_time(scheduled_for, settings.ig_timezone)}"
         buttons = [
             [
-                {"text": "✅ Approve & publish", "callback_data": f"apv:{post_id}"},
-                {"text": "❌ Reject", "callback_data": f"rej:{post_id}"},
-            ]
+                {"text": approve_label, "callback_data": f"apv:{post_id}"},
+                {"text": "⚡ Publish now", "callback_data": f"now:{post_id}"},
+            ],
+            [{"text": "❌ Reject", "callback_data": f"rej:{post_id}"}],
         ]
         if review_url:
-            buttons.append([{"text": "\U0001f50d Full preview", "url": review_url}])
+            buttons[-1].append({"text": "\U0001f50d Full preview", "url": review_url})
 
         # Plain text, no parse_mode: event titles routinely contain _ * [ ] —
         # any of which breaks Telegram's Markdown parser and drops the message.
@@ -115,7 +134,9 @@ async def _notify_telegram(
         log.error("telegram notify failed: %s", exc)
 
 
-async def _notify_email(http: HttpClient, day: date, review_url: Optional[str]) -> None:
+async def _notify_email(
+    http: HttpClient, day: date, review_url: Optional[str], scheduled_for: Optional[str]
+) -> None:
     if not (settings.resend_api_key and settings.notify_admin_email):
         return
     if not review_url:
@@ -124,8 +145,13 @@ async def _notify_email(http: HttpClient, day: date, review_url: Optional[str]) 
         )
         return
     try:
+        when = (
+            f" Suggested to go out around {_format_local_time(scheduled_for, settings.ig_timezone)}."
+            if scheduled_for
+            else ""
+        )
         html = (
-            f"<p>Today's Instagram carousel is ready to review.</p>"
+            f"<p>Today's Instagram carousel is ready to review.{when}</p>"
             f'<p><a href="{review_url}">Review &amp; approve — {day.isoformat()}</a></p>'
             f"<p>Link expires in {settings.ig_notify_ttl_hours}h.</p>"
         )

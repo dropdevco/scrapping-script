@@ -110,6 +110,11 @@ class Settings:
         self.ig_max_slides = _int("IG_MAX_SLIDES", 9)  # +1 cover = Instagram's 10 cap
         self.ig_slide_retention_days = _int("IG_SLIDE_RETENTION_DAYS", 7)
         self.ig_handle = _clean(os.getenv("IG_HANDLE")) or "epchisme.com"
+        # Default local hour the build job suggests for scheduled_for (see
+        # __main__.py's _suggested_schedule). 5pm reads well for "things
+        # happening tonight" without requiring real engagement data, which a
+        # brand-new account doesn't have yet.
+        self.ig_suggested_publish_hour = _int("IG_SUGGESTED_PUBLISH_HOUR", 17)
 
         # Draft-ready notifications (scraper.social.notify). Each channel
         # self-disables when its own keys are missing, same idiom as everything

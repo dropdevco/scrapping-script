@@ -2,7 +2,7 @@ import Link from "next/link";
 import { isAdminEmail } from "@/lib/admin";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { supabaseServer } from "@/lib/supabase/server";
-import { approveIgPost, rejectIgPost } from "../actions";
+import { approveIgPost, publishIgPostNow, rejectIgPost } from "../actions";
 import { PostCard } from "./PostCard";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +19,7 @@ type IgPost = {
   event_ids: string[] | null;
   error: string | null;
   created_at: string;
+  scheduled_for: string | null;
 };
 
 function Gate({ children }: { children: React.ReactNode }) {
@@ -49,7 +50,7 @@ export default async function AdminIgPage() {
   const admin = supabaseAdmin();
   const { data, error } = await admin
     .from("ig_posts")
-    .select("id, post_date, status, slide_paths, caption, event_ids, error, created_at")
+    .select("id, post_date, status, slide_paths, caption, event_ids, error, created_at, scheduled_for")
     .in("status", ["draft", "approved", "publishing", "failed"])
     .order("post_date", { ascending: false })
     .limit(10);
@@ -101,6 +102,7 @@ export default async function AdminIgPage() {
                   ? {
                       approve: approveIgPost.bind(null, post.id),
                       reject: rejectIgPost.bind(null, post.id),
+                      publishNow: publishIgPostNow.bind(null, post.id),
                     }
                   : null
               }

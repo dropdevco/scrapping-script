@@ -3,6 +3,14 @@
 Instagram's hard limit is 2200 characters. We budget to 2100 — emoji and
 non-ASCII count differently across implementations, and being 100 under is free
 insurance against a post failing at publish time over a rounding difference.
+
+Tone is deliberately voice-y — reads like a plugged-in local texting you what's
+happening, not a press release. The opener rotates through a small fixed set,
+picked deterministically from the date (not true randomness), so a given day's
+caption is reproducible across re-renders and easy to test. Considered and
+dropped: a per-event parenthetical hook like "(free!)" — there's no reliable
+price/free signal in the event data today, and inventing one would be guessing,
+not copywriting.
 """
 
 from __future__ import annotations
@@ -39,6 +47,31 @@ _CATEGORY_HASHTAGS = {
     "Tech": "#elpasotech",
 }
 
+# Category -> the emoji that opens its caption line. Mirrors _CATEGORY_HASHTAGS'
+# keys so the two stay in sync; anything unmapped (including "Community", the
+# no-match fallback category) gets _DEFAULT_EMOJI.
+_CATEGORY_EMOJI = {
+    "Music": "🎶",
+    "Festivals": "🎉",
+    "Food & Drink": "🍽️",
+    "Arts & Theatre": "🎨",
+    "Sports": "🏟️",
+    "Family": "👨‍👩‍👧",
+    "Tech": "💻",
+    "Nightlife": "🌙",
+}
+_DEFAULT_EMOJI = "✨"
+
+# (opener text, flourish emoji) — day.toordinal() % len(_OPENERS) picks one,
+# so it varies day to day without needing real randomness.
+_OPENERS = [
+    ("TONIGHT'S THE NIGHT", "🌙"),
+    ("EL PASO, LISTEN UP", "📣"),
+    ("HAPPENING TODAY", "⚡"),
+    ("DON'T SLEEP ON TODAY", "👀"),
+    ("EL PASO'S GOT PLANS", "🔥"),
+]
+
 
 def _time_label(start_local: Optional[Any]) -> str:
     # Suppressed rather than guessed when the stored time isn't credible —
@@ -72,6 +105,20 @@ def _venue_label(row: dict[str, Any]) -> str:
     return str(row.get("venue") or "")
 
 
+def _emoji_for(row: dict[str, Any]) -> str:
+    for cat in row.get("categories") or []:
+        emoji = _CATEGORY_EMOJI.get(cat)
+        if emoji:
+            return emoji
+    return _DEFAULT_EMOJI
+
+
+def _date_label(day: date) -> str:
+    if _supports_dash():
+        return day.strftime("%a, %b %-d")
+    return f"{day.strftime('%a, %b')} {day.day}"
+
+
 def build_caption(
     day: date,
     picked: list[Any],
@@ -81,26 +128,32 @@ def build_caption(
 ) -> str:
     """Assemble the caption, degrading gracefully if it runs long.
 
-    `picked` is a list of selection.Candidate. Slide numbering starts at 2
-    because slide 1 is the cover.
+    `picked` is a list of selection.Candidate, already in chronological order.
     """
-    header = f"TODAY IN EL PASO — {day.strftime('%a, %b %-d')}" if _supports_dash() else (
-        f"TODAY IN EL PASO — {day.strftime('%a, %b ')}{day.day}"
-    )
-    footer = f"\n\nFull list, map and details at {site} (link in bio)."
+    opener, flourish = _OPENERS[day.toordinal() % len(_OPENERS)]
+    header = f"{opener} {flourish} — {_date_label(day)}"
+    n = len(picked)
+    if n == 0:
+        subhead = "Nothing on the radar right now — check back later."
+    else:
+        subhead = (
+            f"El Paso's not sleeping on this one — {n} thing{'s' if n != 1 else ''} "
+            "worth leaving the couch for:"
+        )
+    footer = f"\n\nFull list + map → {site}"
     tags = _hashtags([c.row for c in picked])
 
     # Progressive degradation, cheapest loss first: venue suffixes, then title
     # length, then whole lines, then optional hashtags.
     for drop_venue, title_cap, tag_count in _degradations(len(tags)):
         lines = []
-        for idx, cand in enumerate(picked, start=2):
+        for cand in picked:
             title = str(cand.row.get("title") or "").strip()
             if title_cap and len(title) > title_cap:
                 title = title[: title_cap - 1].rstrip() + "…"
             when = _time_label(cand.start_local)
             venue = "" if drop_venue else _venue_label(cand.row)
-            parts = [f"{idx}."]
+            parts = [_emoji_for(cand.row)]
             if when:
                 parts.append(f"{when} ·")
             parts.append(title)
@@ -110,13 +163,13 @@ def build_caption(
             lines.append(line)
 
         tag_block = "\n\n" + " ".join(tags[:tag_count]) if tag_count else ""
-        body = header + "\n\n" + "\n".join(lines) + footer + tag_block
+        body = header + "\n\n" + subhead + "\n\n" + "\n".join(lines) + footer + tag_block
         if len(body) <= max_caption:
             return body
         # Still too long even fully degraded: drop trailing event lines.
         while lines and len(body) > max_caption:
             lines.pop()
-            body = header + "\n\n" + "\n".join(lines) + footer + tag_block
+            body = header + "\n\n" + subhead + "\n\n" + "\n".join(lines) + footer + tag_block
         if len(body) <= max_caption:
             return body
 

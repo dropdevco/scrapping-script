@@ -115,6 +115,12 @@ class Settings:
         # happening tonight" without requiring real engagement data, which a
         # brand-new account doesn't have yet.
         self.ig_suggested_publish_hour = _int("IG_SUGGESTED_PUBLISH_HOUR", 17)
+        # Empty means today's single-unnamed-digest behavior. Set to e.g.
+        # "morning:11,evening:18" to run two independently-scheduled digests
+        # a day — each gets its own name (stored as ig_posts.slot) and
+        # suggested hour, and can coexist with the other on the same
+        # post_date (see migration 0006_ig_kind_slot.sql).
+        self.ig_digest_slots = _clean(os.getenv("IG_DIGEST_SLOTS")) or ""
 
         # Draft-ready notifications (scraper.social.notify). Each channel
         # self-disables when its own keys are missing, same idiom as everything

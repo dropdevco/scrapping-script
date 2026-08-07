@@ -72,6 +72,7 @@ async def notify_draft_ready(
     slide_paths: list[str],
     caption: str,
     scheduled_for: Optional[str] = None,
+    slot: Optional[str] = None,
 ) -> None:
     review_url: Optional[str] = None
     token = make_review_token(post_id)
@@ -79,9 +80,9 @@ async def notify_draft_ready(
         review_url = f"{settings.site_base_url}/admin/ig/review/{token}"
 
     await _notify_telegram(
-        http, storage_client, post_id, day, slide_paths, caption, review_url, scheduled_for
+        http, storage_client, post_id, day, slide_paths, caption, review_url, scheduled_for, slot
     )
-    await _notify_email(http, day, review_url, scheduled_for)
+    await _notify_email(http, day, review_url, scheduled_for, slot)
 
 
 async def _notify_telegram(
@@ -93,6 +94,7 @@ async def _notify_telegram(
     caption: str,
     review_url: Optional[str],
     scheduled_for: Optional[str],
+    slot: Optional[str],
 ) -> None:
     if not (settings.telegram_bot_token and settings.telegram_chat_id):
         return
@@ -119,9 +121,10 @@ async def _notify_telegram(
         if review_url:
             buttons[-1].append({"text": "\U0001f50d Full preview", "url": review_url})
 
+        slot_label = f" — {slot.title()}" if slot else ""
         # Plain text, no parse_mode: event titles routinely contain _ * [ ] —
         # any of which breaks Telegram's Markdown parser and drops the message.
-        text = f"Today in El Paso — {day.isoformat()}\n\n{caption[:3500]}"
+        text = f"Today in El Paso{slot_label} — {day.isoformat()}\n\n{caption[:3500]}"
         await http.post_json(
             f"{base}/sendMessage",
             json={
@@ -135,7 +138,11 @@ async def _notify_telegram(
 
 
 async def _notify_email(
-    http: HttpClient, day: date, review_url: Optional[str], scheduled_for: Optional[str]
+    http: HttpClient,
+    day: date,
+    review_url: Optional[str],
+    scheduled_for: Optional[str],
+    slot: Optional[str],
 ) -> None:
     if not (settings.resend_api_key and settings.notify_admin_email):
         return
@@ -145,13 +152,14 @@ async def _notify_email(
         )
         return
     try:
+        slot_label = f" — {slot.title()}" if slot else ""
         when = (
             f" Suggested to go out around {_format_local_time(scheduled_for, settings.ig_timezone)}."
             if scheduled_for
             else ""
         )
         html = (
-            f"<p>Today's Instagram carousel is ready to review.{when}</p>"
+            f"<p>Today's Instagram carousel{slot_label} is ready to review.{when}</p>"
             f'<p><a href="{review_url}">Review &amp; approve — {day.isoformat()}</a></p>'
             f"<p>Link expires in {settings.ig_notify_ttl_hours}h.</p>"
         )
@@ -160,7 +168,7 @@ async def _notify_email(
             json={
                 "from": settings.notify_email_from,
                 "to": [settings.notify_admin_email],
-                "subject": f"Chisme IG post ready — {day.isoformat()}",
+                "subject": f"Chisme IG post ready{slot_label} — {day.isoformat()}",
                 "html": html,
             },
             headers={"Authorization": f"Bearer {settings.resend_api_key}"},

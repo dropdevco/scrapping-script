@@ -26,6 +26,8 @@ export type IgPostSummary = {
   event_ids: string[] | null;
   error: string | null;
   scheduled_for?: string | null;
+  kind?: string | null;
+  slot?: string | null;
 };
 
 export type PostCardActions = {
@@ -47,12 +49,22 @@ export function PostCard({
     <article className="rounded-[1.25rem] border-[1.5px] border-ink bg-card p-5 shadow-[3px_3px_0_var(--color-ink)]">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="font-display text-xl font-bold text-ink">
+          <h2 className="flex flex-wrap items-center gap-2 font-display text-xl font-bold text-ink">
             {new Date(`${post.post_date}T12:00:00`).toLocaleDateString("en-US", {
               weekday: "long",
               month: "long",
               day: "numeric",
             })}
+            {post.kind === "breaking" && (
+              <span className="rounded-full bg-pop-red px-2.5 py-0.5 font-condensed text-[11px] uppercase tracking-[0.1em] text-white">
+                Breaking
+              </span>
+            )}
+            {post.slot && (
+              <span className="rounded-full border border-ink/30 px-2.5 py-0.5 font-condensed text-[11px] uppercase tracking-[0.1em] text-ink-soft">
+                {post.slot}
+              </span>
+            )}
           </h2>
           <p className="mt-1 font-condensed text-[12px] uppercase tracking-[0.14em] text-ink-faint">
             {post.status} · {slides.length} slide{slides.length === 1 ? "" : "s"} ·{" "}

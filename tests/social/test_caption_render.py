@@ -47,22 +47,39 @@ def test_caption_hashtag_count_is_capped():
     assert text.count("#") <= caption_mod.MAX_HASHTAGS
 
 
-def test_caption_numbering_starts_at_two_because_slide_one_is_the_cover():
-    text = caption_mod.build_caption(date(2026, 8, 5), [_candidate("Only Event")])
-    assert "\n2." in text
-    assert "\n1." not in text
+def test_caption_has_no_numbered_list_markers():
+    """Numbering was dropped in favor of category emoji — order is still
+    implied by chronological position, same as the slides."""
+    picked = [_candidate("Only Event", idx=i) for i in range(3)]
+    text = caption_mod.build_caption(date(2026, 8, 5), picked)
+    for n in range(1, 10):
+        assert f"\n{n}." not in text
+
+
+def test_caption_event_line_opens_with_the_categorys_emoji():
+    text = caption_mod.build_caption(date(2026, 8, 5), [_candidate("Concert", categories=["Music"])])
+    assert caption_mod._CATEGORY_EMOJI["Music"] in text
+
+
+def test_caption_opener_is_deterministic_per_date():
+    """Same date -> same opener every render (reproducible, not truly random)."""
+    picked = [_candidate("Concert")]
+    a = caption_mod.build_caption(date(2026, 8, 5), picked)
+    b = caption_mod.build_caption(date(2026, 8, 5), picked)
+    assert a == b
 
 
 def test_caption_includes_header_and_link():
     text = caption_mod.build_caption(date(2026, 8, 5), [_candidate("Concert")], site="epchisme.com")
-    assert "TODAY IN EL PASO" in text
+    opener, _flourish = caption_mod._OPENERS[date(2026, 8, 5).toordinal() % len(caption_mod._OPENERS)]
+    assert opener in text
     assert "epchisme.com" in text
 
 
 def test_caption_handles_empty_selection():
     text = caption_mod.build_caption(date(2026, 8, 5), [])
-    assert "TODAY IN EL PASO" in text
     assert len(text) <= caption_mod.MAX_CAPTION
+    assert "check back later" in text
 
 
 # ── text fitting ───────────────────────────────────────────────────────────────
@@ -128,6 +145,47 @@ def test_event_slide_with_photo_renders():
 def test_event_slide_survives_missing_venue_and_categories():
     row = {"id": "x", "title": "Bare Minimum Event", "categories": [], "location": ""}
     _assert_valid_slide(render.render_event_slide(2, 5, row, None, None))
+
+
+def test_event_slides_have_no_numbering_badge_and_cycle_through_variants():
+    """Regression coverage for two real things this redesign changed: the
+    "N / total" badge is gone, and consecutive slides rotate through all
+    three layouts/accents deterministically."""
+    assert [render._variant_for(i) for i in (2, 3, 4, 5)] == [0, 1, 2, 0]
+
+
+# ── address formatting ────────────────────────────────────────────────────────
+def test_address_label_strips_state_and_zip():
+    row = {"location": "123 Main St, El Paso, TX 79901"}
+    assert render._address_label(row) == "123 Main St, El Paso"
+
+
+def test_address_label_strips_trailing_country_code():
+    """A real live render exposed this: some sources append ', US' after the
+    zip ('4100 East Paisano Street, El Paso, TX 79905, US')."""
+    row = {"location": "4100 East Paisano Street, El Paso, TX 79905, US"}
+    assert render._address_label(row) == "4100 East Paisano Street, El Paso"
+
+
+def test_address_label_passes_through_when_no_state_zip_present():
+    row = {"location": "125 W Mills Ave, El Paso"}
+    assert render._address_label(row) == "125 W Mills Ave, El Paso"
+
+
+def test_address_label_empty_when_no_location():
+    assert render._address_label({}) == ""
+
+
+def test_event_slide_with_two_line_title_and_time_does_not_crash():
+    """The exact shape that caused a real overlap bug: a full-bleed-variant
+    slide (index 3) with a title long enough to wrap to 2 lines AND a time
+    stamp — must still render at valid CANVAS size regardless of the fix."""
+    cand = _candidate(
+        "Friday Salsa Social with Team Havana Salsa Band",
+        hour=15,
+        venue="El Paso Ballroom Dance Academy",
+    )
+    _assert_valid_slide(render.render_event_slide(3, 9, cand.row, None, cand.start_local))
 
 
 def test_cover_branding_fits_inside_the_profile_grid_crop():

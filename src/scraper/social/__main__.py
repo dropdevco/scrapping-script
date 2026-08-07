@@ -46,6 +46,30 @@ def _suggested_schedule(day: date, tz_name: str, hour: int) -> str:
     return suggested.astimezone(timezone.utc).isoformat()
 
 
+def _parse_slots(raw: str, default_hour: int) -> list[tuple[Optional[str], int]]:
+    """`"morning:11,evening:18"` -> `[("morning", 11), ("evening", 18)]`.
+
+    Empty input is the pre-multi-slot default: one unnamed digest at
+    `default_hour` — byte-identical to how `build()` behaved before slots
+    existed, so leaving IG_DIGEST_SLOTS unset changes nothing.
+    """
+    raw = raw.strip()
+    if not raw:
+        return [(None, default_hour)]
+    slots: list[tuple[Optional[str], int]] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, hour_str = part.partition(":")
+        try:
+            hour = int(hour_str)
+        except ValueError:
+            hour = default_hour
+        slots.append((name.strip() or None, hour))
+    return slots or [(None, default_hour)]
+
+
 # ── build ──────────────────────────────────────────────────────────────────────
 async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> int:
     tz_name = settings.ig_timezone
@@ -55,14 +79,34 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
         log.error("Supabase is not configured; nothing to do.")
         return 1
 
+    slots = _parse_slots(settings.ig_digest_slots, settings.ig_suggested_publish_hour)
+    rc = 0
+    for slot_name, slot_hour in slots:
+        rc |= await _build_one(storage, day, tz_name, dry_run, out_dir, slot_name, slot_hour)
+    return rc
+
+
+async def _build_one(
+    storage: Storage,
+    day: date,
+    tz_name: str,
+    dry_run: bool,
+    out_dir: Optional[str],
+    slot_name: Optional[str],
+    slot_hour: int,
+) -> int:
+    label = f" [{slot_name}]" if slot_name else ""
     start_iso, end_iso = selection.day_bounds(day, tz_name)
-    log.info("building carousel for %s (%s .. %s)", day, start_iso, end_iso)
+    log.info("building carousel for %s%s (%s .. %s)", day, label, start_iso, end_iso)
 
     rows = await storage.query_events_for_day(CITY, start_iso, end_iso)
-    log.info("%d approved El Paso event(s) today", len(rows))
+    log.info("%d approved El Paso event(s) today%s", len(rows), label)
     if not rows:
-        return await _skip(storage, day, "no events for this date", dry_run)
+        return await _skip(storage, day, "no events for this date", dry_run, slot_name)
 
+    # Recurrence suppression spans this window regardless of slot, so a later
+    # slot the same day naturally down-ranks whatever an earlier slot already
+    # published — no slot-aware selection logic needed.
     recent_keys = await storage.recent_slide_keys((day - timedelta(days=14)).isoformat())
 
     # Rank first, then verify photos in rank order — so we only pay for
@@ -84,13 +128,14 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
             picked.append(cand)
             photos.append(photo)
 
-    log.info("%d event(s) have a usable photo", len(picked))
+    log.info("%d event(s) have a usable photo%s", len(picked), label)
     if len(picked) < settings.ig_min_slides:
         return await _skip(
             storage,
             day,
             f"only {len(picked)} usable slide(s), minimum is {settings.ig_min_slides}",
             dry_run,
+            slot_name,
         )
 
     # Re-order to chronological for the reader, keeping each photo with its
@@ -108,10 +153,10 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
         jpegs.append(render.render_event_slide(i, total, cand.row, photo, cand.start_local))
 
     text = caption_mod.build_caption(day, picked, site=settings.ig_handle)
-    log.info("rendered %d slide(s), caption %d chars", len(jpegs), len(text))
+    log.info("rendered %d slide(s), caption %d chars%s", len(jpegs), len(text), label)
 
     if out_dir:
-        target = Path(out_dir)
+        target = Path(out_dir) / (slot_name or ".")
         target.mkdir(parents=True, exist_ok=True)
         for i, blob in enumerate(jpegs):
             (target / f"{i:02d}.jpg").write_bytes(blob)
@@ -122,11 +167,13 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
         log.info("dry run: not uploading or inserting a draft")
         return 0
 
-    scheduled_for = _suggested_schedule(day, tz_name, settings.ig_suggested_publish_hour)
+    scheduled_for = _suggested_schedule(day, tz_name, slot_hour)
     draft = await storage.create_ig_draft(
         {
             "post_date": day.isoformat(),
             "status": "draft",
+            "kind": "digest",
+            "slot": slot_name,
             "event_ids": [str(c.row["id"]) for c in picked],
             "slide_keys": [c.key for c in picked],
             "caption": text,
@@ -134,7 +181,7 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
         }
     )
     if draft is None:
-        log.info("a live post already exists for %s; nothing inserted", day)
+        log.info("a live post already exists for %s%s; nothing inserted", day, label)
         return 0
 
     post_id = str(draft["id"])
@@ -149,7 +196,7 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
         return 1
 
     await storage.update_ig_post(post_id, {"slide_paths": paths})
-    log.info("draft %s ready for review (%d slides)", post_id, len(paths))
+    log.info("draft %s ready for review (%d slides)%s", post_id, len(paths), label)
 
     if not settings.ig_autopost:
         # No point pinging for approval on a post that's about to auto-publish
@@ -163,6 +210,7 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
                 slide_paths=paths,
                 caption=text,
                 scheduled_for=scheduled_for,
+                slot=slot_name,
             )
 
     # Phase 2: same code path, no separate flag plumbing.
@@ -173,11 +221,20 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
     return 0
 
 
-async def _skip(storage: Storage, day: date, reason: str, dry_run: bool) -> int:
-    log.info("skipping %s: %s", day, reason)
+async def _skip(
+    storage: Storage, day: date, reason: str, dry_run: bool, slot_name: Optional[str] = None
+) -> int:
+    label = f" [{slot_name}]" if slot_name else ""
+    log.info("skipping %s%s: %s", day, label, reason)
     if not dry_run and storage.enabled:
         await storage.create_ig_draft(
-            {"post_date": day.isoformat(), "status": "skipped", "error": reason}
+            {
+                "post_date": day.isoformat(),
+                "status": "skipped",
+                "kind": "digest",
+                "slot": slot_name,
+                "error": reason,
+            }
         )
     return 0
 

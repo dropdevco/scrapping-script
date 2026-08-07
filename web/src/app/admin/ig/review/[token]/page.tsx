@@ -41,7 +41,7 @@ export default async function ReviewByTokenPage({
   const admin = supabaseAdmin();
   const { data, error } = await admin
     .from("ig_posts")
-    .select("id, post_date, status, slide_paths, caption, event_ids, error, scheduled_for")
+    .select("id, post_date, status, slide_paths, caption, event_ids, error, scheduled_for, kind, slot")
     .eq("id", claim.postId)
     .maybeSingle();
 

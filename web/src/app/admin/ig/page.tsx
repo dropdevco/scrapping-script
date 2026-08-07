@@ -20,6 +20,8 @@ type IgPost = {
   error: string | null;
   created_at: string;
   scheduled_for: string | null;
+  kind: string | null;
+  slot: string | null;
 };
 
 function Gate({ children }: { children: React.ReactNode }) {
@@ -50,7 +52,9 @@ export default async function AdminIgPage() {
   const admin = supabaseAdmin();
   const { data, error } = await admin
     .from("ig_posts")
-    .select("id, post_date, status, slide_paths, caption, event_ids, error, created_at, scheduled_for")
+    .select(
+      "id, post_date, status, slide_paths, caption, event_ids, error, created_at, scheduled_for, kind, slot",
+    )
     .in("status", ["draft", "approved", "publishing", "failed"])
     .order("post_date", { ascending: false })
     .limit(10);

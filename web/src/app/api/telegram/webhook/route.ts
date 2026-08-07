@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { approveIgPostRow, publishIgPostNowRow, rejectIgPostRow } from "@/lib/ig/moderate";
+import { triggerBuild } from "@/lib/ig/githubDispatch";
 
 /* Telegram is its own auth boundary here — no token in the callback_data.
    Two independent checks stand in for it:
@@ -27,11 +28,29 @@ export async function POST(request: Request) {
   }
 
   const update = await request.json().catch(() => null);
+  const expectedChatId = process.env.TELEGRAM_CHAT_ID;
+
+  const msg = update?.message;
+  if (msg && typeof msg.text === "string") {
+    const chatId = String(msg.chat?.id ?? "");
+    // Silently ignored rather than answered — unlike a callback_query (whose
+    // "Not authorized" toast is only ever visible to the tapper), replying
+    // in the chat itself would confirm to a stranger that this bot exists
+    // and responds, which a private admin automation shouldn't do.
+    if (expectedChatId && chatId === expectedChatId && msg.text.trim().startsWith("/build")) {
+      await triggerBuild();
+      await tg("sendMessage", {
+        chat_id: chatId,
+        text: "Building today's carousel — you'll get a new message here in a minute or two.",
+      });
+    }
+    return NextResponse.json({ ok: true });
+  }
+
   const cb = update?.callback_query;
-  if (!cb) return NextResponse.json({ ok: true }); // not a button tap — nothing to do
+  if (!cb) return NextResponse.json({ ok: true }); // not a button tap or a command — nothing to do
 
   const chatId = String(cb.message?.chat?.id ?? cb.from?.id ?? "");
-  const expectedChatId = process.env.TELEGRAM_CHAT_ID;
   if (!expectedChatId || chatId !== expectedChatId) {
     await tg("answerCallbackQuery", { callback_query_id: cb.id, text: "Not authorized" });
     return NextResponse.json({ ok: true });

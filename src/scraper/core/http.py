@@ -78,6 +78,25 @@ class HttpClient:
         resp.raise_for_status()
         return resp.text
 
+    async def get_bytes(self, url: str, **kwargs: object) -> bytes:
+        resp = await self.request("GET", url, **kwargs)
+        resp.raise_for_status()
+        return resp.content
+
+    async def post_json(self, url: str, **kwargs: object) -> object:
+        """POST returning parsed JSON. Graph API publishing is POST-only, and
+        the error body carries the actual reason (bad scope, unreachable image
+        URL, expired container), so it's surfaced rather than swallowed by
+        raise_for_status' generic message."""
+        resp = await self.request("POST", url, **kwargs)
+        if resp.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"{resp.status_code} from {url}: {resp.text[:500]}",
+                request=resp.request,
+                response=resp,
+            )
+        return resp.json()
+
     async def can_fetch(self, url: str) -> bool:
         """Check robots.txt for the URL's host. Fail-open on fetch errors."""
         parts = urlsplit(url)

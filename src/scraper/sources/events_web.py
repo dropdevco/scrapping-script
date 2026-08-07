@@ -164,6 +164,177 @@ def _walk_for_events(node: Any):
             yield node
 
 
+def _is_link_only_paragraph(p: Any) -> bool:
+    """True for a <p> that's just a wrapped CTA button ("View Website", "Purchase
+    Your Admission Tickets"), not real description prose — its entire text is a
+    single contained link's text, with nothing else in the paragraph. Both
+    templates wrap these buttons in a plain <p> alongside the real paragraphs,
+    and we already render the actual ticket link as its own button from
+    event.url, so keeping these would just duplicate boilerplate into the copy.
+    """
+    text = p.get_text(strip=True)
+    if not text:
+        return True
+    links = p.find_all("a")
+    return len(links) == 1 and links[0].get_text(strip=True) == text
+
+
+def _full_description_and_link(
+    soup: Any, container_selector: str
+) -> tuple[Optional[str], Optional[str]]:
+    """Full "About this event" body text, AND the real outbound link a "View
+    Website"/"Purchase Tickets" CTA in that same copy points at, from a detail
+    page's content container. Both pulled in one pass since they come from the
+    exact same paragraphs — one is what's left after excluding CTAs, the other
+    is what the first excluded CTA points to.
+
+    Both Visit El Paso and La Nube run the same white-label "event-card"
+    calendar widget (see module docstring), but neither source's own summary
+    is the real thing: Visit El Paso's schema.org JSON-LD `description` is an
+    SEO meta-description auto-truncated to ~200 chars (ends in a literal "…"),
+    and the listing-card blurb used for La Nube is a short teaser, not the
+    full copy. The complete text is always in this template's own <p> tags
+    on the detail page — this pulls that instead of trusting either summary.
+
+    Neither source's `url` is useful either: both are pure calendar
+    aggregators, not the actual venue/ticket seller, and their own JSON-LD
+    `url` field just points back at the same aggregator page — a dead end for
+    anyone trying to actually buy a ticket or find the business. The real
+    destination (flixbrewhouse.com, koronaevent.com, whatever it is) is
+    always the one link inside a CTA-only <p> in this same container — the
+    thing _is_link_only_paragraph excludes from the description text is
+    exactly the thing worth keeping as the URL.
+
+    `container_selector` is a Bootstrap utility class (`.mb-5`, `.mt-3`) —
+    both templates reuse the same utility classes elsewhere on the page (nav
+    menus, badge wrappers, spacing on unrelated sections), so it matches
+    several elements and only ONE of them is the real content block. Every
+    match is tried in document order and the first one that actually
+    contains <p> tags wins — badge/date/nav wrappers never have paragraph
+    children, only real body copy does.
+    """
+    for container in soup.select(container_selector):
+        paragraphs: list[str] = []
+        link: Optional[str] = None
+        for p in container.select("p"):
+            if _is_link_only_paragraph(p):
+                if link is None:
+                    a = p.find("a")
+                    href = a.get("href") if a else None
+                    if href:
+                        link = href
+                continue
+            text = p.get_text(separator=" ", strip=True)
+            if text:
+                paragraphs.append(text)
+        if paragraphs:
+            return "\n\n".join(paragraphs), link
+    return None, None
+
+
+def _find_key(node: Any, key: str) -> Any:
+    """Depth-first search for the first occurrence of `key` anywhere in a
+    nested dict/list — used to fish one value out of a large, unstable
+    third-party page-state blob (Next.js __NEXT_DATA__ etc.) without hardcoding
+    its exact nesting, which shifts between a site's deploys."""
+    if isinstance(node, dict):
+        if key in node:
+            return node[key]
+        for v in node.values():
+            found = _find_key(v, key)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_key(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _next_data(html: str) -> Any:
+    """Parsed __NEXT_DATA__ JSON from a Next.js-rendered page, or None."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    tag = soup.find("script", id="__NEXT_DATA__")
+    if not tag or not tag.string:
+        return None
+    try:
+        return json.loads(tag.string)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+_EVENTBRITE_DETAIL_RE = re.compile(r"/e/[^/?#]+-tickets-\d+")
+_MEETUP_DETAIL_RE = re.compile(r"/events/\d+")
+
+
+def _eventbrite_full_description(html: str) -> Optional[str]:
+    """Eventbrite's own schema.org/OG/Twitter `description` is a short SEO
+    summary (~140 chars on a sampled live event) — nowhere near the real
+    "About this event" copy, which the page instead renders from a
+    structuredContent.modules[] block (rich-text HTML fragments) buried in
+    its __NEXT_DATA__ state. Verified on a live event: 137 chars from
+    schema.org vs 2,408 from this. Every module's HTML fragment is stripped
+    to plain text and joined; a page with no structuredContent (a listing
+    page, not a single event) yields None."""
+    data = _next_data(html)
+    if data is None:
+        return None
+    structured_content = _find_key(data, "structuredContent")
+    modules = structured_content.get("modules") if isinstance(structured_content, dict) else None
+    if not isinstance(modules, list):
+        return None
+
+    from bs4 import BeautifulSoup
+
+    parts: list[str] = []
+    for m in modules:
+        if not isinstance(m, dict):
+            continue
+        frag = m.get("text")
+        if not isinstance(frag, str) or not frag.strip():
+            continue
+        text = BeautifulSoup(frag, "html.parser").get_text(separator=" ", strip=True)
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts) if parts else None
+
+
+def _meetup_full_description(html: str) -> Optional[str]:
+    """Meetup's schema.org/OG/Twitter `description` is inconsistently
+    truncated — sometimes complete, sometimes cut off mid-word with no
+    ellipsis (observed both on the same live event on different requests).
+    The page's __NEXT_DATA__ state always carries the real, complete text at
+    props.pageProps.event.description (865 chars vs 155 truncated, on the
+    event where this was caught), so that's used directly."""
+    data = _next_data(html)
+    if not isinstance(data, dict):
+        return None
+    props = data.get("props")
+    page_props = props.get("pageProps") if isinstance(props, dict) else None
+    event = page_props.get("event") if isinstance(page_props, dict) else None
+    desc = event.get("description") if isinstance(event, dict) else None
+    return desc.strip() if isinstance(desc, str) and desc.strip() else None
+
+
+def _individual_page_full_description(url: str, html: str) -> Optional[str]:
+    """Only meaningful on a SINGLE event's own detail page. `_direct_urls`
+    and the DDG site-search both also produce multi-event LISTING pages
+    (eventbrite.com/d/…/all-events/, meetup.com/find/…) whose JSON-LD holds
+    several distinct events at once — this must never run there, since the
+    page-level state it reads corresponds to at most one event, not every
+    JSON-LD node found on the page. The regexes require the URL shape only a
+    genuine individual event page has (Eventbrite: /e/…-tickets-<id>; Meetup:
+    /events/<id>) so a listing page's URL simply never matches."""
+    if "eventbrite." in url and _EVENTBRITE_DETAIL_RE.search(url):
+        return _eventbrite_full_description(html)
+    if "meetup.com" in url and _MEETUP_DETAIL_RE.search(url):
+        return _meetup_full_description(html)
+    return None
+
+
 def _iter_jsonld_events(html: str):
     from bs4 import BeautifulSoup
 
@@ -338,6 +509,9 @@ async def _fetch_calendar_listing(listing_url: str, http: HttpClient) -> Optiona
 
 _VISITELPASO_LISTING = "https://visitelpaso.com/events"
 _VISITELPASO_MAX_EVENTS = 30  # cards are listed soonest-first; caps detail-page fetches
+# Sole content container on a Visit El Paso detail page, verified to hold every
+# <p> of the full "About this event" copy — see _full_description.
+_VISITELPASO_DESC_SELECTOR = "div.mb-5"
 
 
 async def _visitelpaso_events(http: HttpClient) -> list[tuple[str, list[str]]]:
@@ -367,17 +541,43 @@ async def _visitelpaso_events(http: HttpClient) -> list[tuple[str, list[str]]]:
 
 _LANUBE_LISTING = "https://la-nube.org/plan-your-day/calendar"
 _LANUBE_MAX_EVENTS = 60
+# Sole content container on a La Nube detail page holding the full "About
+# this event" copy — same shared widget as Visit El Paso, different wrapper.
+_LANUBE_DESC_SELECTOR = "section.event-detail .mt-3"
+
+
+async def _lanube_full_description_and_link(
+    href: str, http: HttpClient
+) -> tuple[Optional[str], Optional[str]]:
+    try:
+        if not await http.can_fetch(href):
+            return None, None
+        html = await http.get_text(href, headers={"User-Agent": _BROWSER_UA})
+    except Exception as exc:  # noqa: BLE001
+        log.debug("fetch %s failed: %s", href, exc)
+        return None, None
+
+    from bs4 import BeautifulSoup
+
+    return _full_description_and_link(BeautifulSoup(html, "html.parser"), _LANUBE_DESC_SELECTOR)
 
 
 async def _lanube_events(http: HttpClient) -> list[Event]:
-    """Events from La Nube's calendar (same widget as Visit El Paso), built
-    straight from the listing card's fields — its detail pages carry no JSON-LD.
+    """Events from La Nube's calendar (same widget as Visit El Paso). Its
+    detail pages carry no JSON-LD, so the listing card supplies every other
+    field — but NOT the description: that's a short teaser blurb, not the
+    full copy, so each event's detail page is fetched separately (concurrent,
+    bounded by HttpClient's shared semaphore — same pattern Visit El Paso
+    already uses) for the real text, same fix as Visit El Paso above. The
+    same fetch also recovers the real ticket/info link (see
+    _full_description_and_link) — La Nube is a calendar aggregator, so its
+    own page is never where a visitor actually buys a ticket.
     """
     soup = await _fetch_calendar_listing(_LANUBE_LISTING, http)
     if soup is None:
         return []
 
-    events: list[Event] = []
+    cards: list[dict[str, Any]] = []
     seen: set[str] = set()
     for card in soup.select(".event-card"):
         fields = _parse_calendar_card(card, _LANUBE_LISTING)
@@ -385,24 +585,33 @@ async def _lanube_events(http: HttpClient) -> list[Event]:
         if not href or href in seen or not fields["title"]:
             continue
         seen.add(href)
+        cards.append(fields)
+        if len(cards) >= _LANUBE_MAX_EVENTS:
+            break
+
+    details = await asyncio.gather(
+        *(_lanube_full_description_and_link(f["href"], http) for f in cards)
+    )
+
+    events: list[Event] = []
+    for fields, (full_description, real_url) in zip(cards, details):
+        href = fields["href"]
         start, end = _parse_card_datetime(fields["date_text"], fields["time_text"])
         events.append(
             Event(
                 source="events_web",
                 title=fields["title"],
-                description=fields["description"],
+                description=full_description or fields["description"],
                 start_time=start,
                 end_time=end,
                 venue=fields["venue"],
                 location=fields["address"],
-                url=href,
+                url=real_url or href,
                 image_url=clean_image_url(fields["image"]),
                 categories=fields["categories"] or guess_categories(fields["title"]),
                 raw=fields,
             )
         )
-        if len(events) >= _LANUBE_MAX_EVENTS:
-            break
     return events
 
 
@@ -443,9 +652,37 @@ class EventsWebSource(Source):
     async def _page_events_with_categories(
         self, url: str, categories: list[str], http: HttpClient
     ) -> list[Event]:
-        page = await self._page_events(url, http)
-        if categories:
-            for e in page:
+        """Visit El Paso detail pages only. Fetches once so the full-body
+        description AND the real destination link (see
+        _full_description_and_link) can both be pulled from the same HTML
+        already fetched for the JSON-LD event data, instead of trusting the
+        JSON-LD's own truncated `description` and self-referential `url`.
+        """
+        try:
+            if not await http.can_fetch(url):
+                return []
+            html = await http.get_text(url, headers={"User-Agent": _BROWSER_UA})
+        except Exception as exc:  # noqa: BLE001
+            log.debug("fetch %s failed: %s", url, exc)
+            return []
+
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        full_description, real_url = _full_description_and_link(soup, _VISITELPASO_DESC_SELECTOR)
+
+        page: list[Event] = []
+        for node in _iter_jsonld_events(html):
+            event = _page_event_from_jsonld(node, url, source=self.name)
+            if event is not None:
+                page.append(event)
+
+        for e in page:
+            if full_description:
+                e.description = full_description
+            if real_url:
+                e.url = real_url
+            if categories:
                 e.categories = categories
         return page
 
@@ -463,6 +700,11 @@ class EventsWebSource(Source):
             event = _page_event_from_jsonld(node, url, source=self.name)
             if event is not None:
                 out.append(event)
+
+        full_description = _individual_page_full_description(url, html)
+        if full_description:
+            for e in out:
+                e.description = full_description
         return out
 
 

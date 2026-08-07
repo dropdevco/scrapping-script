@@ -94,6 +94,40 @@ class Settings:
         self.threads_access_token = _clean(os.getenv("THREADS_ACCESS_TOKEN"))
         self.threads_user_id = _clean(os.getenv("THREADS_USER_ID"))
 
+        # Daily Instagram carousel (scraper.social)
+        # Phase 1 leaves autopost off: the build job renders + drafts, a human
+        # approves in /admin/ig, and the publish sweep ships it. Flipping this to
+        # true makes the build publish immediately via the SAME code path.
+        self.ig_autopost = _bool("IG_AUTOPOST", False)
+        self.ig_slides_bucket = _clean(os.getenv("IG_SLIDES_BUCKET")) or "ig-slides"
+        # El Paso is Mountain time. "Today" must be the local calendar day, not
+        # the UTC one the CI runner happens to be in.
+        self.ig_timezone = _clean(os.getenv("IG_TIMEZONE")) or "America/Denver"
+        # Floor, not a target: a 3-slide "today in El Paso" reads worse than
+        # posting nothing, and thin days are common (only ~half of events carry
+        # a usable photo).
+        self.ig_min_slides = _int("IG_MIN_SLIDES", 4)
+        self.ig_max_slides = _int("IG_MAX_SLIDES", 9)  # +1 cover = Instagram's 10 cap
+        self.ig_slide_retention_days = _int("IG_SLIDE_RETENTION_DAYS", 7)
+        self.ig_handle = _clean(os.getenv("IG_HANDLE")) or "epchisme.com"
+
+        # Draft-ready notifications (scraper.social.notify). Each channel
+        # self-disables when its own keys are missing, same idiom as everything
+        # else here — Telegram and email are independent, either can be on alone.
+        self.telegram_bot_token = _clean(os.getenv("TELEGRAM_BOT_TOKEN"))
+        self.telegram_chat_id = _clean(os.getenv("TELEGRAM_CHAT_ID"))
+        self.resend_api_key = _clean(os.getenv("RESEND_API_KEY"))
+        self.notify_admin_email = _clean(os.getenv("NOTIFY_ADMIN_EMAIL"))
+        self.notify_email_from = (
+            _clean(os.getenv("NOTIFY_EMAIL_FROM")) or "Chisme <onboarding@resend.dev>"
+        )
+        # Signs the token-gated /admin/ig/review/[token] page link (Next.js verifies
+        # with the same secret) — unset means no review link is minted, email notify
+        # no-ops, Telegram still works via its own inline approve/reject buttons.
+        self.ig_notify_secret = _clean(os.getenv("IG_NOTIFY_SECRET"))
+        self.ig_notify_ttl_hours = _int("IG_NOTIFY_TTL_HOURS", 36)
+        self.site_base_url = _clean(os.getenv("SITE_BASE_URL")) or "https://epchisme.com"
+
     @property
     def storage_enabled(self) -> bool:
         return bool(self.supabase_url and self.supabase_key)

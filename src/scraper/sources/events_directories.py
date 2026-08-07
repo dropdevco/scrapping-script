@@ -14,14 +14,20 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 from ..core.categorize import guess_categories
 from ..core.http import HttpClient
 from ..core.models import Event, Kind, SearchParams
 from .base import Source
-from .events_web import _BROWSER_UA, _in_window, _iter_jsonld_events, _page_event_from_jsonld
+from .events_web import (
+    _BROWSER_UA,
+    _in_window,
+    _is_link_only_paragraph,
+    _iter_jsonld_events,
+    _page_event_from_jsonld,
+)
 
 log = logging.getLogger("scraper.events_directories")
 
@@ -91,6 +97,43 @@ NOISE_TEXT = {
     "more info",
     "load more events",
 }
+
+_CITY_MAX_DETAILS = 60  # caps detail-page fetches per run, same order as other directories
+
+
+def _city_event_full_description(soup: Any) -> Optional[str]:
+    """Full description from a events.elpasotexas.gov event-detail.php page.
+
+    The listing page's flattened anchor text (what CITY_EVENT_RE parses) never
+    carries a description at all — city_of_el_paso_events events used to store
+    none. Each event's own detail page does, in .eventsDetail: the shared
+    template puts the venue/date block and the real description as SIBLING <p>
+    children there, e.g.:
+
+        <p><strong>Wed, 8/5/2026</strong>...<strong>Richard Burges...</strong></p>
+        <p><p>Join us every Wednesday...</p><p>Ages 9-12 years.</p>...</p>
+        <p><a href="...">Visit Libraries Website</a></p>
+
+    The venue/date block always contains <strong> tags and the real
+    description never does, so that's what distinguishes them — same
+    _is_link_only_paragraph exclusion as every other source handles its own
+    trailing CTA link with. recursive=False matters here: BeautifulSoup keeps
+    this page's malformed nested <p>Ages 9-12...</p> markup as genuinely
+    nested rather than flattening it the way a browser would, so a plain
+    .select("p") would return both the wrapping paragraph AND its own nested
+    children and double the text.
+    """
+    container = soup.select_one(".eventsDetail")
+    if not container:
+        return None
+    paragraphs = []
+    for p in container.find_all("p", recursive=False):
+        if p.find("strong") or _is_link_only_paragraph(p):
+            continue
+        text = p.get_text(separator=" ", strip=True)
+        if text:
+            paragraphs.append(text)
+    return "\n\n".join(paragraphs) if paragraphs else None
 
 
 def _wanted_for_location(directory: Directory, location: str | None) -> bool:
@@ -232,12 +275,21 @@ class EventDirectoriesSource(Source):
         if not html:
             return []
 
-        events = self._events_from_page(html, directory.url, directory.name)
-        detail_urls = self._detail_urls(html, directory)
-        detail_pages = await asyncio.gather(*(self._fetch(url, http) for url in detail_urls))
-        for url, detail_html in zip(detail_urls, detail_pages):
-            if detail_html:
-                events.extend(self._events_from_page(detail_html, url, directory.name))
+        events = await self._events_from_page(html, directory.url, directory.name, http)
+
+        # city_of_el_paso_events fetches its own detail pages inside
+        # _city_listing_events now (for the description JSON-LD never has
+        # here — see there), so the generic detail-page crawl below would
+        # just fetch every one of those same URLs a second time for nothing:
+        # _events_from_page's regex-based extraction only matches the
+        # LISTING page's flattened anchor text, never a detail page's own
+        # markup, so running it again on each detail page always yields [].
+        if directory.name != "city_of_el_paso_events":
+            detail_urls = self._detail_urls(html, directory)
+            detail_pages = await asyncio.gather(*(self._fetch(url, http) for url in detail_urls))
+            for url, detail_html in zip(detail_urls, detail_pages):
+                if detail_html:
+                    events.extend(await self._events_from_page(detail_html, url, directory.name, http))
 
         topic = (params.query or "").strip().lower()
         if topic:
@@ -258,7 +310,9 @@ class EventDirectoriesSource(Source):
             log.debug("fetch %s failed: %s", url, exc)
             return None
 
-    def _events_from_page(self, html: str, url: str, source_name: str) -> list[Event]:
+    async def _events_from_page(
+        self, html: str, url: str, source_name: str, http: HttpClient
+    ) -> list[Event]:
         out: list[Event] = []
         for node in _iter_jsonld_events(html):
             event = _page_event_from_jsonld(node, url, source=self.name)
@@ -274,7 +328,7 @@ class EventDirectoriesSource(Source):
         elif source_name == "axs_el_paso":
             out.extend(self._axs_listing_events(html, url))
         elif source_name == "city_of_el_paso_events":
-            out.extend(self._city_listing_events(html, url))
+            out.extend(await self._city_listing_events(html, url, http))
         return out
 
     def _elpasolive_listing_events(self, html: str, url: str) -> list[Event]:
@@ -349,11 +403,11 @@ class EventDirectoriesSource(Source):
             )
         return events
 
-    def _city_listing_events(self, html: str, url: str) -> list[Event]:
+    async def _city_listing_events(self, html: str, url: str, http: HttpClient) -> list[Event]:
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "html.parser")
-        events: list[Event] = []
+        pending: list[tuple[Event, str]] = []
         for anchor in soup.find_all("a", href=True):
             text = anchor.get_text(" ", strip=True)
             match = CITY_EVENT_RE.match(text)
@@ -366,25 +420,47 @@ class EventDirectoriesSource(Source):
             # City listings put branch/area first, then title. Keep the full body
             # as title when we cannot confidently split it.
             title = re.sub(r"^(Central|Downtown|Eastside|Mission Valley|Northeast|Upper Valley|Westside)\s+", "", body)
-            events.append(
-                Event(
-                    source=self.name,
-                    source_id=f"city_of_el_paso_events:{text}",
-                    title=title,
-                    start_time=_parse_datetime(match.group("date"), match.group("start")),
-                    end_time=(
-                        _parse_datetime(match.group("date"), match.group("end"))
-                        if match.group("end")
-                        else None
-                    ),
-                    venue=None,
-                    location="El Paso, TX",
-                    url=urljoin(url, anchor["href"]),
-                    categories=[category, *guess_categories(title)],
-                    raw={"directory": "city_of_el_paso_events", "listing_text": text},
-                )
+            detail_url = urljoin(url, anchor["href"])
+            event = Event(
+                source=self.name,
+                source_id=f"city_of_el_paso_events:{text}",
+                title=title,
+                start_time=_parse_datetime(match.group("date"), match.group("start")),
+                end_time=(
+                    _parse_datetime(match.group("date"), match.group("end"))
+                    if match.group("end")
+                    else None
+                ),
+                venue=None,
+                location="El Paso, TX",
+                url=detail_url,
+                categories=[category, *guess_categories(title)],
+                raw={"directory": "city_of_el_paso_events", "listing_text": text},
             )
-        return events
+            pending.append((event, detail_url))
+            if len(pending) >= _CITY_MAX_DETAILS:
+                break
+
+        # The listing page's flattened anchor text never carries a
+        # description at all — only each event's own detail page does (real
+        # prose, not a summary that got cropped). Concurrency is bounded by
+        # HttpClient's shared semaphore, same as every other detail-page fan
+        # -out in this module.
+        descriptions = await asyncio.gather(
+            *(self._city_event_description(detail_url, http) for _, detail_url in pending)
+        )
+        for (event, _), description in zip(pending, descriptions):
+            if description:
+                event.description = description
+        return [event for event, _ in pending]
+
+    async def _city_event_description(self, url: str, http: HttpClient) -> Optional[str]:
+        html = await self._fetch(url, http)
+        if not html:
+            return None
+        from bs4 import BeautifulSoup
+
+        return _city_event_full_description(BeautifulSoup(html, "html.parser"))
 
     def _detail_urls(self, html: str, directory: Directory) -> list[str]:
         from bs4 import BeautifulSoup

@@ -15,6 +15,21 @@ function normalizeOrigin(value: string | undefined): string {
 }
 
 export function siteOrigin(): string {
+  if (process.env.VERCEL_ENV === "production" && !process.env.NEXT_PUBLIC_SITE_URL) {
+    // Falling back to VERCEL_URL here is silent and wrong in prod: it's
+    // Vercel's internal per-deployment hostname, not the custom domain, so
+    // every absolute URL the app emits (sitemap, robots.txt, canonical
+    // links, JSON-LD, OG tags) ends up pointing at an unlisted Vercel host
+    // instead of the real site. That exact bug shipped once already — a
+    // crawler trying to resolve the robots.txt Sitemap: line got a
+    // different origin than the one it was crawling and gave up.
+    console.warn(
+      "[site] NEXT_PUBLIC_SITE_URL is not set in production — falling back to " +
+        "VERCEL_URL, which is the internal deployment hostname, not the custom " +
+        "domain. Set NEXT_PUBLIC_SITE_URL in the Vercel project's Production " +
+        "environment variables and redeploy.",
+    );
+  }
   return normalizeOrigin(process.env.NEXT_PUBLIC_SITE_URL ?? process.env.VERCEL_URL);
 }
 

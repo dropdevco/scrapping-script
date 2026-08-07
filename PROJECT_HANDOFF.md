@@ -1,6 +1,6 @@
 # Project Handoff
 
-Last updated: 2026-07-29 (later)
+Last updated: 2026-08-06
 
 This file is the durable context document for this repo, meant to replace re-exploration. Read this file FIRST, before grepping the codebase, when starting a new session/harness on this repo — it should answer "what is this, how is it built, what's the current state" without needing to re-derive it from source. Update it every time you make a meaningful change, especially when changing architecture, data contracts, setup steps, UI style, source behavior, migrations, or testing expectations.
 
@@ -35,6 +35,15 @@ src/scraper/
   backfill_geocode.py      CLI to repair/fill venue coordinates.
   backfill_merge_duplicates.py  CLI: one-off sweep to merge pre-existing duplicate event rows.
   backfill_categories.py  CLI: upgrade old single-guess categories to the multi-category classifier.
+  backfill_full_descriptions.py  CLI: re-fetch full descriptions/real links for events from sources known to have cropped this at scrape time (see "Source description truncation" below).
+  social/                  Daily Instagram carousel automation. See "Instagram Automation" section below for full design.
+    __main__.py            CLI: `python -m scraper.social build|publish|prune|check-token`.
+    selection.py           Pick + rank + dedupe today's events for the carousel.
+    imaging.py              Download/decode/RGB-convert source event photos.
+    render.py               Pillow -> 1080x1350 JPEG slide rendering.
+    caption.py               Caption + hashtag assembly, length-budgeted.
+    slides_store.py          Supabase Storage upload/sign/prune for rendered slides.
+    publish.py                Instagram Graph API 3-step carousel publish.
   core/
     models.py              Shared Pydantic models and request params. TicketLink model lives here.
     orchestrator.py        Cache check, source fan-out, dedupe, persistence, run summary.
@@ -58,9 +67,22 @@ supabase/migrations/
   0001_init.sql            Base events, trends, runs tables.
   0002_venues.sql          Venue-centric schema and event venue links.
   0003_ticket_links.sql    events.ticket_links jsonb — multiple ticketing links per event.
+  0004_ig_posts.sql        ig_posts table — daily Instagram carousel state machine. See "Instagram Automation" below.
+
+assets/fonts/              Vendored STATIC font instances for slide rendering (NOT the variable
+                            fonts Google's repo ships now — see "Instagram Automation" > Rendering).
+                            README.md there explains why and how to re-vendor if missing.
+
+tests/social/               Tests for src/scraper/social/ — selection, caption, render, the
+                            crop-vs-composite photo-fit logic. Run: pytest tests/social -q
+
+.github/workflows/
+  scheduled_scrape.yml      Existing daily event/trend scrape, unchanged.
+  ig_daily.yml               New — daily Instagram carousel build + publish. See "Instagram Automation".
 
 web/
   src/app/                 Next.js App Router pages and route handlers.
+  src/app/admin/ig/         New — /admin/ig carousel approval page (mirrors /admin's pattern).
   src/components/          UI components for listings, hero, map, auth, filters, form.
   src/lib/                 Supabase queries, i18n, shared types, hashing.
   src/proxy.ts             Next 16 proxy for Supabase session refresh.
@@ -107,7 +129,7 @@ Important conventions:
 - Use client components only for browser-only behavior, interactivity, animation, auth UI, Leaflet, forms, and language context.
 - `web/src/lib/events.ts` is the central place for event listing, detail, category, and map queries. `applyEventFilters()` there is shared by `fetchEvents` (list) and `fetchMappableEvents` (map) so both surfaces interpret the same URL params identically — add new filters there, not in one call site.
 - `/` and `/map` both render the same `<Filters>` component and read the same `q` / `city` / `when` / `categories` search params. Filter state lives entirely in the URL, so the two views stay consistent and links are shareable.
-- Crawler-facing event extraction depends on `web/src/lib/event-schema.ts`, `web/src/lib/site.ts`, `/events/[id]`, `/crawler/events`, `/sitemap.xml`, and `/robots.txt`.
+- Crawler-facing event extraction depends on `web/src/lib/event-schema.ts`, `web/src/lib/site.ts`, `/events/[id]`, `/crawler/events`, `/sitemap.xml`, and `/robots.txt`. `/crawler/events` paginates BY CONTENT SIZE (25k-char budget per page, see `paginateByContentSize()` in that route), not by a fixed event count — a GoHighLevel-style knowledge-base crawler was silently truncating events because the page (with full descriptions + images added, see "Source description truncation" below) ran to 500KB+ on one URL. Never re-add `line-clamp` or any visual truncation to that page's description text — it exists specifically to be machine-read in full; a scraper that reads *rendered* text (`innerText`, not `textContent`) respects CSS line-clamp and silently gets cut off exactly like the original bug.
 - Event detail pages must keep full visible event facts and schema.org Event JSON-LD in sync. Do not add fields to one without considering the other.
 - Shared row types live in `web/src/lib/types.ts`.
 - Bilingual copy lives in `web/src/lib/i18n.ts`; do not hard-code user-facing copy in components when it belongs in the dictionary.
@@ -121,7 +143,8 @@ Current main routes:
 - `/submit`: Google-authenticated event submission.
 - `/auth/callback`: OAuth callback route.
 - `/admin`: moderation queue for pending submissions (approve/reject). NOT linked from nav — reach by typing the URL. Email-allowlist gated via `ADMIN_EMAILS`; see "Event moderation" below.
-- `/crawler/events`: plain public index of upcoming approved event links for knowledge-base crawlers.
+- `/admin/ig`: daily Instagram carousel approval — preview rendered slides + caption, approve to publish. Same auth gate as `/admin`. See "Instagram Automation" below.
+- `/crawler/events`: plain public index of upcoming approved event links for knowledge-base crawlers. Paginated by content size, not event count — see the note under Web App Architecture conventions above.
 - `/sitemap.xml` and `/robots.txt`: generated metadata routes for search/crawler discovery (`web/src/app/sitemap.ts`, `web/src/app/robots.ts`).
 
 ### Google OAuth (sign-in / event submission)
@@ -135,6 +158,16 @@ Submissions land as `status='pending'` and are invisible until approved. **No RL
 Env (server-only, no `NEXT_PUBLIC_` prefix, never sent to the browser): `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_EMAILS` (comma-separated). Must be set on the hosting platform for production, not just `web/.env.local`. See `web/SETUP.md` "Admin / Moderation" for full setup steps.
 
 App name is still "Chisme" (`web/src/app/layout.tsx` title: "Chisme — El Paso + Juárez events"). The 2026-07-28 commit titled "rebrand" did NOT rename the app — it bundled the crawler/SEO feature work plus filter and hero-scratch refinements; treat that commit message as inaccurate/misleading, not as evidence of a brand change.
+
+### Mobile behavior (fixed 2026-08-04)
+
+Several mobile-only failures were found by actually testing in the browser at phone width, not just reading the code:
+
+- **`HeroScratch` is a pointer-hover interaction with no touch equivalent** — a finger drag over it is a scroll gesture, so the browser never delivers the `pointermove` events the scratch effect needs, leaving the hero a permanently beige box on every phone. Fixed by detecting `(hover: hover) and (pointer: fine)` and skipping the scratch canvas entirely on touch/coarse-pointer devices, showing the cover photo directly instead. Do not try to force scratch-to-work on touch via `touch-action: none` — the hero is ~74dvh, so swallowing vertical swipes there strands the user unable to scroll past it.
+- **The event map trapped page scrolling on phones** — a 62dvh Leaflet map is most of a phone screen, and one-finger drag panned the map instead of scrolling the page, leaving no way to scroll past it. `event-map.tsx` now requires two fingers to pan on coarse pointers (the convention embedded maps use), with a brief "Use two fingers to move the map" hint; mouse behavior is unchanged.
+- **`LandmarkBackdrop` could paint over the hero after a client-side route change.** It lives in the root layout (survives navigation) but measures `#events`, which belongs to the page and gets swapped out from under it. A `ResizeObserver` bound once at mount kept watching the now-detached node, which measures as 0, dragging the reveal gate to the top of the document. Fixed with a `MutationObserver` that re-resolves the node on every DOM change, plus an `isConnected` guard, plus a hard `scrollY < gateOffset` opacity gate as a second belt (a `useTransform` off the scroll `MotionValue` was tried first and doesn't work for this — it only recomputes when scroll actually fires, so returning to a page at `scrollY=0` keeps whatever value it last latched).
+- iOS Safari force-zooms the page when a focused input is under 16px and never zooms back out — the search input was 14px; now 16px on touch, 14px on the desktop filter rail.
+- Several tap targets were ~18px tall (mobile nav links, the EN/ES toggle, the event-detail back link) — sized up to real finger targets without changing their visual footprint.
 
 ## UI And Style Direction
 
@@ -175,6 +208,74 @@ If you change `MOBILE`/`TABLET`/`DESKTOP` widths, `MAX_ROTATE`, `STRIDE`, or add
 - Keep responsive layouts practical and scan-friendly; avoid changing the visual language to generic SaaS, generic dark mode, or template-like gradients.
 - Some files contain mojibake in comments/text from prior encoding issues. Do not spread it. Use UTF-8 for human-facing Spanish text and ASCII for purely technical comments unless the file already requires accents.
 
+## Instagram Automation (`src/scraper/social/`)
+
+Daily automated Instagram carousel: "Today in El Paso" — slide 1 a branded cover, slides 2..N one event each (a real event photo with title/time/venue burned into it). Selects from the exact same Supabase `events` table everything else uses; there is no new scraping involved, only rendering and publishing.
+
+**Core invariant: all third-party I/O happens at build time.** Dead CDN links, hotlink protection, non-JPEG sources, undersized images — all resolved while downloading and re-encoding. By the time `publish` runs, every slide is a JPEG the app already owns on Supabase Storage, at fixed dimensions, so the publisher can only fail Meta-side. The caption and the slide set are frozen at build time; the publisher must never regenerate either, or a human's approval would no longer match what actually ships.
+
+CLI (`python -m scraper.social <cmd>`):
+
+- **`build [--date] [--dry-run] [--out DIR]`** — `selection.py` ranks today's events (category weight, evening timing, ticket links present, image quality; penalizes high-recurrence and recently-posted) and applies venue/category diversity caps, then re-sorts chronologically (a carousel should read like a schedule, not a ranked list). `imaging.py` downloads and re-encodes each candidate's photo (Pillow's `Image.open(...).convert("RGB")` makes source format a non-issue — WebP/PNG/AVIF all collapse to the same thing). `render.py` produces 1080x1350 JPEG slides. `caption.py` builds the caption. Slides upload to the private `ig-slides` Supabase Storage bucket; an `ig_posts` row is inserted as `status='draft'`. `--out DIR` also writes the slides + caption to a local folder for eyeballing without touching Supabase — this is the fastest way to sanity-check a change (`python -m scraper.social build --dry-run --out ./_preview`, then open the JPEGs).
+- **`publish [--date] [--dry-run]`** — claims an `approved` row via compare-and-swap (`Storage.claim_ig_post`, prevents two overlapping cron runs from double-posting), verifies `post_date == today` BEFORE any network call (a post approved late that only succeeds on a later retry must never go out under "today"'s date once the events in it are already over — this is the single most important guard in the feature), then runs the actual 3-step Graph API carousel publish (`publish.py`).
+- **`prune`** — deletes slide storage objects older than `IG_SLIDE_RETENTION_DAYS` (default 7). Runs on a lag, not at publish time, so it sweeps published/rejected/expired rows AND orphans (upload succeeded, DB insert failed) with no per-status logic, and never destroys a half-failed publish's ability to be retried.
+- **`check-token`** — introspects the Meta token's remaining lifetime, fails loudly under `--min-days` (default 14). Meant to run daily in CI so an expiring token is caught weeks ahead, not discovered as a mystery 400 error mid-cycle.
+
+**Human review now, full automation is a one-variable flip, not a future rewrite.** `build` never auto-publishes unless `IG_AUTOPOST=true` (`core/config.py`) — the default path drafts, and a human reviews the actual rendered slides + caption at `/admin/ig` (`web/src/app/admin/ig/page.tsx`, `approveIgPost` server action — same pattern as `/admin`'s moderation queue) before clicking Approve. Setting `IG_AUTOPOST=true` makes `build` auto-approve its own draft and immediately call `publish()` — the EXACT same function a human approval triggers, not a parallel code path. This was deliberate from the start, per explicit direction: approve manually until the output is trusted, then automate 100% by flipping one config value.
+
+### `ig_posts` state machine (`supabase/migrations/0004_ig_posts.sql`)
+
+States: `draft -> approved -> publishing -> published`, plus terminal `rejected` / `skipped` (couldn't clear `IG_MIN_SLIDES`) / `expired` (stale by the time it was claimed) / `failed`. A partial unique index allows at most one LIVE post per `post_date` (draft/approved/publishing/published) while a rejected/expired/skipped row never blocks rebuilding that same date. `slide_keys` (content-derived recurrence keys — title with occurrence/date tokens stripped, plus venue — NOT event ids) is what makes "don't repost the same weekly event every single day" possible at all, since a recurring event gets a fresh uuid every day it appears. `ig_creation_id` is written BEFORE the final `media_publish` call: a crash mid-publish then leaves a stuck `publishing` row that either has a creation id (never auto-retried — we can't know if it actually posted, and a duplicate public post is worse than a missed one, so it goes to `failed` for a human to check manually) or doesn't (never reached publish, safely reclaimable after a lease window).
+
+### Rendering (`render.py`) — decisions worth knowing before touching it
+
+- **JPEG is not a style choice — Instagram's Content Publishing API rejects PNG outright.** This is why this renders in Python/Pillow rather than reusing the web app's `next/og`/Satori (PNG-only, would need a transcode step regardless).
+- **`_fit_photo()` picks a plain center-crop vs. a never-crop composite based on how much a crop would actually discard**, not on the source type. Found via reviewing an actual rendered preview, not by theorizing: a 930x560 promotional flyer with its own headline text running edge-to-edge got center-cropped into the slide and lost 24% of its width, slicing straight through the title. Above a 12% crop-fraction threshold (either axis), it now composites a blurred/darkened backdrop (same technique Instagram Stories uses for off-ratio photos) with the COMPLETE, uncropped source layered on top. This is a general threshold, not a flyer-specific special case — verified it also correctly handles the opposite extreme (a tall 1080x1920 phone-shot portrait photo) with zero additional code.
+- **Fonts must be vendored as STATIC instances, not the variable fonts Google's font repo ships today.** `PIL.ImageFont.truetype()` on a variable font silently renders the default (usually Regular) instance no matter what weight/style you ask for — no error, just wrong-looking output. Built via `fonttools varLib.instancer` from the official variable TTFs, pinning the exact axis values Google's own "Black Italic" named instance uses (`wght=900, SOFT=0, WONK=1`) except `opsz=144` (the large-display optical cut) instead of Google's `opsz=9` (body-text cut) — deliberate, these are big slide headlines. Files live in `assets/fonts/` (see its `README.md` to re-vendor). If missing, `render.py` falls back to Pillow's built-in bitmap font with a logged warning — still renders, but off-brand, and Unicode punctuation like en-dashes shows as a visible tofu box (`□`) in that fallback specifically, not in the real fonts.
+- **The Instagram profile grid center-crops slide 1 to a square** (rows 135-1215 of the 1080x1350 canvas). All cover-slide branding stays inside that band, or it's invisible exactly where discovery on the app actually happens.
+
+### Selection (`selection.py`) — decisions worth knowing
+
+- `day_bounds()` uses `America/Denver` local midnight, half-open `[start, end)`. A UTC-day query would silently misfile every evening event onto the wrong date, since a 7pm El Paso event is already past midnight UTC.
+- `Storage.query_events_for_day()` is a NEW sibling method on `Storage`, deliberately not a patch to the pre-existing `query_events()` — that one doesn't filter `status` at all and runs service-role (bypasses RLS), so reusing it as-is would put unmoderated `/submit` spam straight onto the public Instagram feed. `query_events()`'s existing semantics are relied on by the MCP `query_stored` tool and were left untouched.
+- `IG_MIN_SLIDES` (default 4, `core/config.py`) is a hard floor, not a target — a build that can't clear it inserts a `skipped` row and posts nothing. A 3-slide "today in El Paso" reads worse than no post at all; thin days are common (roughly half of live events carry no usable photo at all once dead links are filtered out).
+
+### Storage (`slides_store.py`)
+
+Bucket `ig-slides` is **private**, slides are only ever handed out as signed URLs (7-day TTL) — Meta's server-side cURL fetch works fine against a signed URL (it's still a plain unauthenticated HTTPS GET), so a public bucket would only add a permanent, enumerable hotlink surface for zero benefit. The bucket was created via `storage.client.storage.create_bucket()` using the existing service-role key — it did NOT require the Supabase dashboard. Verified end-to-end with a bare, credential-less `curl -sI` against a real signed URL before trusting the mechanism (`200`, `content-type: image/jpeg`) — this is exactly what Meta's fetch does, so it's the highest-value pre-flight check available.
+
+### Publishing (`publish.py`) — the Meta API discovery that mattered most
+
+**This Instagram account went through Meta's newer "Instagram API with Instagram Login" flow (a standalone Instagram Business Login), not the older Facebook-Page-linked flow the code originally assumed.** Confirmed empirically on 2026-08-06 after the standard long-lived-token exchange (`ig_exchange_token`) kept failing with an opaque "session key invalid" error despite a demonstrably correct token and correct app secret. Concrete, code-level consequences, already fixed:
+
+- **API host is `graph.instagram.com`, not `graph.facebook.com`.** Fixed in `sources/auth_meta.py`'s shared `GRAPH` constant. This is shared deliberately, not scoped locally to `publish.py` — `social_instagram.py`'s existing own-account trends reader uses the exact same `ig_access_token`/`ig_business_account_id` pair, so it needs the same host; there is only one account and one flow in play here, not two.
+- **The Instagram-scoped account id is DIFFERENT from the id the Meta developer console's own account-linking table displays.** The console showed `17841442732011819`; the id the live API actually recognizes (confirmed via a real `/me` call, and cross-checked against the "User ID" Instagram's own connected-apps screen shows) is `28378571795112753`. If `IG_BUSINESS_ACCOUNT_ID` is ever reconfigured from scratch, use the LIVE-VERIFIED id from an actual API response, not whatever number the setup wizard's table happens to show.
+- **Long-lived (60-day) token exchange is UNSOLVED as of this writing — automation is not yet live because of this specifically.** The documented flow (`GET graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret={instagram-app-secret}&access_token={short-lived}`) fails every time with "Session key invalid... This could be because the session key has an incorrect format, or because the user has revoked this session." Ruled out already, with evidence:
+  - **Not a bad secret** — deliberately swapping in the WRONG secret produces a clearly different, specific error ("Error validating client secret"), so the real secret genuinely is being accepted before the flow fails.
+  - **Not a bad/expired token** — the exact same token works fine for real reads (`/me`) AND real publishes (created a genuine media container, checked `status_code=FINISHED`, called `media_publish`, got back a real `permalink`) directly against `graph.instagram.com`.
+  - **Not an unaccepted tester invite** — checked Instagram's own Settings → Apps and Websites → Tester Invites (empty) and the Active connections list (app already fully "Active," every needed toggle including "Publish content as a business" already on).
+  - **Leading theory, NOT yet confirmed:** tokens issued via the developer console's "Generate token" button (meant for interactive dashboard testing) may not be exchange-eligible by design, and a genuine OAuth authorization-code redirect flow ("Business Login for Instagram," which needs a registered redirect URI — not yet set up) may be required to obtain an exchange-eligible short-lived token. **Whoever picks this up next: don't re-derive the above, start from "try the real OAuth redirect flow instead of the console's quick-test token."**
+- Two REAL, LIVE posts were manually published to `@elpasochisme` on 2026-08-06 to prove the pipeline end-to-end using a short-lived (1-hour) token — one single-image test, one genuine 4-slide carousel built from real events via the actual production code path (`selection.choose()` → `render.py` → `caption.build_caption()` → `publish.publish_carousel()`, not an ad-hoc script). Both succeeded completely. That is proof the mechanism works, but a 1-hour token is not a repeatable mechanism for a daily unattended cron — the long-lived exchange above is what's actually blocking real automation, not anything about the render/select/publish code itself.
+
+`publish_carousel()` in `publish.py` is the one function both that manual test and the eventual CI `publish` job call — do not fork a second implementation for testing again. 3-step Graph flow: child containers (sequential, not concurrent — Graph rate-limits bursts, and the concurrency semaphore is shared with everything else `HttpClient` does) → carousel container → `media_publish`, polling each container for `status_code=FINISHED` before proceeding at every stage. The `on_container` callback persists `ig_creation_id` before the final publish call — this is the crash-safety hook described in the `ig_posts` section above.
+
+### CI (`.github/workflows/ig_daily.yml`)
+
+Two jobs, not yet actually running (blocked on the token issue above — the workflow exists and is correct, but the secrets it needs aren't fully in place). `build` triggers via `workflow_run` on the existing `scheduled-scrape` workflow's completion, deliberately not a fixed-offset cron — Actions cron drifts 10-20 minutes routinely and the scrape itself can take up to 20, so a fixed time would only be a hope, not a real dependency. `publish` runs on a `0,30 14-23 * * *` sweep (El Paso daytime) plus `workflow_dispatch`. `concurrency: {group: ig-daily}` is a second belt on top of the CAS claim in `claim_ig_post`. Uses a new `social` extra in `pyproject.toml` (`pillow`) so the image-rendering job doesn't drag pandas in via `[trends]`.
+
+### Credentials / secrets status (as of 2026-08-06 — check before assuming any of this is stale)
+
+**Not yet stored as GitHub Actions secrets** — blocked on the long-lived token exchange above; read that section before attempting to unblock this:
+
+- `IG_ACCESS_TOKEN` — need a genuinely long-lived (60-day) token; only a 1-hour one has been obtained so far, which is not worth storing as-is.
+- `IG_BUSINESS_ACCOUNT_ID` — value confirmed live is `28378571795112753` (NOT `17841442732011819` — see the publishing section above for why). Safe to store now, just hasn't been.
+- `META_APP_ID` / `META_APP_SECRET` — the Facebook App credentials. Captured, safe to store now.
+- The Instagram app's OWN identifier/secret (a DIFFERENT pair from the Facebook App ID/Secret above — specific to the Instagram Login flow, needed for the token exchange once solved) has also been captured. Suggested secret names if/when stored: `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`.
+- Supabase Storage bucket `ig-slides` — created, confirmed private, confirmed working end-to-end (upload/sign/unauthenticated-fetch all tested against the real bucket, see Storage section above).
+- Font files — vendored in `assets/fonts/`, confirmed working via a real render producing no fallback-font warnings.
+
+The live Instagram account is `@elpasochisme`; the Meta app backing it has shown up under two different display names across Meta's own screens ("Gossip" and "Chisme-IG") — that's Meta's own UI being inconsistent, not two different apps.
+
 ## Data Contracts
 
 Python `Event` fields that feed Supabase and the web app include:
@@ -207,6 +308,22 @@ Two merge passes, matched by **same venue + same calendar day + near-identical t
 2. Otherwise, strip stopwords/filler (`_TITLE_STOPWORDS` in `dedupe.py` — "live", "tour", "night", "concierto", EN+ES) from both titles and compute containment: what fraction of the SHORTER title's remaining distinctive words also appear in the other. `>= 0.8` (near-total overlap) + venue similarity `>= 0.6` (in-batch) or same `venue_id` (cross-run, already an exact match) → merge.
 
 If you touch these thresholds, re-verify against adversarial pairs (two genuinely different recurring events at the same venue/day, e.g. differently-themed weekly nights) — a false merge silently hides a real event, which is worse than an unmerged duplicate card. `ticket_labels.py` derives the human label from the URL's domain (Ticketmaster, Eventbrite, AXS, Boletia, Don Boletón, ...), not the internal scraper source module — one module (`events_web`) fetches several different real platforms.
+
+### Source description truncation — fixed per-source in `events_web.py`/`events_directories.py` (2026-08-05)
+
+Several sources were storing a truncated description even though the source site had the full text somewhere — never a bug in OUR rendering, always a bug in what got scraped. Each source truncates for a DIFFERENT reason, found by fetching the live page and comparing what our scraper stored against what the page actually shows:
+
+- **Visit El Paso**: its own schema.org JSON-LD `description` is an SEO meta-description auto-cut to ~200 chars (ends in a literal "…"). Fixed by extracting the real `<p>` body text from the detail page's content container instead (`_full_description_and_link()` in `events_web.py`). Its JSON-LD `url` field is ALSO useless — self-referential, points back at the aggregator, not the real venue/business. The real destination is a "View Website" link in that same content block, now extracted and used as `event.url` instead.
+- **La Nube**: shares the same white-label calendar widget as Visit El Paso but its detail pages carry NO JSON-LD at all, so only the listing-card teaser was ever stored. Now fetches each event's own detail page for the full text and real ticket link, same fix pattern as Visit El Paso.
+- **Eventbrite**: JSON-LD/OG description is a short tagline (~140 chars observed); the real "About this event" copy lives in a `structuredContent.modules[]` block inside the page's `__NEXT_DATA__` state (verified: 137 → 2,408 chars on one real event). `_eventbrite_full_description()`.
+- **Meetup**: JSON-LD/meta description is INCONSISTENTLY truncated — same event returned a complete description on one fetch and a mid-word cutoff on another. `__NEXT_DATA__.props.pageProps.event.description` is always the real, complete text (865 vs 155 chars observed on the same event). `_meetup_full_description()`.
+- **City of El Paso** (`events.elpasotexas.gov`, `city_of_el_paso_events` directory): the listing page's flattened anchor text never carried a description AT ALL (0 chars for every event from this source, previously) — only each event's own detail page does, and the scraper never visited it before. Now does; see `_city_event_full_description()` in `events_directories.py`. Its detail-page template mixes the venue/date block and the real description as sibling `<p>` tags with no distinguishing wrapper — distinguished by checking for a `<strong>` child (always present in the date block, never in real prose).
+
+All four extraction fixes share `_is_link_only_paragraph()` (skip a `<p>` that's just a wrapped "View Website"/"Buy Tickets" CTA link, not real prose) and a "try every matching selector, keep the first that actually contains `<p>` children" pattern (`_full_description_and_link()`) — Bootstrap utility classes like `.mb-5`/`.mt-3` get reused elsewhere on these pages for nav/badges/spacing, so a naive `select_one()` on the first match silently grabs the wrong element; this was caught by testing against real fetched HTML, not assumed.
+
+**This only fixes new scrapes going forward.** `backfill_full_descriptions.py` is the one-off pass for rows already live before the fix — targets only `status='approved' AND start_time >= now()` (what the site actually shows) from these five domains specifically (merge never rewrites `url` after insert, so a stored domain reliably identifies the row's true original source, not a row that merely acquired one of these as a secondary `ticket_links` entry from some other primary source). Already run once against production: 41/43 events fixed on the first pass (Visit El Paso/La Nube), 63/97 on a second wider pass after Eventbrite/Meetup/City of El Paso were added. Re-runnable any time (`--dry-run` first) — idempotent, only writes when the freshly-fetched value is non-empty and different.
+
+Ticketmaster (API-based, `events_ticketmaster.py`) and AXS were checked and deliberately NOT touched: Ticketmaster's Discovery API genuinely has no long-form description field (`info`/`pleaseNote` are short operational notes by design, not a cropped version of something longer), and AXS via `events_directories.py` has no stable per-event URL to fetch a fuller version from.
 
 One-off backfills for data that predates this feature:
 
@@ -287,7 +404,7 @@ Environment:
 
 - Root scraper env uses optional keys such as `SUPABASE_URL`, `SUPABASE_KEY`, `TICKETMASTER_API_KEY`, `TAVILY_API_KEY`, `BRAVE_API_KEY`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `YOUTUBE_API_KEY`, and Meta own-account tokens.
 - Web env uses `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
-- Set `NEXT_PUBLIC_SITE_URL` in production so canonical URLs, Open Graph URLs, JSON-LD `url`, robots, and sitemap entries use the deployed domain. If unset, Vercel's `VERCEL_URL` is used when available; local development falls back to `http://localhost:3000`.
+- Set `NEXT_PUBLIC_SITE_URL` in production so canonical URLs, Open Graph URLs, JSON-LD `url`, robots, and sitemap entries use the deployed domain. If unset, Vercel's `VERCEL_URL` is used when available; local development falls back to `http://localhost:3000`. **As of 2026-08-06 this is NOT set in Vercel's Production environment** — confirmed live: `www.epchisme.com/robots.txt` and `/sitemap.xml` both point at an internal `scrapping-script-*.vercel.app` deployment hostname instead of the real domain, which is why a GoHighLevel crawler reported "no sitemap found" (a sitemap declared on a different host than the one being crawled is non-standard and gets rejected). This affects every absolute URL the app emits, not just the sitemap — OG tags, canonical links, JSON-LD `url`/`sameAs` too. `site.ts::siteOrigin()` now logs a loud warning if this happens again in production (`VERCEL_ENV === "production"` with the var unset), but the actual fix is a one-time dashboard action someone with Vercel access needs to do: add `NEXT_PUBLIC_SITE_URL=https://www.epchisme.com` to Production env vars, then redeploy (it's inlined at build time — a redeploy is required, restarting isn't enough). Check whether this has been done before spending time debugging anything that touches absolute URLs.
 - Source allow/deny behavior is controlled by `ENABLED_SOURCES` and `DISABLED_SOURCES`.
 - Venue geocoding is controlled by `GEOCODE_VENUES` (default true) and `GEOCODE_MAX_PER_RUN` (default 25).
 
@@ -331,10 +448,29 @@ For web changes:
 - Next.js 16 APIs may differ from older Next versions. Check local docs (`web/node_modules/next/dist/docs/`) before editing framework-sensitive behavior. Also read `web/AGENTS.md` / `web/CLAUDE.md` before framework-specific edits.
 - Supabase RLS and migrations are central to production behavior. Any change to insert/select/update assumptions should be checked against migrations and policies.
 - `LangToggle` in `web/src/components/lang-context.tsx` sets the `lang` cookie and calls `router.refresh()` from a `useEffect` keyed on `pendingLang` state (not directly in the click handler) — a deliberate fix for a prior issue, preserve this pattern if touching language switching.
+- **Instagram automation is fully built but not yet live** — blocked on a Meta long-lived-token exchange issue, not on anything in this repo's code. If asked to "just turn on the daily Instagram posts," start at the "Instagram Automation" section's "Publishing" subsection and its "Credentials" subsection — do not re-diagnose the Meta API flow from zero, the investigation trail (what's ruled out, what the leading theory is) is already written down there.
+- `NEXT_PUBLIC_SITE_URL` is unset in Vercel Production as of 2026-08-06 — see the Environment section above. Anything involving absolute URLs (sitemap, OG tags, canonical links, JSON-LD) is affected until someone with Vercel access sets it and redeploys.
 
 ## Change Log
 
 Newest entry first. One entry per session/meaningful change; trivial fixes get one line.
+
+### 2026-08-06 — Instagram carousel automation, built and proven live (blocked on one credential issue)
+
+- Built the entire daily Instagram carousel feature from scratch per an approved plan: `src/scraper/social/` package (selection, imaging, render, caption, slides_store, publish, CLI), `ig_posts` state machine (`0004_ig_posts.sql`), `/admin/ig` approval page, `ig_daily.yml` CI workflow, vendored brand fonts, new `ig-slides` Supabase Storage bucket. Full design rationale, all the "why" behind the non-obvious decisions (crash-safety ordering, CAS claim, content-size-based photo-fit switching, static vs. variable fonts, etc.), lives in the new "Instagram Automation" section above — this entry is the summary, that section is the reference.
+- Explicit design goal per the user: build for a smooth manual-review-to-full-automation transition from day one, not as a later rewrite. `IG_AUTOPOST` env flag makes `build` call the exact same `publish()` a human's approval click triggers — going fully unattended later is a one-variable change, already wired.
+- Found and fixed a real bug via actually looking at a rendered preview (not just reading code): a wide promotional-flyer source photo with edge-to-edge text was getting center-cropped and losing 24% of its width, slicing through the title. Added a crop-fraction threshold in `render.py::_fit_photo()` that switches to a blurred-backdrop composite above 12% — general fix, not flyer-specific, verified it also correctly handles a tall phone-shot portrait with zero extra code.
+- **The big discovery this session**: the Meta app ended up going through the newer "Instagram API with Instagram Login" setup (standalone, no Facebook Page in the loop) rather than the classic Facebook-Login flow the code was originally written against. This wasn't obvious from Meta's own UI and took real diagnostic work to pin down (the standard `ig_exchange_token` long-lived-token exchange kept failing with an opaque "session key invalid" error). Confirmed via direct API testing: `graph.instagram.com` not `graph.facebook.com`, and a DIFFERENT account id (`28378571795112753`) than what the developer console's own setup table displays (`17841442732011819`). Fixed the shared `GRAPH` constant in `auth_meta.py` accordingly. Full diagnostic trail and the still-open long-lived-token mystery are in the "Publishing" subsection above — read it before re-diagnosing from scratch.
+- Manually published two REAL, LIVE posts to `@elpasochisme` to prove the pipeline end-to-end using a short-lived token (permalinks in the section above): one single-image test, then a genuine 4-slide carousel built entirely from the actual production code path (real events, real photos, real caption). Both fully succeeded — the render/select/storage/publish mechanism is proven. What's NOT yet done: getting a genuinely long-lived (60-day) token, which is what's actually blocking the daily cron from running unattended; see the Credentials subsection above for exactly which values are captured-but-not-yet-stored as GitHub secrets, and which are still missing.
+- Verified along the way: all 40 tests in `tests/social/` pass, `ruff check` clean, and the real Supabase Storage bucket was smoke-tested end-to-end (upload → sign → unauthenticated `curl` fetch, matching exactly what Meta's server does) before being trusted.
+
+### 2026-08-04/05 — Mobile fixes, crawler pagination, and per-source description/link truncation fixes
+
+- Found and fixed several mobile-only failures by actually testing the deployed site at phone width in-browser, not just reading the code — most seriously, the scratch-off hero was a permanently beige, un-revealable box on every phone (it's a pointer-hover interaction with no touch equivalent) and the event map trapped one-finger page scrolling. Full list and fixes in the new "Mobile behavior" subsection above.
+- Diagnosed why a GoHighLevel knowledge-base crawler was only getting partial event data from `/crawler/events`: a CSS `line-clamp-3` was visually truncating descriptions, which most scrapers ignore (they read raw HTML) but a headless-browser scraper reading rendered/visible text does not — it gets cut off exactly at the clamp, same as a human would see. Removed the clamp (that page exists specifically to be machine-read in full) and additionally found the page had grown to 500KB+/65k+ characters on one URL once full descriptions were added, likely itself hitting per-page ingestion limits — added content-size-based pagination (`paginateByContentSize()`, ~25k chars/page) so no single URL is ever that large again.
+- Traced the truncated-description complaint back further and found it wasn't just a rendering issue — several scraper sources were storing genuinely truncated text at scrape time, each for a different underlying reason (Visit El Paso's JSON-LD is an SEO snippet, La Nube has no JSON-LD at all, Eventbrite/Meetup bury the real text in a `__NEXT_DATA__` blob, City of El Paso never had a description at all). Fixed all five per-source, then found the same aggregator sources were also storing a USELESS ticket link — `event.url` pointed back at the aggregator's own page instead of the real venue/business, since Visit El Paso and La Nube are pure calendar aggregators, not the actual ticket seller. Extracted the real "View Website"/ticket link from the same page content instead. Full per-source breakdown, and why each fix works, is in the new "Source description truncation" subsection above.
+- Backfilled both fixes against already-live production data (not just new scrapes going forward): 41/43 events on the description-only pass, 63/97 on the wider pass after adding Eventbrite/Meetup/City of El Paso and the ticket-link fix. New reusable script: `backfill_full_descriptions.py` (`--dry-run` first, safe to re-run any time, idempotent).
+- Diagnosed (but did NOT fix — needs Vercel dashboard access) why the individual event page's "Event URL" field was showing an internal Vercel deployment hostname instead of the real domain: `NEXT_PUBLIC_SITE_URL` isn't set in Production. This affects every absolute URL the app emits (OG tags, canonical links, JSON-LD, sitemap, robots.txt) — see the Environment section above for the exact fix needed and why it's what made the crawler also report "no sitemap found."
 
 ### 2026-07-29 (later)
 

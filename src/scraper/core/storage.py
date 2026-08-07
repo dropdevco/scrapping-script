@@ -108,6 +108,13 @@ class Storage:
     def enabled(self) -> bool:
         return self._client is not None
 
+    @property
+    def client(self) -> Any:
+        """The raw Supabase client, for callers that need an API this class
+        doesn't wrap (e.g. Storage buckets in scraper.social). None when
+        storage is unconfigured — check `enabled` first."""
+        return self._client
+
     # ── writes ────────────────────────────────────────────────────────────────
     async def upsert_events(self, events: list[Event]) -> None:
         if not self.enabled or not events:
@@ -237,6 +244,139 @@ class Storage:
 
         rows = await asyncio.to_thread(_q)
         return rows or None
+
+    # ── daily Instagram carousel (scraper.social) ──────────────────────────────
+    async def query_events_for_day(
+        self,
+        location: str,
+        start_iso: str,
+        end_iso: str,
+        limit: int = 400,
+    ) -> list[dict[str, Any]]:
+        """Approved events starting inside a HALF-OPEN [start, end) window.
+
+        Deliberately a sibling of query_events() rather than a flag on it, for
+        two reasons the difference matters here:
+
+          * query_events() does NOT filter `status`, and this client is
+            service_role (bypasses RLS) — reusing it would put unmoderated
+            /submit rows straight onto the public Instagram feed.
+          * query_events() uses `lte` on the upper bound, which includes an
+            event starting at exactly 00:00 tomorrow in "today".
+
+        query_events() is the MCP `query_stored` tool's contract, so its
+        semantics are left alone.
+        """
+        if not self.enabled:
+            return []
+
+        def _q() -> list[dict[str, Any]]:
+            return (
+                self._client.table("events")
+                .select("*, venues(*)")
+                .eq("status", "approved")
+                .ilike("location", f"%{location}%")
+                .gte("start_time", start_iso)
+                .lt("start_time", end_iso)
+                .order("start_time", desc=False)
+                .limit(limit)
+                .execute()
+                .data
+                or []
+            )
+
+        return await asyncio.to_thread(_q)
+
+    async def recent_slide_keys(self, since_date: str) -> set[str]:
+        """Every slide_key used by a post published on/after `since_date`.
+
+        Drives recurrence suppression: a weekly event should not headline the
+        carousel every single week.
+        """
+        if not self.enabled:
+            return set()
+
+        def _q() -> list[dict[str, Any]]:
+            return (
+                self._client.table("ig_posts")
+                .select("slide_keys")
+                .eq("status", "published")
+                .gte("post_date", since_date)
+                .execute()
+                .data
+                or []
+            )
+
+        rows = await asyncio.to_thread(_q)
+        return {k for r in rows for k in (r.get("slide_keys") or [])}
+
+    async def create_ig_draft(self, row: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """Insert a new ig_posts row. Returns None when the partial unique index
+        rejects it (a live post already exists for that date) — a normal,
+        expected outcome when a build is re-run, not an error."""
+        if not self.enabled:
+            return None
+
+        def _q() -> Optional[dict[str, Any]]:
+            try:
+                res = self._client.table("ig_posts").insert(row).execute()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ig draft insert rejected (live post already exists?): %s", exc)
+                return None
+            data = res.data or []
+            return data[0] if data else None
+
+        return await asyncio.to_thread(_q)
+
+    async def claim_ig_post(self, post_id: str, expect: str = "approved") -> bool:
+        """Compare-and-swap a row into 'publishing'. True only for the winner.
+
+        The publish sweep runs on a cron, and a slow run WILL eventually overlap
+        the next one; without this both workers would build carousels from the
+        same row and double-post. The conditional UPDATE takes a row lock, so
+        the loser's filter matches nothing and it gets back zero rows.
+        """
+        if not self.enabled:
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+
+        def _q() -> bool:
+            res = (
+                self._client.table("ig_posts")
+                .update({"status": "publishing", "claimed_at": now})
+                .eq("id", post_id)
+                .eq("status", expect)
+                .execute()
+            )
+            return len(res.data or []) == 1
+
+        return await asyncio.to_thread(_q)
+
+    async def update_ig_post(self, post_id: str, patch: dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+
+        def _q() -> None:
+            self._client.table("ig_posts").update(patch).eq("id", post_id).execute()
+
+        try:
+            await asyncio.to_thread(_q)
+        except Exception as exc:  # noqa: BLE001
+            log.error("ig post update failed for %s: %s", post_id, exc)
+
+    async def ig_posts_by_status(
+        self, status: str, post_date: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+
+        def _q() -> list[dict[str, Any]]:
+            q = self._client.table("ig_posts").select("*").eq("status", status)
+            if post_date:
+                q = q.eq("post_date", post_date)
+            return q.order("post_date", desc=False).execute().data or []
+
+        return await asyncio.to_thread(_q)
 
     # ── internals ───────────────────────────────────────────────────────────────
     def _merge_with_existing(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -25,6 +25,11 @@ dependencies = [
 trends = ["pytrends>=4.9"]    # Google Trends (pulls in pandas)
 dev = ["ruff>=0.5", "pytest>=8.0", "pytest-asyncio>=0.23"]
 admin = ["psycopg[binary]>=3.1"]  # direct Postgres access for `scraper.apply_migration` (DDL)
+# Instagram carousel rendering. Deliberately its own extra so the image job
+# doesn't drag in pandas via [trends]. Pillow ships manylinux wheels with no
+# system dependencies, encodes JPEG natively (the ONLY format Instagram's
+# Content Publishing API accepts), and decodes whatever the source CDN served.
+social = ["pillow>=10.0"]
 
 [project.scripts]
 scraper-mcp = "scraper.mcp_server:main"

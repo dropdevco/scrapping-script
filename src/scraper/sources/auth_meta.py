@@ -15,7 +15,17 @@ from ..core.http import HttpClient
 
 log = logging.getLogger("scraper.auth_meta")
 
-GRAPH = "https://graph.facebook.com/v19.0"
+# Confirmed empirically against a real account (2026-08-06): this app went
+# through Meta's newer "Instagram API with Instagram Login" setup (a
+# standalone Instagram Business Login, no Facebook Page in the loop) rather
+# than the older Facebook-Login-based flow. That flow's tokens and IDs
+# (IGAA-prefixed token, a distinct numeric Instagram user id) are only valid
+# against graph.instagram.com — graph.facebook.com rejects them outright.
+# If this project ever adds a second account that went through the classic
+# Facebook-Login flow instead, that one would need graph.facebook.com; this
+# constant is shared because every current use (publishing, own-media reads)
+# is the same account through the same Instagram Login flow.
+GRAPH = "https://graph.instagram.com/v21.0"
 THREADS = "https://graph.threads.net/v1.0"
 
 

@@ -20,6 +20,20 @@ async function tg(method: string, body: unknown): Promise<void> {
   });
 }
 
+/* TELEGRAM_CHAT_ID is comma-separated: every listed chat may act on a
+   notification. Python sends notifications to the FIRST entry only (see
+   core/config.py) — the extra entries exist so that, after moving
+   notifications to a group, the button-bearing messages already sitting in
+   an admin's DM don't silently stop working when tapped. */
+function allowedChatIds(): Set<string> {
+  return new Set(
+    (process.env.TELEGRAM_CHAT_ID ?? "")
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean),
+  );
+}
+
 export async function POST(request: Request) {
   const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
   const givenSecret = request.headers.get("x-telegram-bot-api-secret-token");
@@ -28,7 +42,7 @@ export async function POST(request: Request) {
   }
 
   const update = await request.json().catch(() => null);
-  const expectedChatId = process.env.TELEGRAM_CHAT_ID;
+  const allowed = allowedChatIds();
 
   const msg = update?.message;
   if (msg && typeof msg.text === "string") {
@@ -37,7 +51,9 @@ export async function POST(request: Request) {
     // "Not authorized" toast is only ever visible to the tapper), replying
     // in the chat itself would confirm to a stranger that this bot exists
     // and responds, which a private admin automation shouldn't do.
-    if (expectedChatId && chatId === expectedChatId && msg.text.trim().startsWith("/build")) {
+    // startsWith (not ===) so the group form "/build@ChismeBot" also matches;
+    // Telegram appends @botname to commands sent in groups.
+    if (allowed.has(chatId) && msg.text.trim().startsWith("/build")) {
       await triggerBuild();
       await tg("sendMessage", {
         chat_id: chatId,
@@ -51,7 +67,7 @@ export async function POST(request: Request) {
   if (!cb) return NextResponse.json({ ok: true }); // not a button tap or a command — nothing to do
 
   const chatId = String(cb.message?.chat?.id ?? cb.from?.id ?? "");
-  if (!expectedChatId || chatId !== expectedChatId) {
+  if (!allowed.has(chatId)) {
     await tg("answerCallbackQuery", { callback_query_id: cb.id, text: "Not authorized" });
     return NextResponse.json({ ok: true });
   }

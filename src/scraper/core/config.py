@@ -126,7 +126,15 @@ class Settings:
         # self-disables when its own keys are missing, same idiom as everything
         # else here — Telegram and email are independent, either can be on alone.
         self.telegram_bot_token = _clean(os.getenv("TELEGRAM_BOT_TOKEN"))
-        self.telegram_chat_id = _clean(os.getenv("TELEGRAM_CHAT_ID"))
+        # Comma-separated. The FIRST entry is where notifications get SENT; the
+        # Next.js webhook parses the same variable as an allowlist of chats
+        # permitted to act on them. Keeping a second entry (an admin's DM)
+        # alongside the group means button-bearing messages already sitting in
+        # that DM keep working instead of silently dying on tap.
+        self.telegram_chat_ids = [
+            c.strip() for c in (os.getenv("TELEGRAM_CHAT_ID") or "").split(",") if c.strip()
+        ]
+        self.telegram_chat_id = self.telegram_chat_ids[0] if self.telegram_chat_ids else None
         self.resend_api_key = _clean(os.getenv("RESEND_API_KEY"))
         self.notify_admin_email = _clean(os.getenv("NOTIFY_ADMIN_EMAIL"))
         self.notify_email_from = (

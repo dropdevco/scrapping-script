@@ -1,3 +1,4 @@
+import { triggerImmediatePublish } from "@/lib/ig/githubDispatch";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 
 /* Shared by the session-authed admin actions, the token-authed review page,
@@ -43,6 +44,7 @@ export async function publishIgPostNowRow(id: string): Promise<ModerateResult> {
     .select("id");
   if (error) return { ok: false, message: error.message };
   if (!data?.length) return { ok: false, message: "That post is no longer a draft." };
+  await triggerImmediatePublish();
   return { ok: true };
 }
 

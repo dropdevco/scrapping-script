@@ -2,6 +2,24 @@ const REPO_OWNER = "dropdevco";
 const REPO_NAME = "scrapping-script";
 const WORKFLOW_FILE = "ig_daily.yml";
 
+/* Best-effort alert, same contract as scraper.social.notify.notify_alert on
+   the Python side: a failure here must never raise into the caller, but
+   silence would defeat the entire point of calling it. */
+async function alert(text: string): Promise<void> {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = (process.env.TELEGRAM_CHAT_ID ?? "").split(",")[0]?.trim();
+  if (!botToken || !chatId) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    });
+  } catch (err) {
+    console.error("githubDispatch alert failed:", err);
+  }
+}
+
 /* "Publish now" needs to actually mean now — the scheduled sweep only runs
    every 30 min during daytime hours, which isn't "now" by any reasonable
    definition. This fires an on-demand run of ig_daily.yml instead of
@@ -12,12 +30,19 @@ const WORKFLOW_FILE = "ig_daily.yml";
    request) has already happened by the time this is called, so if the
    dispatch itself fails (token expired, GitHub down) the regular scheduled
    sweep is still a working fallback — this must never turn an otherwise
-   -successful action into a user-visible error. */
+   -successful action into a user-visible error.
+
+   `fetch` does NOT reject on a non-2xx response — only on a network-level
+   failure (DNS, connection refused) — so an expired GH_DISPATCH_TOKEN would
+   get a 401 back and the call would look like it succeeded unless the
+   status is checked explicitly. Caught live: this exact gap existed here
+   while the analogous one was being fixed on the Python side for
+   IG_ACCESS_TOKEN — same bug, two languages. */
 export async function triggerWorkflowJob(job: "build" | "publish" | "both" | "prune"): Promise<void> {
   const token = process.env.GH_DISPATCH_TOKEN;
   if (!token) return;
   try {
-    await fetch(
+    const res = await fetch(
       `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/workflows/${WORKFLOW_FILE}/dispatches`,
       {
         method: "POST",
@@ -29,8 +54,14 @@ export async function triggerWorkflowJob(job: "build" | "publish" | "both" | "pr
         body: JSON.stringify({ ref: "main", inputs: { job } }),
       },
     );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.error(`triggerWorkflowJob(${job}) failed: ${res.status} ${body.slice(0, 300)}`);
+      await alert(`Couldn't trigger ${job} on GitHub Actions (${res.status}) — check GH_DISPATCH_TOKEN.`);
+    }
   } catch (err) {
     console.error(`triggerWorkflowJob(${job}) failed:`, err);
+    await alert(`Couldn't trigger ${job} on GitHub Actions: ${String(err).slice(0, 300)}`);
   }
 }
 

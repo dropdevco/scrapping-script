@@ -326,6 +326,12 @@ async def _publish_one(
         await storage.update_ig_post(
             post_id, {"status": "failed", "attempts": attempts, "error": str(exc)[:500]}
         )
+        # Otherwise this is invisible on the Telegram side — the row is
+        # correctly marked failed, but nobody watching the chat has any way
+        # to tell "tried and failed" apart from "never ran".
+        await notify_mod.notify_alert(
+            http, f"Publish failed for {post_date.isoformat()}: {str(exc)[:300]}"
+        )
         return 1
 
     if dry_run:
@@ -365,15 +371,34 @@ async def check_token(min_days: int = 14) -> int:
         return 0
 
     app_token = f"{settings.meta_app_id}|{settings.meta_app_secret}"
+    # One client for the whole check, including any alert send below — a
+    # closed HttpClient can't make further calls, so the alert has to happen
+    # before this `with` exits, not after.
     async with HttpClient() as http:
-        days = await publish_mod.token_expires_in_days(http, token, app_token)
-    if days is None:
-        log.info("token expiry unknown (long-lived or non-expiring)")
-        return 0
-    if days < min_days:
-        log.error("IG_ACCESS_TOKEN expires in %d day(s) — regenerate it now.", days)
-        return 1
-    log.info("IG_ACCESS_TOKEN expires in %d day(s)", days)
+        try:
+            days = await publish_mod.token_expires_in_days(http, token, app_token)
+        except Exception as exc:  # noqa: BLE001
+            # Introspection itself failing IS the finding — a dead/blocked
+            # token fails this exact call the same way it fails a real
+            # publish. Reporting that as "fine, must not expire" is the bug
+            # that let a blocked token run silently for two days before
+            # anyone noticed the account had stopped posting.
+            log.error("IG_ACCESS_TOKEN introspection failed — token is likely dead: %s", exc)
+            await notify_mod.notify_alert(
+                http, f"IG_ACCESS_TOKEN looks dead (introspection failed): {str(exc)[:300]}"
+            )
+            return 1
+
+        if days is None:
+            log.info("token expiry unknown (this token type doesn't report one)")
+            return 0
+        if days < min_days:
+            log.error("IG_ACCESS_TOKEN expires in %d day(s) — regenerate it now.", days)
+            await notify_mod.notify_alert(
+                http, f"IG_ACCESS_TOKEN expires in {days} day(s) — regenerate it soon."
+            )
+            return 1
+        log.info("IG_ACCESS_TOKEN expires in %d day(s)", days)
     return 0
 
 

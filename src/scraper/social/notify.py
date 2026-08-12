@@ -33,6 +33,26 @@ log = logging.getLogger("scraper.social.notify")
 TELEGRAM_MAX_MEDIA_GROUP = 10
 
 
+async def notify_alert(http: HttpClient, text: str) -> None:
+    """A plain-text ping for things that need a human's attention but aren't
+    a draft to review — a dead access token, a publish attempt that failed
+    after a real Instagram round-trip. Without this, a failure that the code
+    already caught and handled correctly (logged, written to the DB) is
+    still invisible to whoever's waiting on Telegram: the bot went quiet, and
+    "went quiet" and "is fine" look identical unless something says
+    otherwise. Same best-effort contract as the rest of this module — a
+    failure to alert must never raise into the caller."""
+    if not (settings.telegram_bot_token and settings.telegram_chat_id):
+        return
+    try:
+        await http.post_json(
+            f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+            json={"chat_id": settings.telegram_chat_id, "text": text},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("alert notify failed: %s", exc)
+
+
 def _format_local_time(iso: str, tz_name: str) -> str:
     """12-hour clock without a leading zero, e.g. '5:00 PM'. Deliberately not
     strftime's %-I / %#I — those are platform-specific (glibc vs MSVC) and

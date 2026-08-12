@@ -173,15 +173,21 @@ async def token_expires_in_days(http: HttpClient, token: str, app_token: str) ->
     Long-lived Meta tokens last ~60 days and nothing in CI can rotate a GitHub
     secret on its own, so this is the check that turns a silent mid-cycle death
     into a loud build failure.
+
+    Deliberately lets the introspection call's own exception propagate rather
+    than swallowing it to None. A dead/blocked token makes THIS call fail
+    exactly like it makes every other Graph call fail — treating that failure
+    as "can't tell, assume it's fine" defeats the entire point of this
+    function (confirmed live: a blocked token's debug_token 400 was being
+    reported as "expiry unknown, non-expiring" right up until real publish
+    calls started failing). Only a genuinely successful response with no
+    expires_at field means "this token type doesn't expire" — that's the one
+    case that still returns None.
     """
-    try:
-        data = await http.get_json(
-            f"{GRAPH}/debug_token",
-            params={"input_token": token, "access_token": app_token},
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("token introspection failed: %s", exc)
-        return None
+    data = await http.get_json(
+        f"{GRAPH}/debug_token",
+        params={"input_token": token, "access_token": app_token},
+    )
     expires_at = ((data or {}).get("data") or {}).get("expires_at")
     if not expires_at:
         return None  # 0 means "never expires" for some token types

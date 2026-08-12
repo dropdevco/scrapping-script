@@ -70,10 +70,15 @@ jobs:
           pip install -e ".[social]"
 
       # Long-lived Meta tokens last ~60 days and nothing in CI can rotate a
-      # repo secret on its own, so an expiring token is checked loudly here
-      # rather than discovered as a mystery 400 two weeks later.
+      # repo secret on its own, so an expiring (or already-dead) token is
+      # checked loudly here rather than discovered as a mystery 400 two
+      # weeks later. continue-on-error: a dead token still shouldn't stop
+      # today's draft from being built for review — the human reviewing it
+      # in Telegram sees the same alert this step already sent, and can fix
+      # the token before the scheduled publish sweep actually needs it.
       - name: Check token expiry
         run: python -m scraper.social check-token
+        continue-on-error: true
 
       - name: Prune old slides
         run: python -m scraper.social prune

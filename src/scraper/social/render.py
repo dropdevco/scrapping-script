@@ -8,14 +8,19 @@ Every slide is rendered at exactly CANVAS. Instagram crops all carousel items to
 the first item's aspect ratio, so identical dimensions make that rule a no-op —
 the assertion at the end of each render is what keeps it that way.
 
-Event slides rotate through three genuinely different layouts (not just a color
-swap) so a carousel doesn't read as one template stamped out N times — see
-`_variant_for` and the three `_slide_*` builders below.
+Visual language is a gossip-tabloid / newspaper-clipping collage: torn-paper
+seams, a taped-down corner, halftone dots — using ONLY the brand's own four
+colors (paper, ink, cosmo pink, pop yellow), never an outside hue. Event
+slides rotate through three layouts AND two accents independently (3x2 = 6
+combinations before repeating) so a carousel doesn't read as one template
+stamped out N times — see `_variant_for`/`_accent_for` below.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import random
 import re
 from datetime import date
 from pathlib import Path
@@ -36,7 +41,11 @@ PANEL_Y = PHOTO_H
 GRID_SAFE_TOP = (CANVAS[1] - CANVAS[0]) // 2          # 135
 GRID_SAFE_BOTTOM = GRID_SAFE_TOP + CANVAS[0]          # 1215
 
-# Brand tokens, mirrored from web/src/app/globals.css.
+# Brand tokens, mirrored from web/src/app/globals.css. ONLY these four colors
+# (plus their neutral tints below) are allowed anywhere in this module — no
+# outside hue, ever, even for a single accent. That constraint is deliberate,
+# not a limitation: it's what keeps a collage of torn paper and tape reading
+# as "this brand's gossip board" instead of generic clip-art.
 PAPER = (251, 246, 236)
 CARD = (255, 252, 245)
 INK = (20, 17, 24)
@@ -44,25 +53,34 @@ INK_SOFT = (74, 69, 80)
 COSMO = (230, 17, 127)
 POP_YELLOW = (255, 210, 30)
 LINE = (224, 213, 192)
-TEAL = (20, 96, 106)
-RUST = (196, 74, 32)
+# A muted paper/ink blend for the "tape" accent — a tint, not a new hue.
+TAPE = (214, 204, 184)
 
-# One accent per event-slide layout variant — see _variant_for. Each variant
-# always pairs with the same accent, so a given "look" stays internally
-# coherent instead of becoming a combinatorial mess of layout x color.
-_ACCENTS = (COSMO, TEAL, RUST)
+# Event slides pick a LAYOUT and an ACCENT independently (see _variant_for /
+# _accent_for) — 3 layouts x 2 accents = 6 combinations before the cycle
+# repeats, real variety across a 6-10 slide carousel from only 2 accent colors.
+_ACCENTS = (COSMO, POP_YELLOW)
 
 _FONT_DIR = Path(__file__).resolve().parents[3] / "assets" / "fonts"
 
 # Static instances, NOT the variable files Google Fonts serves by default:
 # ImageFont.truetype() on a variable font silently renders the default (Regular)
-# instance, so a "Black Italic" request would come out looking wrong with no error.
+# instance, so a "Black Italic" request would come out looking wrong with no
+# error. Every role below is a bold-or-heavier weight on purpose — nothing in
+# this design reads as "regular" text anywhere.
 _FONT_FILES = {
-    "display": "Fraunces_144pt-BlackItalic.ttf",
-    "sans": "Archivo-Regular.ttf",
-    "sans_semibold": "Archivo-SemiBold.ttf",
-    "condensed": "Oswald-Bold.ttf",
+    "display": "Anton-Regular.ttf",                 # headlines — see note below
+    "sans_black": "Archivo-Black.ttf",              # venue names — the boldest body text
+    "sans_semibold": "Archivo-SemiBold.ttf",        # addresses — still bold, one step down
+    "condensed": "Oswald-Bold.ttf",                 # labels, kickers, time stamps, chips
 }
+# Cosmopolitan's own masthead/headline face is Franklin Gothic Extra Condensed
+# (Morris Fuller Benton, ATF, 1902) — a commercial font we can't legally vendor.
+# Oswald ("condensed" above) is Google's own reworking of Alternate Gothic,
+# Franklin Gothic's direct sibling from the same ATF family, so it was already
+# the right lineage. Anton is that same grotesque-condensed gothic style at a
+# true black weight — Oswald tops out at 700 (Bold), and "a more bold, thick
+# font for most of the text" needed heavier than that for headlines.
 
 _warned_fonts: set[str] = set()
 
@@ -70,7 +88,28 @@ _warned_fonts: set[str] = set()
 def _variant_for(index: int) -> int:
     """Slide 2 -> 0, 3 -> 1, 4 -> 2, 5 -> 0, ... — deterministic so re-rendering
     the same day produces the same carousel, not a different one each time."""
-    return (index - 2) % len(_ACCENTS)
+    return (index - 2) % 3
+
+
+def _accent_for(index: int) -> tuple[int, int, int]:
+    """Cycles independently of the layout (period 2 vs period 3), so the
+    (layout, accent) pair only repeats every 6 slides, not every 2 or 3."""
+    return _ACCENTS[(index - 2) % len(_ACCENTS)]
+
+
+def _on_accent(accent: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Readable text color for text sitting ON a solid accent background.
+    POP_YELLOW is light enough that paper-colored text nearly disappears;
+    COSMO is dark enough that ink-colored text nearly disappears — never
+    hardcode one or the other, always ask which accent you're on."""
+    return INK if accent == POP_YELLOW else PAPER
+
+
+def _stable_seed(value: str) -> int:
+    """A deterministic seed from a stable identity (an event's id, or its
+    title as a fallback) — NOT Python's built-in hash(), which is randomized
+    per-process and would make the same event tear differently every run."""
+    return int(hashlib.sha1(value.encode()).hexdigest()[:8], 16)
 
 
 def font(role: str, size: int):
@@ -256,6 +295,66 @@ def _placeholder_band(size: tuple[int, int]):
     return block
 
 
+# ── newspaper-clipping motifs ────────────────────────────────────────────────
+def _torn_edge(
+    x0: int, x1: int, y_base: float, *, slant: float = 0, amplitude: int = 9,
+    segment: int = 26, seed: int = 0,
+) -> list[tuple[float, float]]:
+    """Points along a jagged torn-paper edge from x0 to x1, sloping by
+    `slant` px total across the span (0 = horizontal), with small per
+    -segment jitter. Seeded so a given event always tears the same way on
+    re-render, but different events don't all share one identical rip."""
+    rng = random.Random(seed)
+    span = max(1, x1 - x0)
+    points: list[tuple[float, float]] = []
+    x = x0
+    while x < x1:
+        base_y = y_base + slant * (x - x0) / span
+        points.append((x, base_y + rng.randint(-amplitude, amplitude)))
+        x += segment
+    points.append((x1, y_base + slant + rng.randint(-amplitude, amplitude)))
+    return points
+
+
+def _torn_panel(draw, edge: list[tuple[float, float]], x0: int, x1: int, y_bottom: int, fill) -> None:
+    """Fill everything below a torn edge, then trace the tear in ink — the
+    line is what sells "ripped paper" instead of just "jagged rectangle"."""
+    draw.polygon(list(edge) + [(x1, y_bottom), (x0, y_bottom)], fill=fill)
+    draw.line(edge, fill=INK, width=3, joint="curve")
+
+
+def _draw_tape(img, cx: float, cy: float, w: int, h: int, angle: float) -> None:
+    """A short strip of "tape" holding the clipping down — rotated, so it
+    reads as physically stuck on rather than a flat UI badge. RGBA + rotate
+    + paste-with-self-as-mask is the standard Pillow idiom for pasting a
+    non-axis-aligned shape onto an RGB canvas without square corner artifacts."""
+    from PIL import Image as PILImage
+    from PIL import ImageDraw as PILImageDraw
+
+    tape = PILImage.new("RGBA", (w, h), (*TAPE, 232))
+    d = PILImageDraw.Draw(tape)
+    d.rectangle((0, 0, w - 1, h - 1), outline=(*INK, 255), width=2)
+    tape = tape.rotate(angle, expand=True, resample=PILImage.BICUBIC)
+    img.paste(tape, (int(cx - tape.width / 2), int(cy - tape.height / 2)), tape)
+
+
+def _halftone_circle(draw, cx: float, cy: float, r: float, color, dot_r: int = 5, spacing: int = 15) -> None:
+    """A circle built from a dot grid instead of a flat fill — the classic
+    cheap-newsprint halftone-screen look, in one of our own two accents."""
+    y = cy - r
+    row = 0
+    while y <= cy + r:
+        offset = (spacing / 2) if row % 2 else 0
+        x = cx - r - offset
+        while x <= cx + r:
+            dx, dy = x - cx, y - cy
+            if dx * dx + dy * dy <= r * r:
+                draw.ellipse((x - dot_r, y - dot_r, x + dot_r, y + dot_r), fill=color)
+            x += spacing
+        y += spacing
+        row += 1
+
+
 def _encode(img) -> bytes:
     from io import BytesIO
 
@@ -322,16 +421,18 @@ def render_cover(day: date, event_count: int, handle: str = "epchisme.com") -> b
     img = Image.new("RGB", CANVAS, INK)
     draw = ImageDraw.Draw(img)
 
-    # Big offset accent circle, mostly off-canvas to the upper right — "more
-    # design on the background" without competing with the left-aligned text.
-    draw.ellipse((620, -160, 620 + 940, -160 + 940), fill=COSMO)
+    # Big offset halftone-dot circle, mostly off-canvas to the upper right —
+    # "more design on the background" rendered as a cheap-newsprint dot
+    # screen instead of a flat vector shape, without competing with the
+    # left-aligned text column.
+    _halftone_circle(draw, cx=620 + 470, cy=-160 + 470, r=470, color=COSMO, dot_r=7, spacing=19)
 
     kicker = font("condensed", 46)
     date_font, date_lines = wrap_to_fit(
         draw, day.strftime("%A"), "display", CANVAS[0] - SAFE_X * 2, 1, 150, 84
     )
-    month_font = font("display", 124)
-    count_font = font("sans_semibold", 42)
+    month_font = font("display", 128)
+    count_font = font("sans_black", 40)
 
     # Measure first, then centre the whole block inside the profile-grid square.
     # Laying it out top-down from a fixed offset left a large dead gap above the
@@ -357,11 +458,22 @@ def render_cover(day: date, event_count: int, handle: str = "epchisme.com") -> b
     # A few drawn dot accents ahead of the count line — the "some icons" ask,
     # kept modest since there's no icon set to draw from beyond Pillow shapes.
     dot_x = SAFE_X
-    for c in (COSMO, POP_YELLOW, TEAL):
+    for c in (COSMO, POP_YELLOW, PAPER):
         draw.ellipse((dot_x, y + 14, dot_x + 14, y + 28), fill=c)
         dot_x += 22
     label = "thing happening" if event_count == 1 else "things happening"
     draw.text((dot_x + 10, y), f"{event_count} {label}", font=count_font, fill=PAPER)
+
+    # A taped-down corner ticket in the grid-safe band ties the cover into the
+    # same "clipping" language the event slides use.
+    _draw_tape(img, cx=CANVAS[0] - 120, cy=GRID_SAFE_TOP + 60, w=170, h=64, angle=-7)
+    tape_font = font("condensed", 26)
+    tape_label = "TEAR ME OFF"
+    tw = _text_width(draw, tape_label, tape_font)
+    draw.text(
+        (CANVAS[0] - 120 - tw / 2, GRID_SAFE_TOP + 60 - tape_font.size / 2),
+        tape_label, font=tape_font, fill=INK,
+    )
 
     # Footer pinned to the bottom of the grid-safe band, not the canvas, so it
     # survives the profile-grid crop.
@@ -380,12 +492,12 @@ def render_cover(day: date, event_count: int, handle: str = "epchisme.com") -> b
     return _encode(img)
 
 
-def _slide_bold_block(row: dict[str, Any], photo, start_local, accent):
-    """Variant 0 — photo-top/panel-bottom, evolved bolder: bigger title type,
-    a solid accent block behind the category chip, address line with a
-    drawn pin."""
+def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int):
+    """Layout 0 — photo-top/panel-bottom, torn seam instead of a clean cut,
+    a taped corner, bold Archivo Black venue text, an accent-color chip."""
     from PIL import Image, ImageDraw
 
+    on_accent = _on_accent(accent)
     img = Image.new("RGB", CANVAS, PAPER)
     if photo is not None:
         band = _fit_photo(photo.image, (CANVAS[0], PHOTO_H))
@@ -395,18 +507,18 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent):
         img.paste(_placeholder_band((CANVAS[0], PHOTO_H)), (0, 0))
 
     draw = ImageDraw.Draw(img)
-    draw.rectangle((0, PANEL_Y, CANVAS[0], CANVAS[1]), fill=PAPER)
-    draw.rectangle((0, PANEL_Y, CANVAS[0], PANEL_Y + 4), fill=accent)
+    edge = _torn_edge(0, CANVAS[0], PANEL_Y, seed=seed)
+    _torn_panel(draw, edge, 0, CANVAS[0], CANVAS[1], PAPER)
 
     box_w = CANVAS[0] - SAFE_X * 2
     stamp = _time_stamp(start_local)
     if stamp:
         time_font = font("condensed", 44)
         draw.text(
-            (CANVAS[0] - SAFE_X, PANEL_Y + 34), stamp, font=time_font, fill=INK, anchor="ra"
+            (CANVAS[0] - SAFE_X, PANEL_Y + 40), stamp, font=time_font, fill=INK, anchor="ra"
         )
 
-    y = PANEL_Y + 96
+    y = PANEL_Y + 100
     title_font, title_lines = wrap_to_fit(
         draw, str(row.get("title") or "Untitled event"), "display", box_w, 3, 96, 60
     )
@@ -420,15 +532,15 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent):
     venue = _venue_label(row)
     if venue:
         y += 18
-        venue_font, venue_lines = wrap_to_fit(draw, venue, "sans_semibold", box_w, 1, 34, 26)
-        draw.text((SAFE_X, y), venue_lines[0], font=venue_font, fill=INK_SOFT)
+        venue_font, venue_lines = wrap_to_fit(draw, venue, "sans_black", box_w, 1, 36, 26)
+        draw.text((SAFE_X, y), venue_lines[0], font=venue_font, fill=INK)
         y += int(venue_font.size * 1.2)
 
     address = _address_label(row)
     if address and y + 30 < CANVAS[1] - 60:
         y += 8
         _draw_pin(draw, SAFE_X, y + 2, 18, accent)
-        addr_font, addr_lines = wrap_to_fit(draw, address, "sans", box_w - 26, 1, 24, 20)
+        addr_font, addr_lines = wrap_to_fit(draw, address, "sans_semibold", box_w - 26, 1, 26, 20)
         draw.text((SAFE_X + 26, y), addr_lines[0], font=addr_font, fill=INK_SOFT)
         y += int(addr_font.size * 1.2)
 
@@ -439,17 +551,23 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent):
         label = str(cats[0]).upper()
         w = _text_width(draw, label, chip_font)
         draw.rectangle((SAFE_X, y, SAFE_X + w + 28, y + 44), fill=accent)
-        draw.text((SAFE_X + 14, y + 9), label, font=chip_font, fill=PAPER)
+        draw.text((SAFE_X + 14, y + 9), label, font=chip_font, fill=on_accent)
 
+    # Left side, mirroring _slide_full_bleed — the time stamp owns the right
+    # side of this row (anchor="ra" at CANVAS[0]-SAFE_X); a right-side tape
+    # placement collided with it for real on a live render ("1:00 PM" half
+    # covered by the tape strip).
+    _draw_tape(img, cx=110, cy=PANEL_Y + 34, w=150, h=56, angle=6)
     return img
 
 
-def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent):
-    """Variant 1 — the photo fills the ENTIRE canvas; a bold, slanted
-    accent-color card overlaps the lower third holding the text, magazine
-    -cover style instead of photo-with-caption-strip."""
+def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int):
+    """Layout 1 — the photo fills the ENTIRE canvas; a bold, torn-edge
+    accent card overlaps the lower third holding the text, magazine-cover
+    style instead of photo-with-caption-strip."""
     from PIL import Image, ImageDraw
 
+    on_accent = _on_accent(accent)
     img = Image.new("RGB", CANVAS, PAPER)
     if photo is not None:
         img.paste(_fit_photo(photo.image, CANVAS), (0, 0))
@@ -460,55 +578,58 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent):
 
     card_top = 860
     slant = 46
-    draw.polygon(
-        [(0, card_top + slant), (CANVAS[0], card_top), (CANVAS[0], CANVAS[1]), (0, CANVAS[1])],
-        fill=accent,
-    )
+    edge = _torn_edge(0, CANVAS[0], card_top, slant=slant, seed=seed)
+    _torn_panel(draw, edge, 0, CANVAS[0], CANVAS[1], accent)
 
     box_w = CANVAS[0] - SAFE_X * 2
-    y = card_top + slant + 44
+    y = card_top + slant + 46
     # The time stamp gets its own row, ABOVE the title, rather than sharing a
     # row with the title's first line — a two-line title is exactly as wide
     # as the box and would otherwise run straight into a right-aligned badge
     # sitting at the same height (this collided for real: "Friday Salsa
-    # Social with 3:00 PM" on a live render before this fix).
+    # Social with 3:00 PM" on a live render before this fix). The row is
+    # reserved UNCONDITIONALLY, even when there's no stamp to draw — an
+    # event with no plausible time would otherwise pull the title up into
+    # the tape accent's vertical space instead (also caught on a live render).
+    time_font = font("condensed", 40)
     stamp = _time_stamp(start_local)
     if stamp:
-        time_font = font("condensed", 40)
-        draw.text((CANVAS[0] - SAFE_X, y), stamp, font=time_font, fill=PAPER, anchor="ra")
-        y += int(time_font.size * 1.3)
+        draw.text((CANVAS[0] - SAFE_X, y), stamp, font=time_font, fill=on_accent, anchor="ra")
+    y += int(time_font.size * 1.3)
 
     title_font, title_lines = wrap_to_fit(
-        draw, str(row.get("title") or "Untitled event"), "display", box_w, 2, 84, 52
+        draw, str(row.get("title") or "Untitled event"), "display", box_w, 2, 86, 54
     )
     line_h = int(title_font.size * 1.06)
     for line in title_lines:
-        draw.text((SAFE_X, y), line, font=title_font, fill=PAPER)
+        draw.text((SAFE_X, y), line, font=title_font, fill=on_accent)
         y += line_h
 
     venue = _venue_label(row)
     if venue:
         y += 16
-        venue_font, venue_lines = wrap_to_fit(draw, venue, "sans_semibold", box_w, 1, 32, 24)
-        draw.text((SAFE_X, y), venue_lines[0], font=venue_font, fill=PAPER)
+        venue_font, venue_lines = wrap_to_fit(draw, venue, "sans_black", box_w, 1, 34, 24)
+        draw.text((SAFE_X, y), venue_lines[0], font=venue_font, fill=on_accent)
         y += int(venue_font.size * 1.2)
 
     address = _address_label(row)
     if address and y + 30 < CANVAS[1] - 24:
         y += 6
-        _draw_pin(draw, SAFE_X, y + 2, 16, PAPER)
-        addr_font, addr_lines = wrap_to_fit(draw, address, "sans", box_w - 26, 1, 22, 18)
-        draw.text((SAFE_X + 24, y), addr_lines[0], font=addr_font, fill=PAPER)
+        _draw_pin(draw, SAFE_X, y + 2, 16, on_accent)
+        addr_font, addr_lines = wrap_to_fit(draw, address, "sans_semibold", box_w - 26, 1, 24, 18)
+        draw.text((SAFE_X + 24, y), addr_lines[0], font=addr_font, fill=on_accent)
 
+    _draw_tape(img, cx=110, cy=card_top + slant / 2, w=140, h=54, angle=-8)
     return img
 
 
-def _slide_split_panel(row: dict[str, Any], photo, start_local, accent):
-    """Variant 2 — photo on the top ~65%, but the bottom panel is a SOLID
-    accent-color background with paper-colored text instead of paper — a
-    strong color-inversion beat partway through the carousel."""
+def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: int):
+    """Layout 2 — photo on the top ~65%, but the bottom panel is a SOLID
+    accent-color background instead of paper — a strong color-inversion
+    beat partway through the carousel, torn seam, taped corner."""
     from PIL import Image, ImageDraw
 
+    on_accent = _on_accent(accent)
     split_photo_h = 878
     img = Image.new("RGB", CANVAS, accent)
     if photo is not None:
@@ -517,39 +638,42 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent):
         img.paste(_placeholder_band((CANVAS[0], split_photo_h)), (0, 0))
 
     draw = ImageDraw.Draw(img)
-    draw.rectangle((0, split_photo_h, CANVAS[0], CANVAS[1]), fill=accent)
+    edge = _torn_edge(0, CANVAS[0], split_photo_h, seed=seed)
+    _torn_panel(draw, edge, 0, CANVAS[0], CANVAS[1], accent)
 
     box_w = CANVAS[0] - SAFE_X * 2
-    y = split_photo_h + 44
-    # Own row above the title — see the identical comment in _slide_full_bleed
-    # for why sharing a row with the title's first line is unsafe.
+    y = split_photo_h + 48
+    # Own row above the title, reserved unconditionally — see the identical
+    # comment in _slide_full_bleed for why both the collision this avoids
+    # (title vs. time badge) and the one this avoids (title vs. tape accent
+    # when there's no time to stamp) are real, both caught on live renders.
+    time_font = font("condensed", 40)
     stamp = _time_stamp(start_local)
     if stamp:
-        time_font = font("condensed", 40)
-        draw.text((CANVAS[0] - SAFE_X, y), stamp, font=time_font, fill=PAPER, anchor="ra")
-        y += int(time_font.size * 1.3)
+        draw.text((CANVAS[0] - SAFE_X, y), stamp, font=time_font, fill=on_accent, anchor="ra")
+    y += int(time_font.size * 1.3)
 
     title_font, title_lines = wrap_to_fit(
-        draw, str(row.get("title") or "Untitled event"), "display", box_w, 2, 80, 50
+        draw, str(row.get("title") or "Untitled event"), "display", box_w, 2, 82, 52
     )
     line_h = int(title_font.size * 1.08)
     for line in title_lines:
-        draw.text((SAFE_X, y), line, font=title_font, fill=PAPER)
+        draw.text((SAFE_X, y), line, font=title_font, fill=on_accent)
         y += line_h
 
     venue = _venue_label(row)
     if venue:
         y += 16
-        venue_font, venue_lines = wrap_to_fit(draw, venue, "sans_semibold", box_w, 1, 30, 22)
-        draw.text((SAFE_X, y), venue_lines[0], font=venue_font, fill=PAPER)
+        venue_font, venue_lines = wrap_to_fit(draw, venue, "sans_black", box_w, 1, 32, 22)
+        draw.text((SAFE_X, y), venue_lines[0], font=venue_font, fill=on_accent)
         y += int(venue_font.size * 1.2)
 
     address = _address_label(row)
     if address and y + 30 < CANVAS[1] - 60:
         y += 6
-        _draw_pin(draw, SAFE_X, y + 2, 16, PAPER)
-        addr_font, addr_lines = wrap_to_fit(draw, address, "sans", box_w - 26, 1, 22, 18)
-        draw.text((SAFE_X + 24, y), addr_lines[0], font=addr_font, fill=PAPER)
+        _draw_pin(draw, SAFE_X, y + 2, 16, on_accent)
+        addr_font, addr_lines = wrap_to_fit(draw, address, "sans_semibold", box_w - 26, 1, 24, 18)
+        draw.text((SAFE_X + 24, y), addr_lines[0], font=addr_font, fill=on_accent)
         y += int(addr_font.size * 1.2)
 
     cats = [c for c in (row.get("categories") or []) if c][:1]
@@ -559,8 +683,11 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent):
         label = str(cats[0]).upper()
         w = _text_width(draw, label, chip_font)
         draw.rectangle((SAFE_X, y, SAFE_X + w + 28, y + 44), fill=PAPER)
-        draw.text((SAFE_X + 14, y + 9), label, font=chip_font, fill=accent)
+        draw.text((SAFE_X + 14, y + 9), label, font=chip_font, fill=INK)
 
+    # Left side — same fix as _slide_bold_block, same reason: the time stamp
+    # owns the right side of this row.
+    _draw_tape(img, cx=110, cy=split_photo_h + 30, w=150, h=56, angle=5)
     return img
 
 
@@ -578,6 +705,7 @@ def render_event_slide(
     the numbered "N / total" badge was removed; order is still implied by
     chronological position, same as the caption."""
     variant = _variant_for(index)
-    accent = _ACCENTS[variant]
-    img = _SLIDE_BUILDERS[variant](row, photo, start_local, accent)
+    accent = _accent_for(index)
+    seed = _stable_seed(str(row.get("id") or row.get("title") or index))
+    img = _SLIDE_BUILDERS[variant](row, photo, start_local, accent, seed)
     return _encode(img)

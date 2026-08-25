@@ -164,3 +164,33 @@ def test_different_venues_stay_different():
     from scraper.social.selection import venue_key
 
     assert venue_key({"venue": "Lowbrow Palace"}) != venue_key({"venue": "El Paso Museum of Art"})
+
+
+def test_ticketmaster_picks_the_largest_image_not_the_first():
+    """Ticketmaster lists the same artwork at a dozen sizes in no useful order.
+    Taking images[0] took a 305x203 thumbnail for Thee Sacred Souls while a
+    2048x1365 sat further down, and the thumbnail then failed imaging.py's
+    quality gate — so the event lost its slide for want of a photo that was
+    there all along."""
+    from scraper.sources.events_ticketmaster import _best_image
+
+    images = [
+        {"url": "thumb", "width": 305, "height": 203, "ratio": "3_2"},
+        {"url": "retina", "width": 640, "height": 427, "ratio": "3_2"},
+        {"url": "source", "width": 2048, "height": 1365, "ratio": "3_2"},
+        {"url": "tablet", "width": 1024, "height": 576, "ratio": "16_9"},
+    ]
+    assert _best_image(images) == "source"
+
+
+def test_best_image_tolerates_the_shapes_ticketmaster_actually_sends():
+    from scraper.sources.events_ticketmaster import _best_image
+
+    assert _best_image(None) is None
+    assert _best_image([]) is None
+    assert _best_image([{"width": 10}]) is None            # no url
+    assert _best_image([{"url": "only"}]) == "only"        # no dimensions
+    # An entry missing dimensions must lose to any sized candidate.
+    assert _best_image([{"url": "nodims"}, {"url": "big", "width": 800, "height": 600}]) == "big"
+    # Non-numeric dimensions must not raise.
+    assert _best_image([{"url": "junk", "width": "wide"}, {"url": "ok", "width": 9, "height": 9}]) == "ok"

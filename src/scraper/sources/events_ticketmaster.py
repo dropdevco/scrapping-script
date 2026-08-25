@@ -52,6 +52,35 @@ def _start_datetime(dates: dict[str, Any]) -> Optional[datetime]:
     return _dt(f"{local_date}T{local_time}")
 
 
+def _best_image(images: Any) -> Optional[str]:
+    """The LARGEST image Ticketmaster offers, not the first one it lists.
+
+    Ticketmaster ships the same artwork at a dozen sizes in no useful order, and
+    taking images[0] meant taking whatever happened to be first — for Thee
+    Sacred Souls that was a 305x203 ARTIST_PAGE thumbnail, while a 2048x1365
+    SOURCE sat further down the same list. The thumbnail then failed
+    imaging.py's quality gate (MIN_ABS_SIDE / MAX_UPSCALE), so the event lost
+    its carousel slot for want of a photo the provider had all along.
+
+    Ranked by pixel area, with a documented width/height fallback: a few entries
+    omit the dimensions entirely, and those should lose to any sized candidate
+    rather than sorting unpredictably among them.
+    """
+    if not isinstance(images, list):
+        return None
+    sized = [i for i in images if isinstance(i, dict) and i.get("url")]
+    if not sized:
+        return None
+
+    def area(i: dict[str, Any]) -> int:
+        try:
+            return int(i.get("width") or 0) * int(i.get("height") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return max(sized, key=area).get("url")
+
+
 def _coord(value: Any) -> Optional[float]:
     """Ticketmaster sends coordinates as strings; convert defensively."""
     if value is None or isinstance(value, bool):
@@ -107,8 +136,7 @@ class TicketmasterSource(Source):
         if not isinstance(coords, dict):
             coords = {}
 
-        images = e.get("images") or []
-        image_url = clean_image_url(images[0].get("url") if images else None)
+        image_url = clean_image_url(_best_image(e.get("images")))
 
         categories = []
         for c in e.get("classifications") or []:

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { fetchCrawlerEvents } from "@/lib/events";
 import { eventDescription, eventImageUrl } from "@/lib/event-schema";
+import { formatEventDateTime } from "@/lib/datetime";
 import type { EventRow } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -122,7 +123,7 @@ export default async function CrawlerEventsPage({ searchParams }: CrawlerPagePro
                     </dt>
                     <dd>
                       {start ? (
-                        <time dateTime={event.start_time ?? undefined}>{start.toLocaleString("en-US")}</time>
+                        <time dateTime={event.start_time ?? undefined}>{formatEventDateTime(event.start_time, "en-US")}</time>
                       ) : (
                         "Date TBA"
                       )}

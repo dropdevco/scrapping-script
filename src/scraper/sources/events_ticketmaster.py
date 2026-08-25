@@ -25,6 +25,33 @@ def _dt(value: str | None) -> Optional[datetime]:
         return None
 
 
+def _start_datetime(dates: dict[str, Any]) -> Optional[datetime]:
+    """The start instant, preferring the field that actually carries an offset.
+
+    ``dates.start.dateTime`` is a real UTC instant and is used whenever present.
+    When it is absent Ticketmaster still usually ships ``localDate`` +
+    ``localTime`` — a wall-clock pair. Combining those and letting
+    core/eventtime.py resolve them keeps a 7pm show at 7pm; taking ``localDate``
+    alone (the old behavior) silently turned every such event into midnight,
+    which then read as 6pm the *previous* day once stored.
+    """
+    start = dates.get("start") or {}
+    absolute = _dt(start.get("dateTime"))
+    if absolute is not None:
+        return absolute
+
+    local_date = start.get("localDate")
+    if not local_date:
+        return None
+    # timeTBA/noSpecificTime mean the time genuinely is not announced yet, so a
+    # date-only value is the honest answer — the flyer omits an unknown time
+    # rather than inventing midnight for it.
+    local_time = start.get("localTime")
+    if start.get("timeTBA") or start.get("noSpecificTime") or not local_time:
+        return _dt(local_date)
+    return _dt(f"{local_date}T{local_time}")
+
+
 def _coord(value: Any) -> Optional[float]:
     """Ticketmaster sends coordinates as strings; convert defensively."""
     if value is None or isinstance(value, bool):
@@ -91,7 +118,6 @@ class TicketmasterSource(Source):
                     categories.append(name)
 
         dates = e.get("dates") or {}
-        start = (dates.get("start") or {}).get("dateTime") or (dates.get("start") or {}).get("localDate")
         title = e.get("name", "Untitled event")
 
         return Event(
@@ -99,7 +125,7 @@ class TicketmasterSource(Source):
             source_id=e.get("id"),
             title=title,
             description=e.get("info") or e.get("pleaseNote"),
-            start_time=_dt(start),
+            start_time=_start_datetime(dates),
             venue=venue.get("name"),
             location=full_address,
             lat=_coord(coords.get("latitude")),

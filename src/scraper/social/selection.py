@@ -56,12 +56,19 @@ _DATE_TAIL = re.compile(
 
 _BOILERPLATE_TITLES = {"event", "events", "upcoming events", "untitled event", "calendar"}
 
-# Public events essentially never start between midnight and 6am — but a large
-# slice of stored rows claim to, because some sources hand us a naive local time
-# that gets persisted as if it were UTC (a 10am storytime lands at 04:00 local).
-# We can't tell a corrupted timestamp from a real 2am one, so rather than print a
-# time we don't believe, these are shown WITHOUT a time. Honest and unremarkable,
-# versus "TODDLER STORYTIME · 2:00 AM" on a public feed.
+# Public events essentially never start between midnight and 6am, so a slide
+# whose time lands in that window is showing a timestamp we cannot vouch for and
+# is rendered WITHOUT one — honest and unremarkable, versus "TODDLER STORYTIME ·
+# 2:00 AM" on a public feed.
+#
+# This used to be the norm rather than the exception: sources handed us a naive
+# local time that was persisted as if it were UTC, so a 10am storytime landed at
+# 04:00 and a 5pm social at 11:00. That is fixed at the source now (see
+# core/eventtime.py) and backfilled out of the stored rows, which leaves this
+# guard doing what it was always meant to do — catching the occasional genuinely
+# broken parse, not masking a systematic six-hour shift. It stays deliberately
+# conservative: a wrong time on a public slide is worse than no time, and the
+# events this region actually runs before 6am round to none.
 _EARLIEST_PLAUSIBLE_HOUR = 6
 
 
@@ -104,6 +111,27 @@ def _strip_occurrence(title: str) -> str:
     return out or title.strip()
 
 
+def venue_key(row: dict[str, Any]) -> str:
+    """Which venue this row is at, by NAME rather than by venue_id.
+
+    venue_id looks like the authoritative answer and is not one: venues are
+    keyed on sha1(address | name), so the same building resolves to a different
+    id for every source that punctuates its address differently. The Abraham
+    Chavez Theatre currently holds three ids — "1 Civic Center Plaza, El Paso,
+    TX 79901, US", "One Civic Center Plaza, El Paso, TX 79901" and "1 Civic
+    Center Plaza, El Paso, TX 79901" — so keying on the id put the same concert
+    on the carousel three times and defeated the per-venue diversity cap at the
+    same time. The venue NAMES agree where the addresses do not.
+
+    (The duplicate venue rows themselves are a storage-side problem and want a
+    real address normalizer; this is the read-side defense so the carousel does
+    not repeat itself while that stands.)
+    """
+    return _norm(row.get("venue") or "") or str(row.get("venue_id") or "") or _norm(
+        str(row.get("location") or "")
+    )
+
+
 def dedupe_key(row: dict[str, Any]) -> str:
     """Stable identity for "the same recurring event", across occurrences.
 
@@ -112,8 +140,7 @@ def dedupe_key(row: dict[str, Any]) -> str:
     occurrence-stripped title plus the venue can.
     """
     title = _strip_occurrence(str(row.get("title") or ""))
-    venue = row.get("venue_id") or _norm(row.get("venue") or row.get("location") or "")
-    return hashlib.sha1(f"{_norm(title)}|{venue}".encode()).hexdigest()
+    return hashlib.sha1(f"{_norm(title)}|{venue_key(row)}".encode()).hexdigest()
 
 
 def _categories(row: dict[str, Any]) -> list[str]:
@@ -239,7 +266,7 @@ def choose(
     for cand in scored:
         if len(picked) >= max_slides:
             break
-        venue = str(cand.row.get("venue_id") or _norm(cand.row.get("venue") or "")) or "?"
+        venue = venue_key(cand.row) or "?"
         if venue != "?" and venue_counts.get(venue, 0) >= max_per_venue:
             continue
         cats = _categories(cand.row)

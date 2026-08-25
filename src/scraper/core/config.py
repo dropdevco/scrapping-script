@@ -55,6 +55,15 @@ class Settings:
         self.supabase_db_url = _clean(os.getenv("SUPABASE_DB_URL"))
 
         # Behavior
+        # Timezone the scraped region keeps its wall clocks in. Event listings
+        # publish naive local times; core/eventtime.py resolves them against
+        # this. Defaults to IG_TIMEZONE when only that is set, so the carousel's
+        # "today" and the events it reads about can never drift apart.
+        self.event_timezone = (
+            _clean(os.getenv("EVENT_TIMEZONE"))
+            or _clean(os.getenv("IG_TIMEZONE"))
+            or "America/Denver"
+        )
         self.freshness_hours = _int("FRESHNESS_HOURS", 24)
         self.http_max_concurrency = _int("HTTP_MAX_CONCURRENCY", 8)
         self.http_timeout_seconds = _int("HTTP_TIMEOUT_SECONDS", 20)

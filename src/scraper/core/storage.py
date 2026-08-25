@@ -19,12 +19,20 @@ from typing import Any, Optional
 from .config import settings
 from .dedupe import _TITLE_ONLY_THRESHOLD, _TOKEN_OVERLAP_THRESHOLD, _norm, _similar, _title_token_overlap
 from .dedupe import merge_ticket_links as _merge_ticket_links
+from .eventtime import event_tz, local_day, to_event_local
 from .models import Event, TicketLink, Trend
 
 log = logging.getLogger("scraper.storage")
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
+    """Serialize for a ``timestamptz`` column — always WITH an offset.
+
+    ``to_event_local`` is applied here as well as in the orchestrator because
+    this is the last line of defense: a naive value reaching Postgres is read as
+    UTC, which is exactly the six-hour shift this fix removes.
+    """
+    dt = to_event_local(dt)
     return dt.isoformat() if dt else None
 
 
@@ -417,10 +425,15 @@ class Storage:
             return rows
 
         venue_ids = list({r["venue_id"] for r in candidates})
-        days = [datetime.fromisoformat(r["start_time"]).date() for r in candidates]
-        window_start = datetime.combine(min(days), datetime.min.time(), tzinfo=timezone.utc)
+        # Local calendar days, and a window whose edges are LOCAL midnights.
+        # A 7pm show is 01:00Z the next day, so a UTC-midnight window would drop
+        # every evening event on the last day of the range and the cross-run
+        # merge would insert a duplicate card for it instead of merging.
+        tz = event_tz()
+        days = [local_day(r["start_time"]).date() for r in candidates]
+        window_start = datetime.combine(min(days), datetime.min.time(), tzinfo=tz)
         window_end = datetime.combine(
-            max(days) + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+            max(days) + timedelta(days=1), datetime.min.time(), tzinfo=tz
         )
 
         try:
@@ -465,14 +478,18 @@ class Storage:
     ) -> Optional[dict[str, Any]]:
         if not same_venue_existing or not row.get("start_time"):
             return None
-        row_day = datetime.fromisoformat(row["start_time"]).date()
+        # Both sides go through local_day: the incoming row carries a local
+        # offset, the stored one comes back from Postgres in UTC, and comparing
+        # those two .date() values directly filed the same evening event under
+        # two different days.
+        row_day = local_day(row["start_time"]).date()
         row_title = row.get("title") or ""
         for existing in same_venue_existing:
             existing_start = existing.get("start_time")
             if not existing_start:
                 continue
-            existing_day = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).date()
-            if existing_day != row_day:
+            existing_local = local_day(existing_start)
+            if existing_local is None or existing_local.date() != row_day:
                 continue
             if _is_same_event_title(row_title, existing.get("title") or ""):
                 return existing

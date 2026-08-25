@@ -3,6 +3,7 @@ import { isAdminEmail } from "@/lib/admin";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { supabaseServer } from "@/lib/supabase/server";
 import { approveEvent, rejectEvent } from "./actions";
+import { formatEventDateTime } from "@/lib/datetime";
 
 export const dynamic = "force-dynamic";
 
@@ -73,7 +74,10 @@ export default async function AdminPage() {
                   <h2 className="font-display text-xl font-bold text-ink">{e.title}</h2>
                   <p className="mt-1 text-[13px] text-ink-soft">
                     {start
-                      ? start.toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })
+                      ? formatEventDateTime(e.start_time, "en-US", {
+                          dateStyle: "medium",
+                          timeStyle: "short",
+                        })
                       : "No date given"}
                     {venueName ? ` · ${venueName}` : ""}
                     {address ? ` · ${address}` : ""}

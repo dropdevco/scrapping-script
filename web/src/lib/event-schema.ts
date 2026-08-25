@@ -1,4 +1,5 @@
 import type { EventRow } from "./types";
+import { formatEventDateTime } from "./datetime";
 import { absoluteUrl, eventUrl } from "./site";
 
 function text(value: string | null | undefined): string | undefined {
@@ -13,7 +14,7 @@ export function eventDescription(event: EventRow): string {
       event.title,
       event.venues?.name ?? event.venue,
       event.venues?.city,
-      event.start_time ? new Date(event.start_time).toLocaleString("en-US") : undefined,
+      formatEventDateTime(event.start_time, "en-US") ?? undefined,
     ]
       .filter(Boolean)
       .join(" - ")

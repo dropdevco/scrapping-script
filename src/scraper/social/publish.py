@@ -167,12 +167,41 @@ async def publish_carousel(
     return media_id
 
 
+# /debug_token is a Facebook-Login-flow endpoint. This account went through
+# "Instagram API with Instagram Login" (see sources/auth_meta.py), whose GRAPH
+# host is graph.instagram.com — and that host has no /debug_token: it answers
+# every such call with a 500 "IGApiException / An unknown error occurred",
+# regardless of whether the token is healthy. Confirmed live on 2026-08-24: the
+# very token /debug_token was 500ing on returned 200 for /me and for the
+# account's own fields, i.e. it was working perfectly.
+#
+# That mattered because the previous fix here — correctly — made an
+# introspection failure fatal, on the reasoning that a dead token fails
+# introspection exactly like it fails everything else. True for a host where
+# introspection exists; on this one the call fails ALWAYS, so the check cried
+# wolf on every run and would have gone on doing so through a genuine expiry.
+TOKEN_INTROSPECTION_SUPPORTED = GRAPH.startswith("https://graph.facebook.com")
+
+
+async def token_identity(http: HttpClient, token: str) -> dict:
+    """Liveness probe: who does this token belong to?
+
+    The introspection that graph.instagram.com *does* support. An expired,
+    revoked, or blocked token fails this call — the same failure mode a real
+    publish would hit — so it is the honest substitute for /debug_token here.
+    Lets the exception propagate: failing this call IS the finding.
+    """
+    return await http.get_json(
+        f"{GRAPH}/me", params={"fields": "id,username", "access_token": token}
+    )
+
+
 async def token_expires_in_days(http: HttpClient, token: str, app_token: str) -> Optional[int]:
     """Days until the access token expires, via /debug_token.
 
-    Long-lived Meta tokens last ~60 days and nothing in CI can rotate a GitHub
-    secret on its own, so this is the check that turns a silent mid-cycle death
-    into a loud build failure.
+    Only meaningful on a Facebook-Login-flow app; see
+    TOKEN_INTROSPECTION_SUPPORTED above for why the caller must gate on that
+    before reaching this.
 
     Deliberately lets the introspection call's own exception propagate rather
     than swallowing it to None. A dead/blocked token makes THIS call fail

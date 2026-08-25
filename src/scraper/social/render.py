@@ -32,8 +32,12 @@ log = logging.getLogger("scraper.social.render")
 
 CANVAS = (1080, 1350)  # 4:5 — the tallest portrait Instagram allows, max feed real estate
 SAFE_X = 72
+# The nominal photo band. No layout uses it as a fixed seam any more — each one
+# sizes its band from the source image and the title (see photo_band_height /
+# _seam_for) — but it remains the REFERENCE target that imaging.py measures a
+# photo's required upscale against, so the quality gate keeps judging every
+# source on the same yardstick instead of a per-slide one.
 PHOTO_H = 860
-PANEL_Y = PHOTO_H
 
 # Instagram's PROFILE GRID crops slide 1 to a centered square. Anything outside
 # this band is invisible on the profile, which is where discovery happens, so
@@ -206,6 +210,190 @@ def wrap_to_fit(
     return chosen_font, lines
 
 
+# The photo band is elastic, not a fixed slab. Its height is chosen per slide so
+# that a source image can be shown WHOLE and edge-to-edge whenever its own
+# proportions allow — a 16:9 flyer gets a short wide band it fills exactly, a
+# squarer photo gets a tall one. Only a source too tall to fill the width falls
+# through to the paper mount.
+#
+# The bounds are what keeps the carousel coherent: below PHOTO_H_MIN the slide
+# stops reading as photo-led, above PHOTO_H_MAX the text panel gets too cramped
+# for a long title. Everything in between is fair game, and the variation
+# between slides is itself part of why the carousel doesn't read as one template
+# stamped out N times.
+PHOTO_H_MIN = 540
+PHOTO_H_MAX = 900
+
+
+# A slide with no usable photo shows the halftone placeholder instead, and there
+# is no reason to give 900px of the canvas to a dot pattern. Shrinking its band
+# turns a weak slide into a deliberately typographic one — the title gets the
+# room the missing photo would have had.
+PHOTO_H_NO_PHOTO = 560
+
+# ...and the title takes the room the photo would have had. Without this the
+# type stayed at its photo-slide size and the slide read as mostly empty:
+# a band of dots on top, a band of flat accent below, and two lines of text
+# floating between them.
+_NO_PHOTO_TITLE_SCALE = 1.5
+
+
+def title_size_hi(photo, base: int) -> int:
+    """Largest display size a title may use on this slide.
+
+    `fit_block` only ever shrinks from this ceiling, so raising it for a
+    photoless slide is what lets the title actually fill the space rather than
+    sitting at the size that suited a slide with a photo in it."""
+    return base if photo is not None else int(base * _NO_PHOTO_TITLE_SCALE)
+
+
+def photo_band_height(photo, *, preferred: int = PHOTO_H_MAX, floor: int = PHOTO_H_MIN) -> int:
+    """Band height that lets `photo` fill the canvas width without cropping.
+
+    Clamps to [floor, preferred]. A source taller than `preferred` at full width
+    — a portrait poster — clamps to `preferred` and is mounted rather than
+    cropped. With no photo at all, see PHOTO_H_NO_PHOTO.
+    """
+    if photo is None or not photo.width:
+        return min(preferred, PHOTO_H_NO_PHOTO)
+    natural = round(CANVAS[0] * photo.height / photo.width)
+    return max(floor, min(preferred, natural))
+
+
+def fit_block(
+    draw,
+    text: str,
+    role: str,
+    box_w: int,
+    max_h: int,
+    size_hi: int,
+    size_lo: int,
+    *,
+    line_ratio: float = 1.06,
+    step: int = 4,
+):
+    """Largest size in [size_lo, size_hi] whose wrap fits inside `max_h` px.
+
+    The difference from `wrap_to_fit` is the constraint: a HEIGHT budget rather
+    than a line count. That is what stops a title being truncated. Capping lines
+    meant a title needing four of them lost its tail to an ellipsis — real
+    slides shipped reading "…Cultures in El Paso del…" and "Hueco Tanks 10,000
+    b…", which is worse than useless: the reader cannot tell what the event is,
+    and the information was there all along.
+
+    Trading type size for completeness is the right way round for this content.
+    Returns (font, lines) with the text always complete.
+    """
+    words = text.split()
+    for size in range(size_hi, size_lo - 1, -step):
+        fnt = font(role, size)
+        lines = _greedy_wrap(draw, words, fnt, box_w)
+        if len(lines) * int(size * line_ratio) <= max_h:
+            return fnt, lines
+    # Even the floor overflows — an extreme outlier. Keep the text whole and let
+    # the caller's own bottom guard decide what to do with the overflow, rather
+    # than silently amputating the title here.
+    fnt = font(role, size_lo)
+    return fnt, _greedy_wrap(draw, words, fnt, box_w)
+
+
+def _greedy_wrap(draw, words: list[str], fnt, box_w: int) -> list[str]:
+    """Greedy line breaking, with character wrapping for a single word wider
+    than the box (rare: long hyphenless names) so it can't loop forever."""
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        trial = f"{current} {word}".strip()
+        if _text_width(draw, trial, fnt) <= box_w:
+            current = trial
+            continue
+        if current:
+            lines.append(current)
+        if _text_width(draw, word, fnt) > box_w:
+            chunk = ""
+            for ch in word:
+                if _text_width(draw, chunk + ch, fnt) <= box_w:
+                    chunk += ch
+                else:
+                    lines.append(chunk)
+                    chunk = ch
+            current = chunk
+        else:
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+# Vertical space the venue / address / category stack under a title needs. Sized
+# for the worst realistic case — a two-line venue name, a two-line address and a
+# category chip — because every one of those blocks may now wrap rather than
+# ellipsize, and a reserve that assumed one line each is how a long venue name
+# would push the chip off the bottom edge.
+_RESERVED_BELOW_TITLE = 265
+
+
+def _seam_for(draw, photo, title: str, box_w: int, *, size_hi: int, reserved: int,
+              size_lo: int = 44, top_pad: int = 100) -> int:
+    """Where the photo band should end on a photo-top/panel-bottom layout.
+
+    Two claims on the same 1350px: the photo wants to be tall enough to read as
+    the subject, the title wants to be big enough to read at all. Resolved in
+    that order — the band starts at the height that shows this particular image
+    whole (see `photo_band_height`) and then gives ground, down to PHOTO_H_MIN,
+    only as far as the title actually needs.
+
+    The alternative, a fixed seam, is what produced the truncated titles: the
+    panel's height was decided before anyone knew how long the title was.
+    """
+    band = photo_band_height(photo)
+    title_font, lines = fit_block(
+        draw, title, "display", box_w, CANVAS[1] - band - top_pad - reserved, size_hi, size_lo
+    )
+    needed = len(lines) * int(title_font.size * 1.06) + top_pad + reserved
+    return max(PHOTO_H_MIN, min(band, CANVAS[1] - needed))
+
+
+def _card_top_for(draw, title: str, box_w: int, *, size_hi: int, reserved: int,
+                  size_lo: int = 42, default_top: int = 860, slant: int = 46,
+                  top_pad: int = 46) -> int:
+    """Where the overlapping text card starts on the full-bleed layout.
+
+    Same bargain as `_seam_for`, but here the card slides UP over the photo
+    instead of the photo shrinking — the photo is full-canvas by design, so
+    there is nothing to shrink. Never rises past the profile-grid safe band's
+    lower edge, which would start eating the part of the image the square crop
+    shows.
+    """
+    title_font, lines = fit_block(
+        draw, title, "display", box_w,
+        CANVAS[1] - default_top - slant - top_pad - reserved, size_hi, size_lo,
+    )
+    needed = len(lines) * int(title_font.size * 1.06) + slant + top_pad + reserved
+    return max(GRID_SAFE_BOTTOM - CANVAS[0] // 2, min(default_top, CANVAS[1] - needed))
+
+
+def _photo_for_overlay(img, visible_bottom: int, *, seed: int = 0):
+    """Full-canvas composition for a layout whose lower part is covered.
+
+    A croppable photo fills the whole canvas as before. A source that has to be
+    mounted instead gets mounted within the VISIBLE region only, then that board
+    is placed on a full-canvas paper ground — so the uncropped image the mount
+    exists to preserve is actually on screen rather than behind the card.
+    """
+    cover_scale = max(CANVAS[0] / img.width, CANVAS[1] / img.height)
+    crop_fraction = max(
+        1 - CANVAS[0] / (img.width * cover_scale), 1 - CANVAS[1] / (img.height * cover_scale)
+    )
+    if crop_fraction <= _MAX_CROP_FRACTION:
+        return _cover_fit(img, CANVAS)
+
+    visible = max(PHOTO_H_MIN, min(CANVAS[1], visible_bottom))
+    # The board covers the whole canvas so there is no seam between it and the
+    # ground; only the clipping is confined to the visible region.
+    return _matte(img, CANVAS, seed=seed, region=(0, visible))
+
+
 def _cover_fit(img, size: tuple[int, int]):
     """Scale to fill then center-crop — never letterbox, never distort."""
     from PIL import Image
@@ -232,22 +420,119 @@ def _cover_fit(img, size: tuple[int, int]):
 # padding on photos that didn't strictly need it.
 _MAX_CROP_FRACTION = 0.12
 
+# How the leftover space around a whole, uncropped image is filled. The first
+# version of this used a blurred, darkened copy of the photo — the Instagram
+# Stories idiom — and it read as exactly what it was: a smear. It also fought
+# the rest of the design, which is flat printed paper with torn edges, tape and
+# halftone screens, and has no other soft-focus element anywhere.
+#
+# So the leftover space is now PAPER instead: the image sits on the board like a
+# clipping someone pasted there, with a hard ink rule around it and the same
+# hard offset shadow the web app puts on its cards
+# (shadow-[3px_3px_0_var(--color-ink)] in globals.css). Nothing is blurred,
+# nothing is cropped, and the padding reads as a deliberate mount rather than as
+# the renderer having run out of image.
+# Below this much cropping the band is effectively the image's own shape, which
+# means the source is a graphic being shown whole — darkening its bottom edge
+# would undo the point.
+_SCRIM_MIN_CROP = 0.02
+_MATTE_INSET = 26        # paper visible around the clipping, minimum
+_MATTE_SHADOW = 9        # hard offset shadow, matching the web app's card style
 
-def _fit_photo(img, size: tuple[int, int]):
+
+def _mount_padding() -> int:
+    return 2 * (_MATTE_INSET + _MATTE_SHADOW)
+
+
+def mount_height(photo, max_h: int) -> int:
+    """Board height that shows `photo` whole at the canvas's full width.
+
+    Lets a layout hug a mounted image instead of centering it in a band sized
+    for something else — an ultrawide flyer mounted inside an 860px region left
+    a quarter of the slide as empty paper above and below it.
+    """
+    if photo is None or not photo.width:
+        return max_h
+    pad = _mount_padding()
+    natural = round(photo.height * ((CANVAS[0] - pad) / photo.width)) + pad
+    return max(PHOTO_H_MIN, min(max_h, natural))
+
+
+def crop_fraction(photo, size: tuple[int, int]) -> float:
+    """How much of `photo` a cover-fit into `size` would discard."""
+    if photo is None or not photo.width or not photo.height:
+        return 0.0
+    target_w, target_h = size
+    cover = max(target_w / photo.width, target_h / photo.height)
+    return max(1 - target_w / (photo.width * cover), 1 - target_h / (photo.height * cover))
+
+
+def needs_mount(photo, size: tuple[int, int]) -> bool:
+    """Would `_fit_photo` mount this rather than cover-fit it?
+
+    Callers need to know because a mounted board is paper, and the treatments
+    that suit a photograph — the scrim fading its lower edge into the seam —
+    read as a smudge on paper.
+    """
+    return crop_fraction(photo, size) > _MAX_CROP_FRACTION
+
+
+def _matte(img, size: tuple[int, int], *, seed: int = 0, region: Optional[tuple[int, int]] = None):
+    """Mount the WHOLE image on a paper board — no crop, no blur.
+
+    Used whenever the source's proportions are too far from the band's for a
+    center-crop to be safe. Which axis ends up with visible paper follows from
+    the source itself: a tall poster is matted left and right, a wide flyer top
+    and bottom, and in both cases every pixel of the original survives.
+
+    `region` centers the clipping within a sub-band of the board (top, bottom)
+    while the halftone paper still covers the whole `size` — used by the
+    full-bleed layout, where the board runs the full canvas but the part below
+    the text card is not visible.
+    """
+    from PIL import Image, ImageDraw
+
+    target_w, target_h = size
+    board = _placeholder_band(size)  # paper + the same halftone dot screen
+
+    top, bottom = region or (0, target_h)
+    # Inset enough to leave the mount visible on the tight axis too, so the
+    # clipping never looks like it is bleeding off one edge by accident.
+    avail_w = target_w - _mount_padding()
+    avail_h = (bottom - top) - _mount_padding()
+    scale = min(avail_w / img.width, avail_h / img.height)
+    fg_w = max(1, round(img.width * scale))
+    fg_h = max(1, round(img.height * scale))
+    x = (target_w - fg_w) // 2
+    y = top + (bottom - top - fg_h) // 2
+
+    draw = ImageDraw.Draw(board)
+    draw.rectangle(
+        (x + _MATTE_SHADOW, y + _MATTE_SHADOW, x + fg_w + _MATTE_SHADOW, y + fg_h + _MATTE_SHADOW),
+        fill=INK,
+    )
+    board.paste(img.resize((fg_w, fg_h), Image.LANCZOS), (x, y))
+    draw.rectangle((x - 2, y - 2, x + fg_w + 1, y + fg_h + 1), outline=INK, width=3)
+
+    # Two short strips of tape on the top corners — the same motif the panels
+    # already use, and what makes the mount read as pasted rather than framed.
+    _draw_tape(board, cx=x + 14, cy=y + 10, w=96, h=34, angle=-38)
+    _draw_tape(board, cx=x + fg_w - 14, cy=y + 10, w=96, h=34, angle=38)
+    return board
+
+
+def _fit_photo(img, size: tuple[int, int], *, seed: int = 0):
     """Fill `size` with `img`, choosing the compositing strategy by how much
     a plain cover-fit crop would have to discard.
 
-    Below the threshold: cover-fit (scale + center-crop), same as before —
-    full-bleed, no dead space, right for a normal photo.
+    Below the threshold: cover-fit (scale + center-crop) — full-bleed, no dead
+    space, right for a normal photo.
 
-    Above it: an Instagram Stories-style composite — a blurred, darkened
-    cover-fit copy fills the frame as a backdrop with no hard edges, and the
-    COMPLETE, uncropped image is layered on top at whatever size fits without
-    cropping either axis. The backdrop is what avoids a jarring hard-edged
-    letterbox; the foreground is what guarantees no text is ever lost.
+    Above it: the whole image, mounted on paper (see `_matte`). Callers that can
+    vary their band height should call `photo_band_height` FIRST, which avoids
+    reaching this path at all for a landscape source by simply making the band
+    the shape of the image.
     """
-    from PIL import Image, ImageFilter
-
     target_w, target_h = size
     cover_scale = max(target_w / img.width, target_h / img.height)
     scaled_w, scaled_h = img.width * cover_scale, img.height * cover_scale
@@ -255,16 +540,7 @@ def _fit_photo(img, size: tuple[int, int]):
 
     if crop_fraction <= _MAX_CROP_FRACTION:
         return _cover_fit(img, size)
-
-    backdrop = _cover_fit(img, size).filter(ImageFilter.GaussianBlur(32))
-    backdrop = Image.blend(backdrop, Image.new("RGB", size, INK), alpha=0.35)
-
-    contain_scale = min(target_w / img.width, target_h / img.height)
-    fg_w = max(1, round(img.width * contain_scale))
-    fg_h = max(1, round(img.height * contain_scale))
-    foreground = img.resize((fg_w, fg_h), Image.LANCZOS)
-    backdrop.paste(foreground, ((target_w - fg_w) // 2, (target_h - fg_h) // 2))
-    return backdrop
+    return _matte(img, size, seed=seed)
 
 
 def _scrim(img, height: int, strength: float = 0.55):
@@ -384,9 +660,27 @@ _STATE_ZIP_RE = re.compile(r",\s*[A-Z]{2}\s*\d{5}(-\d{4})?(,\s*[A-Za-z]+)?\s*$")
 
 
 def _address_label(row: dict[str, Any]) -> str:
+    """Street + city, with anything the venue line already says removed.
+
+    Several calendars store the venue name INSIDE the address — Visit El Paso
+    ships "El Paso County Coliseum - 4100 E Paisano Dr, El Paso, TX 79905" — so
+    the slide printed the venue twice, once in Archivo Black and again beside the
+    pin, and the long duplicate pushed the useful street text off the line.
+    """
     location = str(row.get("location") or "").strip()
     if not location:
         return ""
+
+    venue = _venue_label(row).strip()
+    if venue:
+        # Only a LEADING duplicate is stripped: "<venue> - <street>" and
+        # "<venue>, <street>" are the shapes sources actually produce, whereas a
+        # venue name appearing mid-address is usually part of the real address
+        # ("Suite 12, Flix Brewhouse Plaza") and is left alone.
+        prefix = re.match(re.escape(venue) + r"\s*[-–—,]\s*", location, re.IGNORECASE)
+        if prefix:
+            location = location[prefix.end() :].strip()
+
     return _STATE_ZIP_RE.sub("", location).strip() or location
 
 
@@ -499,28 +793,46 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
 
     on_accent = _on_accent(accent)
     img = Image.new("RGB", CANVAS, PAPER)
+    box_w = CANVAS[0] - SAFE_X * 2
+    title = str(row.get("title") or "Untitled event")
+
+    # The seam moves to suit BOTH the photo and the title: the band starts at
+    # whatever height shows this image whole, then gives ground if the title
+    # needs more room than what is left. _RESERVED_BELOW_TITLE is the venue,
+    # address and chip stack that always follows.
+    measure = ImageDraw.Draw(img)
+    size_hi = title_size_hi(photo, 96)
+    panel_y = _seam_for(measure, photo, title, box_w, size_hi=size_hi,
+                        reserved=_RESERVED_BELOW_TITLE)
+
     if photo is not None:
-        band = _fit_photo(photo.image, (CANVAS[0], PHOTO_H))
-        band = _scrim(band, 170)
+        band = _fit_photo(photo.image, (CANVAS[0], panel_y), seed=seed)
+        # The scrim exists to soften a PHOTOGRAPH's hard lower edge into the
+        # torn seam, and it is only ever right when there is spare image to
+        # spend on it. On a mounted board it reads as a grey smudge across the
+        # paper, and on an image the band was sized to fit exactly — a flyer,
+        # whose designer put content at the very bottom edge — it dims the
+        # content we just went to the trouble of not cropping.
+        if crop_fraction(photo, (CANVAS[0], panel_y)) > _SCRIM_MIN_CROP:
+            band = _scrim(band, 170)
         img.paste(band, (0, 0))
     else:
-        img.paste(_placeholder_band((CANVAS[0], PHOTO_H)), (0, 0))
+        img.paste(_placeholder_band((CANVAS[0], panel_y)), (0, 0))
 
     draw = ImageDraw.Draw(img)
-    edge = _torn_edge(0, CANVAS[0], PANEL_Y, seed=seed)
+    edge = _torn_edge(0, CANVAS[0], panel_y, seed=seed)
     _torn_panel(draw, edge, 0, CANVAS[0], CANVAS[1], PAPER)
 
-    box_w = CANVAS[0] - SAFE_X * 2
     stamp = _time_stamp(start_local)
     if stamp:
         time_font = font("condensed", 44)
         draw.text(
-            (CANVAS[0] - SAFE_X, PANEL_Y + 40), stamp, font=time_font, fill=INK, anchor="ra"
+            (CANVAS[0] - SAFE_X, panel_y + 40), stamp, font=time_font, fill=INK, anchor="ra"
         )
 
-    y = PANEL_Y + 100
-    title_font, title_lines = wrap_to_fit(
-        draw, str(row.get("title") or "Untitled event"), "display", box_w, 3, 96, 60
+    y = panel_y + 100
+    title_font, title_lines = fit_block(
+        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_BELOW_TITLE, size_hi, 44
     )
     line_h = int(title_font.size * 1.06)
     for line in title_lines:
@@ -531,18 +843,22 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
     # there's never a mystery gap and never an overflow off the bottom.
     venue = _venue_label(row)
     if venue:
-        y += 18
-        venue_font, venue_lines = wrap_to_fit(draw, venue, "sans_black", box_w, 1, 36, 26)
-        draw.text((SAFE_X, y), venue_lines[0], font=venue_font, fill=INK)
-        y += int(venue_font.size * 1.2)
+        y += max(18, int(title_font.size * 0.30))
+        venue_font, venue_lines = fit_block(draw, venue, "sans_black", box_w, 96, 36, 22,
+                                            line_ratio=1.2)
+        for line in venue_lines:
+            draw.text((SAFE_X, y), line, font=venue_font, fill=INK)
+            y += int(venue_font.size * 1.2)
 
     address = _address_label(row)
     if address and y + 30 < CANVAS[1] - 60:
         y += 8
         _draw_pin(draw, SAFE_X, y + 2, 18, accent)
-        addr_font, addr_lines = wrap_to_fit(draw, address, "sans_semibold", box_w - 26, 1, 26, 20)
-        draw.text((SAFE_X + 26, y), addr_lines[0], font=addr_font, fill=INK_SOFT)
-        y += int(addr_font.size * 1.2)
+        addr_font, addr_lines = fit_block(draw, address, "sans_semibold", box_w - 26, 68, 26, 18,
+                                          line_ratio=1.2)
+        for line in addr_lines:
+            draw.text((SAFE_X + 26, y), line, font=addr_font, fill=INK_SOFT)
+            y += int(addr_font.size * 1.2)
 
     cats = [c for c in (row.get("categories") or []) if c][:1]
     if cats and y + 56 < CANVAS[1] - 24:
@@ -557,7 +873,7 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
     # side of this row (anchor="ra" at CANVAS[0]-SAFE_X); a right-side tape
     # placement collided with it for real on a live render ("1:00 PM" half
     # covered by the tape strip).
-    _draw_tape(img, cx=110, cy=PANEL_Y + 34, w=150, h=56, angle=6)
+    _draw_tape(img, cx=110, cy=panel_y + 34, w=150, h=56, angle=6)
     return img
 
 
@@ -569,19 +885,39 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
 
     on_accent = _on_accent(accent)
     img = Image.new("RGB", CANVAS, PAPER)
+    box_w = CANVAS[0] - SAFE_X * 2
+    title = str(row.get("title") or "Untitled event")
+
+    # The card overlaps the photo here, so the card's top edge — not the canvas
+    # bottom — is the visible region. Composing the photo into the FULL canvas
+    # centered whatever could not be cropped behind the card, which on a matted
+    # source hid a third of the very image the mount existed to preserve.
+    measure = ImageDraw.Draw(img)
+    size_hi = title_size_hi(photo, 86)
+    card_top = _card_top_for(measure, title, box_w, size_hi=size_hi,
+                             reserved=_RESERVED_BELOW_TITLE)
+    if photo is None:
+        card_top = min(card_top, PHOTO_H_NO_PHOTO)
+    elif needs_mount(photo, CANVAS):
+        # A mounted image does not fill the canvas, so let the card climb to
+        # meet it rather than leaving a quarter-slide of blank paper between
+        # the two. A croppable photo is full-bleed and needs no such help.
+        card_top = max(PHOTO_H_MIN, min(card_top, mount_height(photo, card_top)))
+    slant = 46
+
     if photo is not None:
-        img.paste(_fit_photo(photo.image, CANVAS), (0, 0))
+        # Cover-fit still gets the whole canvas (a full-bleed photo behind the
+        # card is the point of this layout); only the mounted path is confined
+        # to what stays visible.
+        img.paste(_photo_for_overlay(photo.image, card_top, seed=seed), (0, 0))
     else:
         img.paste(_placeholder_band(CANVAS), (0, 0))
 
     draw = ImageDraw.Draw(img)
 
-    card_top = 860
-    slant = 46
     edge = _torn_edge(0, CANVAS[0], card_top, slant=slant, seed=seed)
     _torn_panel(draw, edge, 0, CANVAS[0], CANVAS[1], accent)
 
-    box_w = CANVAS[0] - SAFE_X * 2
     y = card_top + slant + 46
     # The time stamp gets its own row, ABOVE the title, rather than sharing a
     # row with the title's first line — a two-line title is exactly as wide
@@ -597,8 +933,8 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
         draw.text((CANVAS[0] - SAFE_X, y), stamp, font=time_font, fill=on_accent, anchor="ra")
     y += int(time_font.size * 1.3)
 
-    title_font, title_lines = wrap_to_fit(
-        draw, str(row.get("title") or "Untitled event"), "display", box_w, 2, 86, 54
+    title_font, title_lines = fit_block(
+        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_BELOW_TITLE, size_hi, 42
     )
     line_h = int(title_font.size * 1.06)
     for line in title_lines:
@@ -607,17 +943,22 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
 
     venue = _venue_label(row)
     if venue:
-        y += 16
-        venue_font, venue_lines = wrap_to_fit(draw, venue, "sans_black", box_w, 1, 34, 24)
-        draw.text((SAFE_X, y), venue_lines[0], font=venue_font, fill=on_accent)
-        y += int(venue_font.size * 1.2)
+        y += max(16, int(title_font.size * 0.30))
+        venue_font, venue_lines = fit_block(draw, venue, "sans_black", box_w, 92, 34, 22,
+                                            line_ratio=1.2)
+        for line in venue_lines:
+            draw.text((SAFE_X, y), line, font=venue_font, fill=on_accent)
+            y += int(venue_font.size * 1.2)
 
     address = _address_label(row)
     if address and y + 30 < CANVAS[1] - 24:
         y += 6
         _draw_pin(draw, SAFE_X, y + 2, 16, on_accent)
-        addr_font, addr_lines = wrap_to_fit(draw, address, "sans_semibold", box_w - 26, 1, 24, 18)
-        draw.text((SAFE_X + 24, y), addr_lines[0], font=addr_font, fill=on_accent)
+        addr_font, addr_lines = fit_block(draw, address, "sans_semibold", box_w - 26, 64, 24, 17,
+                                          line_ratio=1.2)
+        for line in addr_lines:
+            draw.text((SAFE_X + 24, y), line, font=addr_font, fill=on_accent)
+            y += int(addr_font.size * 1.2)
 
     _draw_tape(img, cx=110, cy=card_top + slant / 2, w=140, h=54, angle=-8)
     return img
@@ -630,10 +971,18 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
     from PIL import Image, ImageDraw
 
     on_accent = _on_accent(accent)
-    split_photo_h = 878
     img = Image.new("RGB", CANVAS, accent)
+    box_w = CANVAS[0] - SAFE_X * 2
+    title = str(row.get("title") or "Untitled event")
+
+    measure = ImageDraw.Draw(img)
+    size_hi = title_size_hi(photo, 82)
+    split_photo_h = _seam_for(
+        measure, photo, title, box_w, size_hi=size_hi, reserved=_RESERVED_BELOW_TITLE, top_pad=48
+    )
+
     if photo is not None:
-        img.paste(_fit_photo(photo.image, (CANVAS[0], split_photo_h)), (0, 0))
+        img.paste(_fit_photo(photo.image, (CANVAS[0], split_photo_h), seed=seed), (0, 0))
     else:
         img.paste(_placeholder_band((CANVAS[0], split_photo_h)), (0, 0))
 
@@ -641,7 +990,6 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
     edge = _torn_edge(0, CANVAS[0], split_photo_h, seed=seed)
     _torn_panel(draw, edge, 0, CANVAS[0], CANVAS[1], accent)
 
-    box_w = CANVAS[0] - SAFE_X * 2
     y = split_photo_h + 48
     # Own row above the title, reserved unconditionally — see the identical
     # comment in _slide_full_bleed for why both the collision this avoids
@@ -653,8 +1001,9 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
         draw.text((CANVAS[0] - SAFE_X, y), stamp, font=time_font, fill=on_accent, anchor="ra")
     y += int(time_font.size * 1.3)
 
-    title_font, title_lines = wrap_to_fit(
-        draw, str(row.get("title") or "Untitled event"), "display", box_w, 2, 82, 52
+    title_font, title_lines = fit_block(
+        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_BELOW_TITLE, size_hi, 42,
+        line_ratio=1.08,
     )
     line_h = int(title_font.size * 1.08)
     for line in title_lines:
@@ -663,18 +1012,22 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
 
     venue = _venue_label(row)
     if venue:
-        y += 16
-        venue_font, venue_lines = wrap_to_fit(draw, venue, "sans_black", box_w, 1, 32, 22)
-        draw.text((SAFE_X, y), venue_lines[0], font=venue_font, fill=on_accent)
-        y += int(venue_font.size * 1.2)
+        y += max(16, int(title_font.size * 0.30))
+        venue_font, venue_lines = fit_block(draw, venue, "sans_black", box_w, 88, 32, 20,
+                                            line_ratio=1.2)
+        for line in venue_lines:
+            draw.text((SAFE_X, y), line, font=venue_font, fill=on_accent)
+            y += int(venue_font.size * 1.2)
 
     address = _address_label(row)
     if address and y + 30 < CANVAS[1] - 60:
         y += 6
         _draw_pin(draw, SAFE_X, y + 2, 16, on_accent)
-        addr_font, addr_lines = wrap_to_fit(draw, address, "sans_semibold", box_w - 26, 1, 24, 18)
-        draw.text((SAFE_X + 24, y), addr_lines[0], font=addr_font, fill=on_accent)
-        y += int(addr_font.size * 1.2)
+        addr_font, addr_lines = fit_block(draw, address, "sans_semibold", box_w - 26, 64, 24, 17,
+                                          line_ratio=1.2)
+        for line in addr_lines:
+            draw.text((SAFE_X + 24, y), line, font=addr_font, fill=on_accent)
+            y += int(addr_font.size * 1.2)
 
     cats = [c for c in (row.get("categories") or []) if c][:1]
     if cats and y + 56 < CANVAS[1] - 24:

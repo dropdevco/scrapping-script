@@ -6,15 +6,15 @@ import { motion } from "motion/react";
 import type { EventRow } from "@/lib/types";
 import { useLang } from "./lang-context";
 import { dateLocale } from "@/lib/i18n";
+import { formatEventDate, formatEventTime } from "@/lib/datetime";
 import { EventImage } from "./event-image";
 import { canonicalCategoriesForEvent } from "@/lib/categories";
 
 function fmtDate(iso: string | null, locale: string): { day: string; time: string } | null {
   if (!iso) return null;
-  const d = new Date(iso);
   return {
-    day: d.toLocaleDateString(locale, { weekday: "short", month: "short", day: "numeric" }),
-    time: d.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" }),
+    day: formatEventDate(iso, locale)!,
+    time: formatEventTime(iso, locale)!,
   };
 }
 

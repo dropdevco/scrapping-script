@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from ..core.config import settings
 from ..core.http import HttpClient
 from ..core.storage import Storage
+from ..sources import auth_meta
 from . import caption as caption_mod
 from . import notify as notify_mod
 from . import publish as publish_mod
@@ -366,15 +367,43 @@ async def check_token(min_days: int = 14) -> int:
     if not token:
         log.error("IG_ACCESS_TOKEN is not set.")
         return 1
-    if not (settings.meta_app_id and settings.meta_app_secret):
-        log.warning("META_APP_ID/SECRET unset — cannot introspect token expiry.")
-        return 0
 
-    app_token = f"{settings.meta_app_id}|{settings.meta_app_secret}"
     # One client for the whole check, including any alert send below — a
     # closed HttpClient can't make further calls, so the alert has to happen
     # before this `with` exits, not after.
     async with HttpClient() as http:
+        # Liveness first, and unconditionally. This is the check that works on
+        # every token type: an expired, revoked, or blocked token fails /me
+        # exactly like it fails a real publish. It is also the only check
+        # available on graph.instagram.com, which has no /debug_token.
+        try:
+            identity = await publish_mod.token_identity(http, token)
+        except Exception as exc:  # noqa: BLE001
+            log.error("IG_ACCESS_TOKEN is not usable: %s", exc)
+            await notify_mod.notify_alert(
+                http, f"IG_ACCESS_TOKEN looks dead (/me failed): {str(exc)[:300]}"
+            )
+            return 1
+        log.info("token is live for @%s", (identity or {}).get("username") or "?")
+
+        if not publish_mod.TOKEN_INTROSPECTION_SUPPORTED:
+            # Not a silent pass: say plainly that the days-remaining half of
+            # this check cannot run here, so nobody reads a green check as
+            # "expiry verified". The token stays refreshable — see the
+            # refresh-token command — and liveness above still catches an
+            # actual expiry the day it happens.
+            log.info(
+                "expiry not introspectable for an Instagram-Login token; "
+                "long-lived tokens last ~60 days — run `python -m scraper.social "
+                "refresh-token` to extend the window."
+            )
+            return 0
+
+        if not (settings.meta_app_id and settings.meta_app_secret):
+            log.warning("META_APP_ID/SECRET unset — cannot introspect token expiry.")
+            return 0
+
+        app_token = f"{settings.meta_app_id}|{settings.meta_app_secret}"
         try:
             days = await publish_mod.token_expires_in_days(http, token, app_token)
         except Exception as exc:  # noqa: BLE001
@@ -399,6 +428,43 @@ async def check_token(min_days: int = 14) -> int:
             )
             return 1
         log.info("IG_ACCESS_TOKEN expires in %d day(s)", days)
+    return 0
+
+
+# ── refresh-token ──────────────────────────────────────────────────────────────
+async def refresh_token() -> int:
+    """Extend the long-lived token's window and print the replacement.
+
+    Prints rather than writes: the token lives in `.env` locally and in a GitHub
+    Actions secret in CI, and a workflow cannot rewrite its own secrets. So this
+    is a deliberate, human-run rotation — run it, then paste the new value into
+    both places. Meta will only extend a token that is still valid, so this has
+    to be run inside the ~60-day window, not after it lapses.
+    """
+    _, token = publish_mod.account_credentials()
+    if not token:
+        log.error("IG_ACCESS_TOKEN is not set.")
+        return 1
+
+    async with HttpClient() as http:
+        result = await auth_meta.refresh_long_lived(http, token)
+
+    if result is None:
+        log.error("token refresh failed — see the warning above. A token that has already "
+                  "expired cannot be refreshed and must be re-minted through the app.")
+        return 1
+
+    fresh, expires_in = result
+    days = expires_in // 86400
+    if fresh == token:
+        log.info("token unchanged; window now %d day(s)", days)
+    else:
+        log.info(
+            "new token valid %d day(s) — update IG_ACCESS_TOKEN in .env AND in the "
+            "repo's Actions secrets:",
+            days,
+        )
+        log.info("%s", fresh)
     return 0
 
 
@@ -430,6 +496,7 @@ def main() -> int:
 
     sub.add_parser("prune", help="delete slides past the retention window")
 
+    sub.add_parser("refresh-token", help="extend the long-lived IG token and print the new one")
     t = sub.add_parser("check-token", help="fail if the IG token is close to expiry")
     t.add_argument("--min-days", type=int, default=14)
 
@@ -441,6 +508,8 @@ def main() -> int:
         return asyncio.run(build(day, args.dry_run, args.out))
     if args.cmd == "publish":
         return asyncio.run(publish(day, args.dry_run))
+    if args.cmd == "refresh-token":
+        return asyncio.run(refresh_token())
     if args.cmd == "check-token":
         return asyncio.run(check_token(args.min_days))
     return asyncio.run(prune())

@@ -6,6 +6,7 @@ import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import L from "leaflet";
 import type { EventRow } from "@/lib/types";
 import { useLang } from "./lang-context";
+import { formatEventDate } from "@/lib/datetime";
 import { dateLocale } from "@/lib/i18n";
 
 /* One pin per venue; events grouped under it. */
@@ -164,7 +165,7 @@ export function EventMap({ events }: { events: EventRow[] }) {
                     style={{ fontSize: 12.5, lineHeight: 1.35, color: "#e6117f", fontWeight: 600 }}
                   >
                     {e.start_time
-                      ? new Date(e.start_time).toLocaleDateString(locale, {
+                      ? formatEventDate(e.start_time, locale, {
                           month: "short",
                           day: "numeric",
                         }) + " · "

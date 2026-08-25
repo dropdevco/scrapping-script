@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from .core.config import settings
 from .core.dedupe import _TITLE_ONLY_THRESHOLD, _TOKEN_OVERLAP_THRESHOLD, _norm, _similar, _title_token_overlap
 from .core.dedupe import merge_ticket_links
+from .core.eventtime import local_day
 from .core.models import TicketLink
 
 log = logging.getLogger("scraper.backfill_merge_duplicates")
@@ -70,7 +71,15 @@ def main() -> int:
     for r in rows:
         if not r.get("start_time"):
             continue
-        day = datetime.fromisoformat(r["start_time"].replace("Z", "+00:00")).date().isoformat()
+        # LOCAL calendar day, not UTC. Stored times come back from Postgres in
+        # UTC, where a 7pm show is 01:00 the next day — so grouping on the UTC
+        # date filed an evening event and its own 5pm duplicate at the same
+        # venue under two different days and never compared them. Same fix as
+        # core/storage.py's cross-run merge.
+        local = local_day(r["start_time"])
+        if local is None:
+            continue
+        day = local.date().isoformat()
         by_venue_day[(r["venue_id"], day)].append(r)
 
     groups = 0

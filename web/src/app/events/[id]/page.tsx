@@ -5,6 +5,7 @@ import { notFound } from "next/navigation";
 import { EventImage } from "@/components/event-image";
 import { buildEventJsonLd, eventDescription, eventImageUrl, jsonLdScript } from "@/lib/event-schema";
 import { fetchEvent } from "@/lib/events";
+import { formatEventDate, formatEventTime } from "@/lib/datetime";
 import { dateLocale, getDict } from "@/lib/i18n";
 import { absoluteUrl, eventUrl } from "@/lib/site";
 import type { Lang } from "@/lib/types";
@@ -151,7 +152,7 @@ export default async function EventPage({ params }: EventPageProps) {
               <dd className="font-display text-xl font-bold text-ink">
                 {start ? (
                   <time itemProp="startDate" dateTime={event.start_time ?? undefined}>
-                    {start.toLocaleDateString(locale, {
+                    {formatEventDate(event.start_time, locale, {
                       weekday: "long",
                       month: "long",
                       day: "numeric",
@@ -169,7 +170,7 @@ export default async function EventPage({ params }: EventPageProps) {
                 </dt>
                 <dd className="text-[14px] text-ink-soft">
                   <time dateTime={event.start_time ?? undefined}>
-                    {start.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" })}
+                    {formatEventTime(event.start_time, locale)}
                   </time>
                 </dd>
               </div>
@@ -181,7 +182,7 @@ export default async function EventPage({ params }: EventPageProps) {
                 </dt>
                 <dd className="text-[14px] text-ink-soft">
                   <time itemProp="endDate" dateTime={event.end_time ?? undefined}>
-                    {end.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" })}
+                    {formatEventTime(event.end_time, locale)}
                   </time>
                 </dd>
               </div>

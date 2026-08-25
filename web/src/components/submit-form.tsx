@@ -6,6 +6,7 @@ import { supabaseBrowser } from "@/lib/supabase/client";
 import { sha1Hex, venueAddressHash } from "@/lib/hash";
 import { useLang } from "./lang-context";
 import { CANONICAL_CATEGORIES } from "@/lib/categories";
+import { eventLocalToIso } from "@/lib/datetime";
 
 const inputCls =
   "w-full rounded-[0.9rem] border-[1.5px] border-ink bg-card px-4 py-3 text-[15px] text-ink placeholder:text-ink-faint outline-none transition-shadow duration-200 focus:shadow-[3px_3px_0_var(--color-cosmo)]";
@@ -97,7 +98,7 @@ export function SubmitForm() {
         }
       }
 
-      const startIso = new Date(start).toISOString();
+      const startIso = eventLocalToIso(start);
       const endRaw = String(form.get("end") ?? "");
       const contentHash = await sha1Hex(
         `user|${title.toLowerCase()}|${startIso.slice(0, 10)}|${venueName.toLowerCase()}|${user.id}`,
@@ -108,7 +109,7 @@ export function SubmitForm() {
         title,
         description: String(form.get("description") ?? "").trim() || null,
         start_time: startIso,
-        end_time: endRaw ? new Date(endRaw).toISOString() : null,
+        end_time: endRaw ? eventLocalToIso(endRaw) : null,
         venue: isOnline ? null : venueName,
         location: isOnline ? null : `${address}${address.includes(city) ? "" : `, ${city}`}`,
         url: String(form.get("url") ?? "").trim() || null,

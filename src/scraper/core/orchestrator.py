@@ -18,6 +18,7 @@ from .dedupe import (
     dedupe_events,
     dedupe_trends,
 )
+from .eventtime import to_event_local
 from .http import HttpClient
 from .models import Document, Event, Kind, SearchParams, SourceResult, Trend
 from .storage import Storage
@@ -44,6 +45,19 @@ def _event_sort_key(e: Event) -> tuple[int, float]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return (0, dt.timestamp())
+
+
+def _localize_times(e: Event) -> Event:
+    """Apply the one timestamp rule (see core/eventtime.py) to every event.
+
+    Done here rather than in each connector so a new source cannot reintroduce
+    the naive-local-stored-as-UTC bug, and so dedupe below keys on local
+    calendar days for sources that report UTC (Ticketmaster) and sources that
+    report wall-clock (everything else) alike.
+    """
+    e.start_time = to_event_local(e.start_time)
+    e.end_time = to_event_local(e.end_time)
+    return e
 
 
 async def _fetch_one(source, params: SearchParams, http: HttpClient):
@@ -99,6 +113,7 @@ async def run(params: SearchParams) -> dict[str, Any]:
         if params.kind is Kind.EVENTS:
             events: list[Event] = [i for i in raw_items if isinstance(i, Event)]
             events = [e for e in events if _is_showable(e)]
+            events = [_localize_times(e) for e in events]
             events = dedupe_events(assign_hashes_events(events))
             # Chronological, not by source registration order — otherwise a source
             # that returns lots of events crowds out other sources before storage.

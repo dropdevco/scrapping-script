@@ -295,6 +295,48 @@ class Storage:
 
         return await asyncio.to_thread(_q)
 
+    # ── knowledge-base export (scraper.kb) ────────────────────────────────────
+    async def query_upcoming_events(
+        self,
+        location: str,
+        start_iso: str,
+        end_iso: str,
+        page_size: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Every approved event starting in [start, end), paginated.
+
+        Unlike query_events_for_day this has no useful ceiling — the export
+        covers a horizon of weeks, and a `limit` that silently truncated would
+        drop real events out of the knowledge base with no error anywhere. So it
+        pages until the source is exhausted rather than capping.
+        """
+        if not self.enabled:
+            return []
+
+        def _q(offset: int) -> list[dict[str, Any]]:
+            return (
+                self._client.table("events")
+                .select("*, venues(*)")
+                .eq("status", "approved")
+                .ilike("location", f"%{location}%")
+                .gte("start_time", start_iso)
+                .lt("start_time", end_iso)
+                .order("start_time", desc=False)
+                .range(offset, offset + page_size - 1)
+                .execute()
+                .data
+                or []
+            )
+
+        out: list[dict[str, Any]] = []
+        offset = 0
+        while True:
+            page = await asyncio.to_thread(_q, offset)
+            out.extend(page)
+            if len(page) < page_size:
+                return out
+            offset += page_size
+
     async def recent_slide_keys(self, since_date: str) -> set[str]:
         """Every slide_key used by a post published on/after `since_date`.
 

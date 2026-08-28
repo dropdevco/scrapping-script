@@ -152,6 +152,21 @@ class Settings:
         # Signs the token-gated /admin/ig/review/[token] page link (Next.js verifies
         # with the same secret) — unset means no review link is minted, email notify
         # no-ops, Telegram still works via its own inline approve/reject buttons.
+        # ── GHL knowledge-base export (scraper.kb) ───────────────────────────
+        # The bot's knowledge base is fed by a Google Sheet this repo rewrites
+        # daily. Unset KB_SHEET_ID simply means the export is not wired up yet;
+        # nothing else in the app depends on these.
+        self.kb_sheet_id = _clean(os.getenv("KB_SHEET_ID"))
+        self.kb_sheet_tab = _clean(os.getenv("KB_SHEET_TAB")) or "events"
+        # How far ahead to publish. Long enough that "what's coming up next
+        # month" works, short enough that the sheet stays a readable size.
+        self.kb_horizon_days = _int("KB_HORIZON_DAYS", 60)
+        self.kb_location = _clean(os.getenv("KB_LOCATION")) or "El Paso"
+        self.google_service_account_json = _clean(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+        self.google_application_credentials = _clean(
+            os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        )
+
         self.ig_notify_secret = _clean(os.getenv("IG_NOTIFY_SECRET"))
         self.ig_notify_ttl_hours = _int("IG_NOTIFY_TTL_HOURS", 36)
         self.site_base_url = _clean(os.getenv("SITE_BASE_URL")) or "https://epchisme.com"

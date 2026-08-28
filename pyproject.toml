@@ -30,10 +30,14 @@ admin = ["psycopg[binary]>=3.1"]  # direct Postgres access for `scraper.apply_mi
 # system dependencies, encodes JPEG natively (the ONLY format Instagram's
 # Content Publishing API accepts), and decodes whatever the source CDN served.
 social = ["pillow>=10.0"]
+# Google Sheets export feeding the GHL knowledge base. Its own extra so the
+# scrape job only pays for it on the runner that actually publishes.
+kb = ["gspread>=6.0", "google-auth>=2.0"]
 
 [project.scripts]
 scraper-mcp = "scraper.mcp_server:main"
 scraper-schedule = "scraper.scheduler:main"
+scraper-kb = "scraper.kb.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

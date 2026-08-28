@@ -27,7 +27,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[trends]"
+          pip install -e ".[trends,kb]"
 
       - name: Run scrape
         env:
@@ -45,3 +45,22 @@ jobs:
           SCHEDULE_TOPICS: ${{ vars.SCHEDULE_TOPICS }}
           SCHEDULE_DAYS: ${{ vars.SCHEDULE_DAYS }}
         run: python -m scraper.scheduler "${{ github.event.inputs.job || 'all' }}"
+
+      # Republish the GHL knowledge-base sheet from what the scrape just stored,
+      # so the bot and the site never disagree about what's on this week. Skipped
+      # for a trends-only run (no event rows changed) and never fatal: a Sheets
+      # outage must not fail the scrape that already succeeded.
+      - name: Publish knowledge-base sheet
+        if: ${{ github.event.inputs.job != 'trends' }}
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          KB_SHEET_ID: ${{ secrets.KB_SHEET_ID }}
+          KB_SHEET_TAB: ${{ vars.KB_SHEET_TAB }}
+          KB_HORIZON_DAYS: ${{ vars.KB_HORIZON_DAYS }}
+          KB_LOCATION: ${{ vars.KB_LOCATION }}
+          SITE_BASE_URL: ${{ vars.SITE_BASE_URL }}
+          EVENT_TIMEZONE: ${{ vars.EVENT_TIMEZONE }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python -m scraper.kb export

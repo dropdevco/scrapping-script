@@ -758,17 +758,6 @@ def render_cover(day: date, event_count: int, handle: str = "epchisme.com") -> b
     label = "thing happening" if event_count == 1 else "things happening"
     draw.text((dot_x + 10, y), f"{event_count} {label}", font=count_font, fill=PAPER)
 
-    # A taped-down corner ticket in the grid-safe band ties the cover into the
-    # same "clipping" language the event slides use.
-    _draw_tape(img, cx=CANVAS[0] - 120, cy=GRID_SAFE_TOP + 60, w=170, h=64, angle=-7)
-    tape_font = font("condensed", 26)
-    tape_label = "TEAR ME OFF"
-    tw = _text_width(draw, tape_label, tape_font)
-    draw.text(
-        (CANVAS[0] - 120 - tw / 2, GRID_SAFE_TOP + 60 - tape_font.size / 2),
-        tape_label, font=tape_font, fill=INK,
-    )
-
     # Footer pinned to the bottom of the grid-safe band, not the canvas, so it
     # survives the profile-grid crop.
     foot = font("condensed", 32)

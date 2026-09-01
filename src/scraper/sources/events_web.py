@@ -26,12 +26,13 @@ import asyncio
 import json
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 from urllib.parse import quote, urljoin
 
 from ..core.address import format_address
 from ..core.categorize import guess_categories
+from ..core.eventtime import event_tz
 from ..core.http import HttpClient
 from ..core.media import clean_image_url
 from ..core.models import Event, Kind, SearchParams
@@ -45,18 +46,72 @@ _BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 _MAX_PAGES = 14
+# Cap on detail-page fetches spent recovering times a listing omitted. One
+# request each, so this bounds the cost of a listing that is entirely
+# date-only (Eventbrite's search results usually are).
+_MAX_TIME_LOOKUPS = 25
 
 # 2-letter US state codes, to detect a "City, ST" location string.
 _STATE = re.compile(r"^[A-Za-z]{2}$")
 
 
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_date_only(value: Any) -> bool:
+    """True for a bare ``YYYY-MM-DD`` schema.org date with no time at all.
+
+    Listing pages publish these — Eventbrite's search results give every event a
+    date and no hour — and parsing one yields local midnight, which is a real
+    timestamp we never actually learned. Callers use this to go get the time
+    from the event's own page instead of publishing a made-up midnight.
+    """
+    return isinstance(value, str) and bool(_DATE_ONLY_RE.match(value.strip()))
+
+
 def _dt(value: Any) -> Optional[datetime]:
+    """Parse a schema.org date/datetime, keeping an offset only when it's ours.
+
+    Scraped listings routinely carry an offset that contradicts the venue. An
+    Eventbrite show on Dyer St in El Paso (Mountain) is published as
+    ``2026-08-28T20:00:00-05:00`` with ``timezone: America/Chicago``, because
+    the offset follows the organizer's account setting rather than the building.
+    Honoring it would move a customer-facing 8:00 PM to 7:00 PM and put us an
+    hour out of step with the ticket page we link to.
+
+    So an offset is trusted only when it agrees with what this region was
+    actually on at that moment; otherwise it is dropped and the quoted wall
+    clock is read as local — the time a person standing at the venue sees, which
+    is the reading core/eventtime.py already applies to naive input.
+
+    This lives here rather than in to_event_local because it must NOT touch API
+    sources: Ticketmaster returns genuine UTC, and discarding a non-Mountain
+    offset there would corrupt every one of its timestamps.
+    """
     if not isinstance(value, str):
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed
+    # A UTC stamp is a deliberate normalization, not a local-time claim, so it
+    # is taken at face value. Meetup publishes "2026-08-30T13:00:00.000Z" for a
+    # 7am El Paso hike; that is a real instant and re-reading it as a wall clock
+    # would move the hike to 1pm. Only an offset that ASSERTS a local zone can
+    # be asserting the wrong one.
+    if parsed.utcoffset() == timedelta(0):
+        return parsed
+    # Same wall clock, read in the region we scrape — DST-correct for that date.
+    regional = parsed.replace(tzinfo=None).replace(tzinfo=event_tz())
+    if parsed.utcoffset() == regional.utcoffset():
+        return parsed
+    log.debug(
+        "dropping offset %s on %r (region is on %s) — reading as local wall clock",
+        parsed.utcoffset(), value, regional.utcoffset(),
+    )
+    return parsed.replace(tzinfo=None)
 
 
 def _slug(text: str) -> str:
@@ -268,6 +323,20 @@ def _next_data(html: str) -> Any:
 
 _EVENTBRITE_DETAIL_RE = re.compile(r"/e/[^/?#]+-tickets-\d+")
 _MEETUP_DETAIL_RE = re.compile(r"/events/\d+")
+
+
+def _is_detail_url(url: str) -> bool:
+    """True for a single event's own page, as opposed to a listing.
+
+    Same URL shapes _individual_page_full_description relies on: fetching a
+    listing here would be a wasted request, since a listing is exactly what
+    failed to carry a time in the first place.
+    """
+    if "eventbrite." in url:
+        return bool(_EVENTBRITE_DETAIL_RE.search(url))
+    if "meetup.com" in url:
+        return bool(_MEETUP_DETAIL_RE.search(url))
+    return False
 
 
 def _eventbrite_full_description(html: str) -> Optional[str]:
@@ -647,7 +716,65 @@ class EventsWebSource(Source):
             events += await _lanube_events(http)
 
         events = [e for e in events if _in_window(e, params.start_date, params.end_date)]
+        # Filter first: enrichment costs one fetch per event, and there's no
+        # point paying it for events we're about to discard.
+        await self._fill_date_only_times(events, http)
         return events
+
+    async def _fill_date_only_times(self, events: list[Event], http: HttpClient) -> None:
+        """Recover real start times for events a listing gave only a date for.
+
+        Eventbrite's search results publish ``startDate: "2026-08-28"`` — no
+        hour — while the event's own page carries the full
+        ``2026-08-28T20:00:00-05:00``. Without this the event is stored at local
+        midnight, which downstream (the carousel, the knowledge-base export)
+        correctly refuses to show, so a real 8pm show reaches customers with no
+        time on it at all.
+
+        Mutates in place, and stays silent on failure: a missing time is the
+        status quo, not a reason to lose the event.
+        """
+        targets = [
+            e for e in events
+            if isinstance(e.raw, dict)
+            and _is_date_only(e.raw.get("startDate"))
+            and e.url
+            and _is_detail_url(e.url)
+        ][:_MAX_TIME_LOOKUPS]
+        if not targets:
+            return
+
+        log.debug("looking up real start times for %d date-only events", len(targets))
+        await asyncio.gather(*(self._fill_one_time(e, http) for e in targets))
+
+    async def _fill_one_time(self, event: Event, http: HttpClient) -> None:
+        try:
+            if not await http.can_fetch(event.url):
+                return
+            html = await http.get_text(event.url, headers={"User-Agent": _BROWSER_UA})
+        except Exception as exc:  # noqa: BLE001 - a missing time must not lose the event
+            log.debug("time lookup %s failed: %s", event.url, exc)
+            return
+
+        for node in _iter_jsonld_events(html):
+            if not isinstance(node, dict):
+                continue
+            raw_start = node.get("startDate")
+            # A detail page can still only offer a date; that's no better than
+            # what we already have, so don't overwrite with an equal guess.
+            if _is_date_only(raw_start):
+                continue
+            start = _dt(raw_start)
+            if start is None or start.date() != event.start_time.date():
+                # A listing page's JSON-LD sometimes also appears on the detail
+                # page (related events, "more like this"). Matching the date we
+                # already trust keeps us from adopting a neighbor's time.
+                continue
+            event.start_time = start
+            end = _dt(node.get("endDate"))
+            if end is not None and not _is_date_only(node.get("endDate")):
+                event.end_time = end
+            return
 
     async def _page_events_with_categories(
         self, url: str, categories: list[str], http: HttpClient

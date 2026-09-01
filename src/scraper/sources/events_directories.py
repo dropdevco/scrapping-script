@@ -57,7 +57,6 @@ DIRECTORIES: tuple[Directory, ...] = (
     Directory("boletia_juarez", "https://boletia.com/eventos/ciudad-juarez", "juarez", 20),
     Directory("ticketmaster_mx_juarez", "https://www.ticketmaster.com.mx/search?q=Ciudad%20Juarez", "juarez", 20),
     Directory("visita_juarez", "https://visitajuarez.mx/", "juarez", 24),
-    Directory("cultura_chihuahua_ccpn", "https://www.cultura.chihuahua.gob.mx/", "juarez", 24),
     Directory("juarez_municipal_events", "https://www.juarez.gob.mx/", "juarez", 18),
     Directory("uacj_agenda", "https://www.uacj.mx/agenda/", "juarez", 24),
 )

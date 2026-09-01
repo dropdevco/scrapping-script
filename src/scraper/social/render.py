@@ -849,6 +849,11 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
         for line in venue_lines:
             draw.text((SAFE_X, y), line, font=venue_font, fill=INK)
             y += int(venue_font.size * 1.2)
+    else:
+        # No venue block to carry this gap — without it, the address's pin
+        # lands right on the title's last-line descenders (seen on venueless
+        # city-calendar events once those started reaching this layout).
+        y += max(14, int(title_font.size * 0.18))
 
     address = _address_label(row)
     if address and y + 30 < CANVAS[1] - 60:
@@ -949,6 +954,11 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
         for line in venue_lines:
             draw.text((SAFE_X, y), line, font=venue_font, fill=on_accent)
             y += int(venue_font.size * 1.2)
+    else:
+        # See _slide_bold_block — without this the address collides with the
+        # title's last-line descenders when there is no venue block to carry
+        # the gap.
+        y += max(12, int(title_font.size * 0.18))
 
     address = _address_label(row)
     if address and y + 30 < CANVAS[1] - 24:
@@ -1018,6 +1028,11 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
         for line in venue_lines:
             draw.text((SAFE_X, y), line, font=venue_font, fill=on_accent)
             y += int(venue_font.size * 1.2)
+    else:
+        # See _slide_bold_block — without this the address collides with the
+        # title's last-line descenders when there is no venue block to carry
+        # the gap.
+        y += max(12, int(title_font.size * 0.18))
 
     address = _address_label(row)
     if address and y + 30 < CANVAS[1] - 60:

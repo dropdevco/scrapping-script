@@ -110,9 +110,11 @@ async def _build_one(
     # published — no slot-aware selection logic needed.
     recent_keys = await storage.recent_slide_keys((day - timedelta(days=14)).isoformat())
 
-    # Rank first, then verify photos in rank order — so we only pay for
-    # downloads we're likely to use, but still backfill from the next-best
-    # candidate whenever a source image turns out to be dead.
+    # Rank first, then fetch photos in rank order — so we only pay for
+    # downloads we're likely to use. A dead/missing photo no longer drops the
+    # event: render_event_slide has a text-only layout for exactly this case,
+    # so the event keeps its slot with photo=None rather than losing it to a
+    # lower-ranked candidate purely for lacking a source image.
     ranked = selection.choose(
         rows, tz_name=tz_name, recent_keys=recent_keys, max_slides=len(rows)
     )
@@ -124,12 +126,11 @@ async def _build_one(
             if len(picked) >= settings.ig_max_slides:
                 break
             photo = await fetch_photo(http, cand.row.get("image_url"))
-            if photo is None:
-                continue  # dead CDN link / hotlink-protected / too small
             picked.append(cand)
             photos.append(photo)
 
-    log.info("%d event(s) have a usable photo%s", len(picked), label)
+    with_photo = sum(1 for p in photos if p is not None)
+    log.info("%d event(s) picked, %d with a photo%s", len(picked), with_photo, label)
     if len(picked) < settings.ig_min_slides:
         return await _skip(
             storage,

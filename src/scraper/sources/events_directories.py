@@ -19,6 +19,7 @@ from urllib.parse import urljoin, urlparse
 
 from ..core.categorize import guess_categories
 from ..core.http import HttpClient
+from ..core.media import clean_image_url
 from ..core.models import Event, Kind, SearchParams
 from .base import Source
 from .events_web import (
@@ -87,16 +88,6 @@ CITY_EVENT_RE = re.compile(
     r"(?P<rest>.+)$",
     re.IGNORECASE,
 )
-NOISE_TEXT = {
-    "image",
-    "image: showtime",
-    "image: buy tickets",
-    "image: more info",
-    "buy tickets",
-    "more info",
-    "load more events",
-}
-
 _CITY_MAX_DETAILS = 60  # caps detail-page fetches per run, same order as other directories
 
 
@@ -331,37 +322,37 @@ class EventDirectoriesSource(Source):
         return out
 
     def _elpasolive_listing_events(self, html: str, url: str) -> list[Event]:
+        """Each event is a `.component--event-list` card with its own image,
+        title/link, date, and (optionally) a showtime — unlike the other
+        directories here, this markup is structured enough to read directly
+        instead of flattening to text and re-parsing it with regexes. That
+        also means, unlike a flattened-text parse, the card's own <img> is
+        available: elpasolive.com is the only directory site that actually
+        publishes a photo per event.
+        """
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, "html.parser")
-        link_by_title = {
-            a.get_text(" ", strip=True): urljoin(url, a["href"])
-            for a in soup.find_all("a", href=True)
-            if a.get_text(" ", strip=True)
-        }
-        lines = [s.strip() for s in soup.stripped_strings if s.strip()]
-
         events: list[Event] = []
-        current_date: Optional[str] = None
-        for idx, line in enumerate(lines):
-            if not MONTH_RE.match(line):
-                continue
-            current_date = line
-            title = None
-            start = None
-            for lookahead in lines[idx + 1 : idx + 8]:
-                normalized = lookahead.strip().lower()
-                if not lookahead or normalized in NOISE_TEXT or normalized.startswith("image:"):
-                    continue
-                if MONTH_RE.match(lookahead):
-                    break
-                if TIME_RE.search(lookahead):
-                    start = TIME_RE.search(lookahead).group(1)
-                    continue
-                if title is None and len(lookahead) > 2:
-                    title = lookahead
+        for card in soup.select("div.component--event-list"):
+            info = card.select_one(".component--event-list-info")
+            title_link = info.select_one("a") if info else None
+            title = title_link.get_text(" ", strip=True) if title_link else None
             if not title or title.lower() in {"events", "upcoming events"}:
                 continue
+
+            date_div = info.find("div", recursive=False) if info else None
+            current_date = date_div.get_text(" ", strip=True) if date_div else None
+            if not current_date or not MONTH_RE.match(current_date):
+                continue
+
+            clock = card.select_one(".icon-clock")
+            time_match = TIME_RE.search(clock.get_text(" ", strip=True)) if clock else None
+            start = time_match.group(1) if time_match else None
+
+            img = card.select_one(".component--event-list-image img")
+            image_url = clean_image_url(urljoin(url, img["src"])) if img and img.get("src") else None
+
             events.append(
                 Event(
                     source=self.name,
@@ -370,7 +361,8 @@ class EventDirectoriesSource(Source):
                     start_time=_parse_datetime(current_date, start),
                     venue="El Paso Live",
                     location="One Civic Center Plaza, El Paso, TX 79901",
-                    url=link_by_title.get(title, url),
+                    url=urljoin(url, title_link["href"]) if title_link and title_link.get("href") else url,
+                    image_url=image_url,
                     categories=guess_categories(title),
                     raw={"directory": "el_paso_live", "date": current_date, "time": start},
                 )

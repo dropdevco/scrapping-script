@@ -75,7 +75,7 @@ async def run_events() -> None:
             location=location,
             start_date=today,
             end_date=today + timedelta(days=_days()),
-            limit=100,
+            limit=400,
             force_refresh=True,
         )
         result = await orchestrator.run(params)

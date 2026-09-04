@@ -448,6 +448,97 @@ class Storage:
 
         return await asyncio.to_thread(_q)
 
+    async def due_for_metrics(self, window_hours: int, label: str) -> list[dict[str, Any]]:
+        """Published posts old enough for this window and missing its snapshot.
+
+        Deliberately "old enough AND not yet collected" rather than "published
+        exactly N hours ago": that makes the collector idempotent and
+        self-healing, so a skipped run backfills on the next sweep instead of
+        losing the window forever. Bounded to 30 days so enabling a new window
+        does not trigger a backfill over the account's whole history.
+        """
+        if not self.enabled:
+            return []
+        now = datetime.now(timezone.utc)
+        older_than = (now - timedelta(hours=window_hours)).isoformat()
+        floor = (now - timedelta(days=30)).isoformat()
+
+        def _q() -> list[dict[str, Any]]:
+            posts = (
+                self._client.table("ig_posts")
+                .select("id,post_date,ig_media_id,approved_by")
+                .eq("status", "published")
+                .not_.is_("ig_media_id", "null")
+                .lte("published_at", older_than)
+                .gte("published_at", floor)
+                .execute()
+                .data
+                or []
+            )
+            if not posts:
+                return []
+            # Anti-join in a second round trip: PostgREST has no NOT IN
+            # (subquery), and the candidate set here is at most ~30 rows.
+            done = (
+                self._client.table("ig_post_metrics")
+                .select("post_id")
+                .eq("window_label", label)
+                .in_("post_id", [p["id"] for p in posts])
+                .execute()
+                .data
+                or []
+            )
+            seen = {r["post_id"] for r in done}
+            return [p for p in posts if p["id"] not in seen]
+
+        return await asyncio.to_thread(_q)
+
+    async def record_ig_metrics(self, post_id: str, label: str, row: dict[str, Any]) -> None:
+        """Upsert one snapshot, keyed by the (post_id, window_label) index."""
+        if not self.enabled:
+            return
+        payload = {**row, "post_id": post_id, "window_label": label}
+
+        def _q() -> None:
+            self._client.table("ig_post_metrics").upsert(
+                payload, on_conflict="post_id,window_label"
+            ).execute()
+
+        try:
+            await asyncio.to_thread(_q)
+        except Exception as exc:  # noqa: BLE001
+            log.error("ig metrics upsert failed for %s/%s: %s", post_id, label, exc)
+
+    async def recent_metrics_baseline(
+        self, label: str = "t24", limit: int = 7
+    ) -> Optional[dict[str, float]]:
+        """Mean reach over the most recent `limit` snapshots.
+
+        Context for the digest: a bare reach number is unreadable to someone
+        who does not already know what normal looks like for this account.
+        """
+        if not self.enabled:
+            return None
+
+        def _q() -> list[dict[str, Any]]:
+            return (
+                self._client.table("ig_post_metrics")
+                .select("reach")
+                .eq("window_label", label)
+                .not_.is_("reach", "null")
+                .order("fetched_at", desc=True)
+                .limit(limit)
+                .execute()
+                .data
+                or []
+            )
+
+        rows = await asyncio.to_thread(_q)
+        values = [r["reach"] for r in rows if isinstance(r.get("reach"), int)]
+        if not values:
+            return None
+        return {"reach": sum(values) / len(values), "n": float(len(values))}
+
     async def update_ig_post(self, post_id: str, patch: dict[str, Any]) -> None:
         if not self.enabled:
             return

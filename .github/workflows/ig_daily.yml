@@ -151,3 +151,11 @@ jobs:
 
       - name: Publish approved carousel
         run: python -m scraper.social publish
+
+      # Snapshot how already-published posts did. Driven by "published long
+      # enough ago AND missing this window" rather than by cron precision, so
+      # it is idempotent and a skipped run backfills on the next sweep. Never
+      # fatal: a Meta insights outage must not fail a publish that worked.
+      - name: Collect post metrics
+        continue-on-error: true
+        run: python -m scraper.social metrics

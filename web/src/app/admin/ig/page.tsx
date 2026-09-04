@@ -3,7 +3,7 @@ import { isAdminEmail } from "@/lib/admin";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { supabaseServer } from "@/lib/supabase/server";
 import { approveIgPost, publishIgPostNow, rejectIgPost } from "../actions";
-import { PostCard } from "./PostCard";
+import { PostCard, type IgPostMetrics } from "./PostCard";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +22,8 @@ type IgPost = {
   scheduled_for: string | null;
   kind: string | null;
   slot: string | null;
+  auto_approve_at: string | null;
+  approved_by: string | null;
 };
 
 function Gate({ children }: { children: React.ReactNode }) {
@@ -53,9 +55,11 @@ export default async function AdminIgPage() {
   const { data, error } = await admin
     .from("ig_posts")
     .select(
-      "id, post_date, status, slide_paths, caption, event_ids, error, created_at, scheduled_for, kind, slot",
+      "id, post_date, status, slide_paths, caption, event_ids, error, created_at, scheduled_for, kind, slot, auto_approve_at, approved_by",
     )
-    .in("status", ["draft", "approved", "publishing", "failed"])
+    // 'published' is included so the queue doubles as the place you see how
+    // the last few actually did — otherwise the metrics have nowhere to land.
+    .in("status", ["draft", "approved", "publishing", "failed", "published"])
     .order("post_date", { ascending: false })
     .limit(10);
 
@@ -66,6 +70,24 @@ export default async function AdminIgPage() {
   }
 
   const posts = (data ?? []) as IgPost[];
+
+  // Latest snapshot per post, in one query rather than one per card. t24 is
+  // preferred; t72 stands in until the first day has elapsed.
+  const metricsByPost = new Map<string, IgPostMetrics>();
+  const publishedIds = posts.filter((p) => p.status === "published").map((p) => p.id);
+  if (publishedIds.length) {
+    const { data: rows } = await admin
+      .from("ig_post_metrics")
+      .select("post_id, window_label, reach, views, likes, comments, saves, shares, profile_visits, follows")
+      .in("post_id", publishedIds)
+      .order("fetched_at", { ascending: false });
+    for (const row of rows ?? []) {
+      const existing = metricsByPost.get(row.post_id);
+      if (!existing || (existing.window_label !== "t24" && row.window_label === "t24")) {
+        metricsByPost.set(row.post_id, row as unknown as IgPostMetrics);
+      }
+    }
+  }
 
   // Sign every slide up front so each card can render its strip. Signed URLs
   // are plain unauthenticated GETs, which is also exactly how Meta fetches them.
@@ -101,6 +123,7 @@ export default async function AdminIgPage() {
               key={post.id}
               post={post}
               slides={slides}
+              metrics={metricsByPost.get(post.id) ?? null}
               actions={
                 isDraft
                   ? {

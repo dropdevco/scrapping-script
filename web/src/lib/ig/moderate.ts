@@ -11,7 +11,7 @@ type ModerateResult = { ok: true } | { ok: false; message: string };
 export async function approveIgPostRow(id: string): Promise<ModerateResult> {
   const { data, error } = await supabaseAdmin()
     .from("ig_posts")
-    .update({ status: "approved" })
+    .update({ status: "approved", approved_by: "human" })
     .eq("id", id)
     .eq("status", "draft")
     .select("id");
@@ -38,7 +38,7 @@ export async function rejectIgPostRow(id: string): Promise<ModerateResult> {
 export async function publishIgPostNowRow(id: string): Promise<ModerateResult> {
   const { data, error } = await supabaseAdmin()
     .from("ig_posts")
-    .update({ status: "approved", scheduled_for: new Date().toISOString() })
+    .update({ status: "approved", approved_by: "human", scheduled_for: new Date().toISOString() })
     .eq("id", id)
     .eq("status", "draft")
     .select("id");

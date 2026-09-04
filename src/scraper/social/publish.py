@@ -16,7 +16,7 @@ import asyncio
 import logging
 from typing import Awaitable, Callable, Optional
 
-from ..core.http import HttpClient
+from ..core.http import HttpClient, redact_secrets
 from ..sources.auth_meta import GRAPH
 
 log = logging.getLogger("scraper.social.publish")
@@ -46,7 +46,7 @@ async def _container_ready(
                 params={"fields": "status_code,status", "access_token": token},
             )
         except Exception as exc:  # noqa: BLE001
-            log.debug("container %s status check failed: %s", container_id, exc)
+            log.debug("container %s status check failed: %s", container_id, redact_secrets(str(exc)))
             return False
         code = (data or {}).get("status_code")
         if code == "FINISHED":
@@ -133,7 +133,7 @@ async def publish_carousel(
             # semaphore is shared with every other fetch in the process.
             child = await create_child(http, ig_id, token, url)
         except Exception as exc:  # noqa: BLE001
-            log.warning("slide %s container failed: %s", i, exc)
+            log.warning("slide %s container failed: %s", i, redact_secrets(str(exc)))
             continue
         if not child:
             continue

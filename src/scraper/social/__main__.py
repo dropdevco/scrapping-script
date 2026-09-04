@@ -3,6 +3,7 @@
     python -m scraper.social build   [--date YYYY-MM-DD] [--dry-run] [--out DIR]
     python -m scraper.social autoapprove [--date YYYY-MM-DD] [--dry-run]
     python -m scraper.social publish [--date YYYY-MM-DD] [--dry-run]
+    python -m scraper.social metrics
     python -m scraper.social prune
 """
 
@@ -18,13 +19,14 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from ..core.config import settings
-from ..core.http import HttpClient
+from ..core.http import HttpClient, redact_secrets
 from ..core.storage import Storage
 from ..sources import auth_meta
 from . import caption as caption_mod
 from . import notify as notify_mod
 from . import publish as publish_mod
 from . import render, selection, slides_store
+from . import metrics as metrics_mod
 from . import telegram as telegram_mod
 from .imaging import fetch_photo
 
@@ -433,7 +435,7 @@ async def _publish_one(
         # far more than a missed one (see publish_carousel's docstring).
         reached_meta = bool(row.get("ig_creation_id"))
         retryable = attempts < MAX_PUBLISH_ATTEMPTS and not reached_meta
-        patch = {"attempts": attempts, "error": str(exc)[:500]}
+        patch = {"attempts": attempts, "error": redact_secrets(str(exc))[:500]}
         patch["status"] = "approved" if retryable else "failed"
         await storage.update_ig_post(post_id, patch)
 
@@ -453,7 +455,7 @@ async def _publish_one(
         await notify_mod.notify_alert(
             http,
             f"Publish failed for {post_date.isoformat()} ({reason}, "
-            f"attempt {attempts}/{MAX_PUBLISH_ATTEMPTS}): {str(exc)[:300]}",
+            f"attempt {attempts}/{MAX_PUBLISH_ATTEMPTS}): {redact_secrets(str(exc))[:300]}",
         )
         return 1
 
@@ -503,7 +505,7 @@ async def check_token(min_days: int = 14) -> int:
         except Exception as exc:  # noqa: BLE001
             log.error("IG_ACCESS_TOKEN is not usable: %s", exc)
             await notify_mod.notify_alert(
-                http, f"IG_ACCESS_TOKEN looks dead (/me failed): {str(exc)[:300]}"
+                http, f"IG_ACCESS_TOKEN looks dead (/me failed): {redact_secrets(str(exc))[:300]}"
             )
             return 1
         log.info("token is live for @%s", (identity or {}).get("username") or "?")
@@ -536,7 +538,7 @@ async def check_token(min_days: int = 14) -> int:
             # anyone noticed the account had stopped posting.
             log.error("IG_ACCESS_TOKEN introspection failed — token is likely dead: %s", exc)
             await notify_mod.notify_alert(
-                http, f"IG_ACCESS_TOKEN looks dead (introspection failed): {str(exc)[:300]}"
+                http, f"IG_ACCESS_TOKEN looks dead (introspection failed): {redact_secrets(str(exc))[:300]}"
             )
             return 1
 
@@ -550,6 +552,56 @@ async def check_token(min_days: int = 14) -> int:
             )
             return 1
         log.info("IG_ACCESS_TOKEN expires in %d day(s)", days)
+    return 0
+
+
+# ── metrics ────────────────────────────────────────────────────────────────────
+async def metrics(dry_run: bool = False) -> int:
+    """Snapshot how published posts actually performed.
+
+    Matters more now that posting is opt-out: a pipeline that ships without
+    anyone's say-so needs a signal that does not depend on someone remembering
+    to open the app. The t24 snapshot is also the trigger for the only
+    unprompted message this bot sends that isn't asking for something.
+    """
+    storage = Storage()
+    if not storage.enabled:
+        log.error("Supabase is not configured; nothing to do.")
+        return 1
+    _, token = publish_mod.account_credentials()
+    if not token:
+        log.error("IG_ACCESS_TOKEN is not set.")
+        return 1
+
+    fresh_t24: list[tuple[str, dict[str, Any]]] = []
+    async with HttpClient() as http:
+        for label, hours in metrics_mod.WINDOWS:
+            due = await storage.due_for_metrics(hours, label)
+            log.info("%d post(s) due for a %s snapshot", len(due), label)
+            for post in due:
+                media_id = str(post["ig_media_id"])
+                row, error = await metrics_mod.collect(http, media_id, token)
+                if error:
+                    row = {**row, "error": error}
+                if not row:
+                    log.warning("no metrics available for %s", media_id)
+                    continue
+                summary = {k: v for k, v in row.items() if k not in {"raw", "error"}}
+                log.info("%s %s: %s", post["post_date"], label, summary)
+                if dry_run:
+                    continue
+                await storage.record_ig_metrics(str(post["id"]), label, row)
+                if label == "t24" and not error:
+                    fresh_t24.append((str(post["post_date"]), row))
+
+        # Only on a first t24 write, so this is one message the morning after a
+        # post rather than a repeat every half hour for three days.
+        if fresh_t24 and not dry_run:
+            baseline = await storage.recent_metrics_baseline()
+            lines = [
+                metrics_mod.format_digest(day, row, baseline) for day, row in fresh_t24
+            ]
+            await notify_mod.notify_alert(http, "📊 How yesterday did\n\n" + "\n\n".join(lines))
     return 0
 
 
@@ -716,6 +768,9 @@ def main() -> int:
     sub.add_parser("prune", help="delete slides past the retention window")
 
     sub.add_parser("refresh-token", help="extend the long-lived IG token and print the new one")
+    mt = sub.add_parser("metrics", help="snapshot performance of published posts")
+    mt.add_argument("--dry-run", action="store_true", help="fetch and print, write nothing")
+
     sub.add_parser("check-telegram", help="fail if the Telegram webhook is unhealthy")
     tw = sub.add_parser("telegram-webhook", help="inspect or (re)register the Telegram webhook")
     tw.add_argument(
@@ -741,6 +796,8 @@ def main() -> int:
         return asyncio.run(refresh_token())
     if args.cmd == "check-token":
         return asyncio.run(check_token(args.min_days))
+    if args.cmd == "metrics":
+        return asyncio.run(metrics(args.dry_run))
     if args.cmd == "check-telegram":
         return asyncio.run(check_telegram())
     if args.cmd == "telegram-webhook":

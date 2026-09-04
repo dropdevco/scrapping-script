@@ -26,8 +26,24 @@ export type IgPostSummary = {
   event_ids: string[] | null;
   error: string | null;
   scheduled_for?: string | null;
+  auto_approve_at?: string | null;
+  approved_by?: string | null;
   kind?: string | null;
   slot?: string | null;
+};
+
+/* Latest snapshot for a published post. Optional everywhere: a post younger
+   than 24h has no row yet, and a metric Meta stopped offering is null. */
+export type IgPostMetrics = {
+  reach: number | null;
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+  saves: number | null;
+  shares: number | null;
+  profile_visits: number | null;
+  follows: number | null;
+  window_label: string;
 };
 
 export type PostCardActions = {
@@ -40,9 +56,11 @@ export function PostCard({
   post,
   slides,
   actions,
+  metrics,
 }: {
   post: IgPostSummary;
   slides: string[];
+  metrics?: IgPostMetrics | null;
   actions?: PostCardActions | null;
 }) {
   return (
@@ -76,6 +94,14 @@ export function PostCard({
                 ? "Ready to publish — next sweep will ship it"
                 : `Scheduled for ${formatScheduledFor(post.scheduled_for)}`}
             </p>
+          )}
+          {post.status === "draft" && post.auto_approve_at && (
+            <p className="mt-1 text-[13px] font-semibold text-cosmo">
+              Posts automatically at {formatScheduledFor(post.auto_approve_at)} unless cancelled
+            </p>
+          )}
+          {post.approved_by === "auto" && (
+            <p className="mt-1 text-[13px] text-ink-faint">Approved automatically — nobody objected</p>
           )}
         </div>
 
@@ -115,6 +141,35 @@ export function PostCard({
         <p className="mt-3 rounded-[0.75rem] border border-pop-red/40 bg-pop-red/5 px-3 py-2 text-[13px] text-pop-red">
           {post.error}
         </p>
+      )}
+
+      {metrics && (
+        <dl className="mt-3 flex flex-wrap gap-x-5 gap-y-1 rounded-[0.75rem] border border-line bg-card px-3 py-2">
+          {(
+            [
+              ["Reach", metrics.reach],
+              ["Views", metrics.views],
+              ["Likes", metrics.likes],
+              ["Comments", metrics.comments],
+              ["Saves", metrics.saves],
+              ["Shares", metrics.shares],
+              ["Profile visits", metrics.profile_visits],
+              ["Follows", metrics.follows],
+            ] as const
+          ).map(([label, value]) => (
+            <div key={label} className="flex items-baseline gap-1.5">
+              <dt className="font-condensed text-[11px] uppercase tracking-[0.14em] text-ink-faint">
+                {label}
+              </dt>
+              <dd className="text-[13px] font-semibold text-ink">
+                {typeof value === "number" ? value.toLocaleString() : "—"}
+              </dd>
+            </div>
+          ))}
+          <span className="ml-auto self-center font-condensed text-[11px] uppercase tracking-[0.14em] text-ink-faint">
+            {metrics.window_label}
+          </span>
+        </dl>
       )}
 
       {slides.length > 0 && (

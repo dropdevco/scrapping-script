@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from urllib.parse import urlsplit
 from urllib.robotparser import RobotFileParser
 
@@ -19,6 +20,31 @@ from .config import settings
 log = logging.getLogger("scraper.http")
 
 _RETRY_STATUS = {429, 500, 502, 503, 504}
+
+# Query-string credentials that must never reach a log line, a database
+# `error` column, or an alert. The Graph API takes its token as a URL
+# parameter, and httpx puts the full URL in every error it raises — so the
+# obvious `log.error("%s", exc)` publishes a live credential. Redacting at the
+# point the message is built is the only place that catches all of them.
+_SECRET_PARAMS = ("access_token", "secret_token", "api_key", "apikey", "key", "token")
+# The value class is deliberately narrow -- the characters that actually appear
+# in these tokens -- rather than "anything up to a delimiter". A Graph error
+# reads `...?access_token=ABC: {"error": {...}}`, and a greedy class eats the
+# colon and the Meta error body with it, redacting away the very explanation
+# the message exists to carry.
+_SECRET_RE = re.compile(
+    r"\b(" + "|".join(_SECRET_PARAMS) + r")=([A-Za-z0-9._~+/-]+=*)",
+    re.IGNORECASE,
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace credential query-string values with ***, keeping the param name.
+
+    The name is the useful half: `access_token=***` says which credential the
+    failing call used, where a bare `***` does not.
+    """
+    return _SECRET_RE.sub(r"\1=***", text)
 
 
 class HttpClient:
@@ -91,7 +117,7 @@ class HttpClient:
         resp = await self.request("POST", url, **kwargs)
         if resp.status_code >= 400:
             raise httpx.HTTPStatusError(
-                f"{resp.status_code} from {url}: {resp.text[:500]}",
+                redact_secrets(f"{resp.status_code} from {url}: {resp.text[:500]}"),
                 request=resp.request,
                 response=resp,
             )

@@ -220,3 +220,62 @@ def test_digest_caption_is_unchanged_by_the_kind_parameter():
     assert caption_mod.build_caption(day, picked) == caption_mod.build_caption(
         day, picked, kind="digest"
     )
+
+
+def test_horizon_does_not_tighten_venue_caps():
+    """Six months out, only the handful of venues big enough to sell that far
+    ahead have anything on sale — measured 2026-09-03, all 30 events in the
+    window were ticketed but spread across just four venues. A per-venue cap
+    of 1 capped the post at four slides, the bare minimum, one quiet week away
+    from skipping. require_ticket_links already does the filtering."""
+    horizon = selection.PROFILES["horizon"]
+    assert horizon.max_per_venue == selection.DEFAULT_PROFILE.max_per_venue
+    assert horizon.require_ticket_links
+
+
+def test_horizon_fills_a_carousel_from_a_few_big_venues():
+    """The regression: ticketed events concentrated in a handful of venues
+    must still fill a carousel, not stop at ig_min_slides.
+
+    Modelled on the real 2026-09-03 window — 30 ticketed events across four
+    venues and four categories — because the shape of that data is the whole
+    reason the venue cap had to come off.
+    """
+    cats = ["Arts & Theatre", "Sports", "Music", "Community"]
+    rows = []
+    for v in range(4):
+        for i in range(8):
+            rows.append(
+                _row(
+                    id=f"{v}-{i}",
+                    title=f"Show {v}-{i}",
+                    venue=f"Big Venue {v}",
+                    categories=[cats[i % len(cats)]],
+                    ticket_links=[{"url": "x"}],
+                    start_time="2027-03-05T19:00:00+00:00",
+                )
+            )
+    picked = selection.choose(rows, tz_name=TZ, profile=selection.PROFILES["horizon"])
+    assert len(picked) >= 6, "horizon should fill a carousel, not stop at the minimum"
+
+
+def test_horizon_would_have_starved_under_a_one_per_venue_cap():
+    """Pins WHY the cap was removed: the same data yields only four slides —
+    exactly ig_min_slides — with max_per_venue=1."""
+    cats = ["Arts & Theatre", "Sports", "Music", "Community"]
+    rows = [
+        _row(
+            id=f"{v}-{i}",
+            title=f"Show {v}-{i}",
+            venue=f"Big Venue {v}",
+            categories=[cats[i % len(cats)]],
+            ticket_links=[{"url": "x"}],
+            start_time="2027-03-05T19:00:00+00:00",
+        )
+        for v in range(4)
+        for i in range(8)
+    ]
+    starved = selection.choose(
+        rows, tz_name=TZ, profile=selection.PROFILES["horizon"], max_per_venue=1
+    )
+    assert len(starved) == 4

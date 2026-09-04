@@ -125,13 +125,19 @@ PROFILES: dict[str, ScoreProfile] = {
         ticket_bonus=3.0, recurrence_penalty=4.0, max_per_venue=1, max_per_category=2
     ),
     # Far-future: ticketed or nothing, and recurrence is fatal.
+    #
+    # Diversity caps are deliberately NOT tightened here, unlike weekend and
+    # monthly. Six months out, the only events on sale are at the handful of
+    # venues big enough to sell that far ahead: measured 2026-09-03, all 30
+    # events in the window were ticketed but spread across just four venues,
+    # so max_per_venue=1 capped the post at four slides — the bare minimum,
+    # one bad day away from skipping entirely. require_ticket_links is already
+    # doing the quality filtering; a venue cap on top only starves it.
     "horizon": ScoreProfile(
         ticket_bonus=4.0,
         recurrence_penalty=5.0,
         recently_posted_penalty=0.0,
         require_ticket_links=True,
-        max_per_venue=1,
-        max_per_category=2,
     ),
 }
 

@@ -254,6 +254,13 @@ class Storage:
         return rows or None
 
     # ── daily Instagram carousel (scraper.social) ──────────────────────────────
+    async def query_events_for_range(
+        self, location: str, start_iso: str, end_iso: str, limit: int = 1200
+    ) -> list[dict[str, Any]]:
+        """Approved events in [start, end). Generalises query_events_for_day,
+        whose name became too narrow once weekend/monthly windows existed."""
+        return await self.query_events_for_day(location, start_iso, end_iso, limit)
+
     async def query_events_for_day(
         self,
         location: str,
@@ -337,11 +344,21 @@ class Storage:
                 return out
             offset += page_size
 
-    async def recent_slide_keys(self, since_date: str) -> set[str]:
-        """Every slide_key used by a post published on/after `since_date`.
+    async def recent_slide_keys(
+        self, since_date: str, kinds: tuple[str, ...] = ("digest",)
+    ) -> set[str]:
+        """Every slide_key used by a post of these kinds published on/after
+        `since_date`.
 
         Drives recurrence suppression: a weekly event should not headline the
         carousel every single week.
+
+        Scoped by kind because the formats legitimately overlap — a monthly
+        roundup is SUPPOSED to include things the daily posts already covered;
+        that is what makes it a roundup. Suppressing across kinds would empty
+        it. The ("digest",) default reproduces the previous behaviour exactly
+        for the daily post, and incidentally fixes a latent bug where a
+        'breaking' post's keys would have suppressed the daily digest.
         """
         if not self.enabled:
             return set()
@@ -351,6 +368,7 @@ class Storage:
                 self._client.table("ig_posts")
                 .select("slide_keys")
                 .eq("status", "published")
+                .in_("kind", list(kinds))
                 .gte("post_date", since_date)
                 .execute()
                 .data

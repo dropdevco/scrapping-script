@@ -77,11 +77,30 @@ def _cron_hours(expr: str) -> set[int]:
 
 def test_cron_matches_the_declared_window():
     """If someone edits the workflow's schedule, this test — not a missing
-    post in November — is what tells them."""
+    post in November — is what tells them.
+
+    The sweep is the every-30-minutes entry; the others are the posting
+    calendar (weekend, monthly), which run once and are matched by name in
+    the workflow's own `if:` guards.
+    """
     text = WORKFLOW.read_text(encoding="utf-8")
     crons = re.findall(r'- cron: "([^"]+)"', text)
-    assert crons, "expected at least one cron in ig_daily.yml"
-    assert _cron_hours(crons[0]) == SWEEP_HOURS
+    sweeps = [c for c in crons if c.startswith("0,30 ")]
+    assert len(sweeps) == 1, f"expected exactly one publish sweep cron, got {sweeps}"
+    assert _cron_hours(sweeps[0]) == SWEEP_HOURS
+
+
+def test_calendar_crons_are_excluded_from_the_publish_sweep():
+    """Both format crons must be named in the publish job's `if:`, or a
+    Thursday weekend build would also trigger a publish sweep — harmless, but
+    it would also mean the build job runs on every half-hour sweep."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    calendar = [c for c in re.findall(r'- cron: "([^"]+)"', text) if not c.startswith("0,30 ")]
+    assert calendar, "expected at least one posting-calendar cron"
+    for cron in calendar:
+        assert text.count(f"'{cron}'") >= 2, (
+            f"{cron} must be matched in both the build and publish job guards"
+        )
 
 
 @pytest.mark.parametrize(

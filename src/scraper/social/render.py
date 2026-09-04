@@ -89,10 +89,19 @@ _FONT_FILES = {
 _warned_fonts: set[str] = set()
 
 
-def _variant_for(index: int) -> int:
+def _variant_for(index: int, builder_count: Optional[int] = None) -> int:
     """Slide 2 -> 0, 3 -> 1, 4 -> 2, 5 -> 0, ... — deterministic so re-rendering
-    the same day produces the same carousel, not a different one each time."""
-    return (index - 2) % 3
+    the same day produces the same carousel, not a different one each time.
+
+    Modulo the ACTUAL builder count, not a hardcoded 3. It was hardcoded while
+    _accent_for correctly used len(_ACCENTS), which made adding a fourth layout
+    a silent no-op: the new builder would sit in the tuple and never be
+    reached, with nothing failing to say so.
+
+    Resolved inside the body, not as a default argument: _SLIDE_BUILDERS is
+    defined below (it needs the builder functions), and a default is evaluated
+    at def time."""
+    return (index - 2) % (builder_count or len(_SLIDE_BUILDERS))
 
 
 def _accent_for(index: int) -> tuple[int, int, int]:
@@ -709,8 +718,49 @@ def _time_stamp(start_local: Optional[Any]) -> Optional[str]:
     return f"{hour}:{start_local.strftime('%M')} {start_local.strftime('%p')}"
 
 
-def render_cover(day: date, event_count: int, handle: str = "epchisme.com") -> bytes:
+# Kicker lines and the accent the halftone circle is drawn in, per format.
+# One layout parameterised rather than four near-duplicate functions: the
+# composition is doing its job, and the thing that actually distinguishes
+# "tonight" from "book this now" is the words and the colour, not the grid.
+_COVER_SPECS: dict[str, tuple[str, str, tuple[int, int, int]]] = {
+    "digest": ("TODAY IN", "EL PASO", COSMO),
+    "breaking": ("JUST IN", "EL PASO", COSMO),
+    "weekend": ("THIS WEEKEND", "IN EL PASO", POP_YELLOW),
+    "monthly": ("THIS MONTH IN", "EL PASO", COSMO),
+    "horizon": ("SAVE THE DATE", "EL PASO", POP_YELLOW),
+}
+
+
+def _default_period_label(kind: str, day: date) -> str:
+    """What the big line says when the caller supplies nothing.
+
+    %-d is glibc-only and %d leaves a leading zero ("AUGUST 05"), so the day
+    number is always formatted by hand.
+    """
+    if kind == "monthly":
+        return day.strftime("%B").upper()
+    if kind == "horizon":
+        return f"{day.strftime('%B')} {day.year}".upper()
+    return f"{day.strftime('%B')} {day.day}".upper()
+
+
+def render_cover(
+    day: date,
+    event_count: int,
+    handle: str = "epchisme.com",
+    *,
+    kind: str = "digest",
+    period_label: Optional[str] = None,
+) -> bytes:
     from PIL import Image, ImageDraw
+
+    kicker_top, kicker_bottom, halo = _COVER_SPECS.get(kind, _COVER_SPECS["digest"])
+    big_label = period_label or _default_period_label(kind, day)
+    # The weekday only means something for a single-day post: a weekend or a
+    # month spans several, and printing one of them would be a lie. Non-daily
+    # formats drop the line entirely rather than repeating the kicker
+    # underneath itself, which read as a duplicated "IN EL PASO".
+    sub_label = day.strftime("%A") if kind in ("digest", "breaking") else None
 
     img = Image.new("RGB", CANVAS, INK)
     draw = ImageDraw.Draw(img)
@@ -719,34 +769,39 @@ def render_cover(day: date, event_count: int, handle: str = "epchisme.com") -> b
     # "more design on the background" rendered as a cheap-newsprint dot
     # screen instead of a flat vector shape, without competing with the
     # left-aligned text column.
-    _halftone_circle(draw, cx=620 + 470, cy=-160 + 470, r=470, color=COSMO, dot_r=7, spacing=19)
+    _halftone_circle(draw, cx=620 + 470, cy=-160 + 470, r=470, color=halo, dot_r=7, spacing=19)
 
     kicker = font("condensed", 46)
-    date_font, date_lines = wrap_to_fit(
-        draw, day.strftime("%A"), "display", CANVAS[0] - SAFE_X * 2, 1, 150, 84
-    )
-    month_font = font("display", 128)
     count_font = font("sans_black", 40)
+    date_font = date_lines = None
+    if sub_label:
+        date_font, date_lines = wrap_to_fit(
+            draw, sub_label, "display", CANVAS[0] - SAFE_X * 2, 1, 150, 84
+        )
+    # Shrink to fit: a range like "SEP 4-6" or "MARCH 2027" is wider than the
+    # single date this line was sized for, and overflowing the safe margin
+    # would crop it in the profile grid. Measured BEFORE the block height is
+    # computed — sizing the block against a 128pt guess and then drawing a
+    # 64pt line left the whole composition floating above a dead gap.
+    month_font, month_lines = wrap_to_fit(
+        draw, big_label, "display", CANVAS[0] - SAFE_X * 2, 1, 128, 64
+    )
 
     # Measure first, then centre the whole block inside the profile-grid square.
-    # Laying it out top-down from a fixed offset left a large dead gap above the
-    # footer, and the block's height changes with the weekday name's size.
-    block_h = 60 + 100 + int(date_font.size * 1.05) + int(month_font.size * 1.15) + 58
+    sub_h = int(date_font.size * 1.05) if date_font else 0
+    block_h = 60 + 100 + sub_h + int(month_font.size * 1.15) + 58
     y = GRID_SAFE_TOP + max(40, (CANVAS[0] - block_h) // 2)
 
-    draw.text((SAFE_X, y), "TODAY IN", font=kicker, fill=POP_YELLOW)
+    draw.text((SAFE_X, y), kicker_top, font=kicker, fill=POP_YELLOW)
     y += 60
-    draw.text((SAFE_X, y), "EL PASO", font=kicker, fill=POP_YELLOW)
+    draw.text((SAFE_X, y), kicker_bottom, font=kicker, fill=POP_YELLOW)
     y += 100
 
-    draw.text((SAFE_X, y), date_lines[0], font=date_font, fill=PAPER)
-    y += int(date_font.size * 1.05)
+    if date_font and date_lines:
+        draw.text((SAFE_X, y), date_lines[0], font=date_font, fill=PAPER)
+        y += sub_h
 
-    # %-d is glibc-only and %d leaves a leading zero ("AUGUST 05"), so format
-    # the day number ourselves.
-    draw.text(
-        (SAFE_X, y), f"{day.strftime('%B')} {day.day}".upper(), font=month_font, fill=POP_YELLOW
-    )
+    draw.text((SAFE_X, y), month_lines[0], font=month_font, fill=POP_YELLOW)
     y += int(month_font.size * 1.15)
 
     # A few drawn dot accents ahead of the count line — the "some icons" ask,
@@ -756,6 +811,10 @@ def render_cover(day: date, event_count: int, handle: str = "epchisme.com") -> b
         draw.ellipse((dot_x, y + 14, dot_x + 14, y + 28), fill=c)
         dot_x += 22
     label = "thing happening" if event_count == 1 else "things happening"
+    if kind == "horizon":
+        label = "on sale now" if event_count == 1 else "on sale now"
+    elif kind in ("weekend", "monthly"):
+        label = "thing to do" if event_count == 1 else "things to do"
     draw.text((dot_x + 10, y), f"{event_count} {label}", font=count_font, fill=PAPER)
 
     # Footer pinned to the bottom of the grid-safe band, not the canvas, so it
@@ -1050,6 +1109,19 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
 
 _SLIDE_BUILDERS = (_slide_bold_block, _slide_full_bleed, _slide_split_panel)
 
+# Same three layouts, different ORDER per format, so a weekend post does not
+# open with the same composition as that morning's daily one. Reordering
+# rather than inventing new layouts keeps every format inside the same visual
+# system — four unrelated designs would read as four accounts.
+_BUILDERS_BY_KIND: dict[str, tuple] = {
+    # Identical tuple AND order -> byte-identical output to before this existed.
+    "digest": _SLIDE_BUILDERS,
+    "breaking": _SLIDE_BUILDERS,
+    "weekend": (_slide_full_bleed, _slide_bold_block, _slide_split_panel),
+    "monthly": (_slide_split_panel, _slide_bold_block, _slide_full_bleed),
+    "horizon": (_slide_full_bleed, _slide_split_panel, _slide_bold_block),
+}
+
 
 def render_event_slide(
     index: int,
@@ -1057,12 +1129,17 @@ def render_event_slide(
     row: dict[str, Any],
     photo: Optional[SourcePhoto],
     start_local: Optional[Any] = None,
+    kind: str = "digest",
 ) -> bytes:
     """`total` is accepted for signature stability but no longer rendered —
     the numbered "N / total" badge was removed; order is still implied by
-    chronological position, same as the caption."""
-    variant = _variant_for(index)
+    chronological position, same as the caption.
+
+    `kind` defaults to "digest" so every existing call site — and the whole
+    existing test suite — keeps producing byte-identical slides."""
+    builders = _BUILDERS_BY_KIND.get(kind, _SLIDE_BUILDERS)
+    variant = _variant_for(index, len(builders))
     accent = _accent_for(index)
     seed = _stable_seed(str(row.get("id") or row.get("title") or index))
-    img = _SLIDE_BUILDERS[variant](row, photo, start_local, accent, seed)
+    img = builders[variant](row, photo, start_local, accent, seed)
     return _encode(img)

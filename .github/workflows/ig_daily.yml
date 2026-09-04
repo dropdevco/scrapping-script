@@ -21,6 +21,17 @@ on:
     # expires the row unpublished. 13-23,0-2 covers 06:00-19:00 MST and
     # 07:00-20:00 MDT, with slack at both ends for Actions cron drift.
     - cron: "0,30 13-23,0-2 * * *"
+    # The posting calendar lives here, in cron, rather than in a second
+    # scheduling DSL inside Python. Actions is already the only scheduler in
+    # this system, and a Python-side calendar would be a second place to get
+    # DST and "which weekday is it in which timezone" wrong — while being
+    # invisible from the Actions UI, where a build that never fired looks
+    # exactly like one that fired and skipped.
+    #
+    # 18:00 UTC ~= 12:00 El Paso, so the draft lands around lunchtime with the
+    # whole afternoon left to review it before the 17:00 auto-approve.
+    - cron: "0 18 * * 4"    # Thursday -> the weekend ahead
+    - cron: "0 18 1 * *"    # the 1st   -> the month ahead
   workflow_dispatch:
     inputs:
       job:
@@ -28,6 +39,11 @@ on:
         default: "both"
         type: choice
         options: ["both", "build", "publish", "prune", "rebuild"]
+      kind:
+        description: "Which format to build"
+        default: "digest"
+        type: choice
+        options: ["digest", "weekend", "monthly", "horizon"]
       post_id:
         description: "Post to rebuild (only used by job=rebuild)"
         required: false
@@ -102,7 +118,9 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
         github.event.inputs.job != 'publish' && github.event.inputs.job != 'rebuild' ||
-      github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+      github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' ||
+      github.event_name == 'schedule' &&
+        (github.event.schedule == '0 18 * * 4' || github.event.schedule == '0 18 1 * *')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -130,8 +148,17 @@ jobs:
       - name: Prune old slides
         run: python -m scraper.social prune
 
+      # A scheduled run picks its format from the cron that fired it; a manual
+      # one takes the `kind` input. Note the daily digest is chained off
+      # scheduled-scrape via workflow_run and so never reaches this expression
+      # with a schedule event.
       - name: Build carousel
-        run: python -m scraper.social build
+        env:
+          KIND: >-
+            ${{ github.event.schedule == '0 18 * * 4' && 'weekend'
+             || github.event.schedule == '0 18 1 * *' && 'monthly'
+             || github.event.inputs.kind || 'digest' }}
+        run: python -m scraper.social build --kind "$KIND"
 
   # Fired by the Telegram webhook the moment someone drops an event or sends a
   # replacement photo, so the rebuilt carousel comes back in a minute rather
@@ -155,7 +182,8 @@ jobs:
 
   publish:
     if: >-
-      github.event_name == 'schedule' ||
+      github.event_name == 'schedule' &&
+        github.event.schedule != '0 18 * * 4' && github.event.schedule != '0 18 1 * *' ||
       github.event_name == 'workflow_dispatch' &&
         github.event.inputs.job != 'build' && github.event.inputs.job != 'rebuild'
     runs-on: ubuntu-latest

@@ -84,6 +84,60 @@ class Candidate:
     start_local: Optional[datetime]
 
 
+
+@dataclass(frozen=True)
+class ScoreProfile:
+    """Editorial weights for one post format.
+
+    A daily digest and a six-months-out roundup are looking for different
+    things: "what's on tonight" wants variety and evening starts, while "get
+    tickets now" wants the handful of events big enough to have gone on sale
+    already. Same scorer, different weights.
+
+    The defaults are EXACTLY the values score_event/choose used before this
+    existed, so the digest profile is a behavioural no-op.
+    """
+
+    category_multiplier: float = 3.0
+    ticket_bonus: float = 1.5
+    evening_bonus: float = 1.0
+    recurrence_penalty: float = 2.0
+    recently_posted_penalty: float = 2.5
+    # Horizon only: "a big event six months out" is, in this data, simply "an
+    # event with a ticket link". Nothing else in the schema separates a
+    # stadium show from a weekly open mic that happens to be scheduled far
+    # ahead, and without this the six-month post fills with the latter.
+    require_ticket_links: bool = False
+    max_per_venue: int = 2
+    max_per_category: int = 3
+
+
+PROFILES: dict[str, ScoreProfile] = {
+    # Byte-for-byte today's behaviour.
+    "digest": ScoreProfile(),
+    "breaking": ScoreProfile(),
+    # A weekend is browsed, not scanned: spread it across more venues and lean
+    # harder into evening things.
+    "weekend": ScoreProfile(evening_bonus=1.5, max_per_venue=1),
+    # A month of events is mostly recurring noise; only the ticketed ones are
+    # worth planning around.
+    "monthly": ScoreProfile(
+        ticket_bonus=3.0, recurrence_penalty=4.0, max_per_venue=1, max_per_category=2
+    ),
+    # Far-future: ticketed or nothing, and recurrence is fatal.
+    "horizon": ScoreProfile(
+        ticket_bonus=4.0,
+        recurrence_penalty=5.0,
+        recently_posted_penalty=0.0,
+        require_ticket_links=True,
+        max_per_venue=1,
+        max_per_category=2,
+    ),
+}
+
+DEFAULT_PROFILE = PROFILES["digest"]
+
+
 def candidates_from_rows(rows: list[dict[str, Any]], tz_name: str) -> list[Candidate]:
     """Wrap already-chosen rows as Candidates, preserving the given order.
 
@@ -118,6 +172,80 @@ def day_bounds(day: date, tz_name: str) -> tuple[str, str]:
     # so this window is 23h or 25h on those two days a year — which is correct.
     end = datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=tz)
     return start.isoformat(), end.isoformat()
+
+
+
+def _local_midnight(day: date, tz_name: str) -> datetime:
+    return datetime.combine(day, time(0, 0), tzinfo=ZoneInfo(tz_name))
+
+
+def _iso_pair(start: datetime, end: datetime) -> tuple[str, str]:
+    return start.isoformat(), end.isoformat()
+
+
+def weekend_bounds(day: date, tz_name: str) -> tuple[str, str]:
+    """Friday 00:00 -> Monday 00:00 local, for the weekend on or after `day`.
+
+    "On or after" so a Thursday build covers the weekend about to start, which
+    is when the post is useful; running it on the Saturday would cover the
+    weekend already half over.
+    """
+    ahead = (4 - day.weekday()) % 7  # 4 = Friday
+    friday = day + timedelta(days=ahead)
+    start = _local_midnight(friday, tz_name)
+    end = _local_midnight(friday + timedelta(days=3), tz_name)
+    return _iso_pair(start, end)
+
+
+def month_bounds(day: date, tz_name: str) -> tuple[str, str]:
+    """`day`'s own local calendar month, half-open."""
+    first = day.replace(day=1)
+    nxt = (first + timedelta(days=32)).replace(day=1)
+    return _iso_pair(_local_midnight(first, tz_name), _local_midnight(nxt, tz_name))
+
+
+def horizon_bounds(
+    day: date, tz_name: str, *, months_out: int = 6, span_days: int = 60
+) -> tuple[str, str]:
+    """A window centred `months_out` ahead — the "book this now" post.
+
+    Approximated as 30-day months on purpose: the exact boundary carries no
+    editorial meaning (nobody cares whether a show falls on the 5th or the 8th
+    of the target month), and calendar-exact arithmetic here would only add a
+    dependency and an edge case at year end.
+    """
+    start_day = day + timedelta(days=30 * months_out)
+    return _iso_pair(
+        _local_midnight(start_day, tz_name),
+        _local_midnight(start_day + timedelta(days=span_days), tz_name),
+    )
+
+
+# Every entry returns the same (start_iso, end_iso) shape, so the builder can
+# look one up by kind and stay ignorant of which format it is rendering.
+BOUNDS_FOR_KIND = {
+    "digest": day_bounds,
+    "breaking": day_bounds,
+    "weekend": weekend_bounds,
+    "monthly": month_bounds,
+    "horizon": horizon_bounds,
+}
+
+
+def period_key(kind: str, day: date, tz_name: str) -> Optional[str]:
+    """The bucket a non-daily post occupies, enforcing one-per-period.
+
+    Derived from the WINDOW, not from post_date: a weekend digest built on
+    Thursday belongs to that weekend's bucket, not to Thursday's.
+    """
+    if kind in ("digest", "breaking"):
+        return None  # the daily post has its own (post_date, slot) index
+    start_iso, _ = BOUNDS_FOR_KIND[kind](day, tz_name)
+    start = datetime.fromisoformat(start_iso).date()
+    if kind == "weekend":
+        year, week, _ = start.isocalendar()
+        return f"{year}-W{week:02d}"
+    return f"{start.year}-{start.month:02d}"
 
 
 def _strip_occurrence(title: str) -> str:
@@ -202,15 +330,28 @@ def score_event(
     recurrence_count: int = 0,
     recently_posted: bool = False,
     image_short_side: Optional[int] = None,
+    profile: Optional[ScoreProfile] = None,
+    category_bias: Optional[dict[str, float]] = None,
 ) -> float:
     """Higher is more feed-worthy. Weights are tuned so a ticketed evening
-    concert comfortably outranks a weekday-morning library storytime."""
-    score = 3.0 * _category_weight(row)
+    concert comfortably outranks a weekday-morning library storytime.
+
+    `category_bias` is the seam for feeding engagement data back into
+    selection. Deliberately unused for now: a carousel is one media object, so
+    Instagram reports no per-slide performance, and crediting a post's reach to
+    one of nine categories is a guess. Revisit once there are >=60 published
+    posts with t24 metrics — before that, any weighting fits noise.
+    """
+    p = profile or DEFAULT_PROFILE
+    weight = _category_weight(row)
+    if category_bias:
+        weight *= max(category_bias.get(c, 1.0) for c in _categories(row)) if _categories(row) else 1.0
+    score = p.category_multiplier * weight
 
     if row.get("ticket_links"):
-        score += 1.5
+        score += p.ticket_bonus
     if start_local is not None and 17 <= start_local.hour <= 23:
-        score += 1.0
+        score += p.evening_bonus
 
     if image_short_side is not None:
         score += 1.0 if image_short_side >= 1080 else 0.4
@@ -220,9 +361,9 @@ def score_event(
         score += 0.6
 
     # A thing that happens every weekday is background noise, not news.
-    score -= 2.0 * min(1.0, recurrence_count / 10.0)
+    score -= p.recurrence_penalty * min(1.0, recurrence_count / 10.0)
     if recently_posted:
-        score -= 2.5
+        score -= p.recently_posted_penalty
     return score
 
 
@@ -232,9 +373,10 @@ def choose(
     tz_name: str,
     recent_keys: Optional[set[str]] = None,
     max_slides: int = 9,
-    max_per_venue: int = 2,
-    max_per_category: int = 3,
+    max_per_venue: Optional[int] = None,
+    max_per_category: Optional[int] = None,
     image_sizes: Optional[dict[str, int]] = None,
+    profile: Optional[ScoreProfile] = None,
 ) -> list[Candidate]:
     """Rank, collapse repeats, apply diversity caps, return in TIME order.
 
@@ -244,6 +386,11 @@ def choose(
     """
     recent_keys = recent_keys or set()
     image_sizes = image_sizes or {}
+    p = profile or DEFAULT_PROFILE
+    # Explicit arguments still win, so existing callers are unaffected; the
+    # profile only supplies what they leave unset.
+    max_per_venue = p.max_per_venue if max_per_venue is None else max_per_venue
+    max_per_category = p.max_per_category if max_per_category is None else max_per_category
 
     # How often each recurring thing shows up in the pool tells us whether it's
     # a one-off or wallpaper, without another database round trip.
@@ -256,6 +403,11 @@ def choose(
     seen_keys: set[str] = set()
     for row in rows:
         if not is_postable(row):
+            continue
+        if p.require_ticket_links and not row.get("ticket_links"):
+            # Horizon only. Six months out, an event without a ticket link is
+            # almost always a recurring fixture someone scheduled far ahead,
+            # not something worth planning around.
             continue
         key = dedupe_key(row)
         if key in seen_keys:
@@ -272,6 +424,7 @@ def choose(
                     recurrence_count=recurrence.get(key, 0),
                     recently_posted=key in recent_keys,
                     image_short_side=image_sizes.get(str(row.get("id"))),
+                    profile=p,
                 ),
                 start_local=start_local,
             )

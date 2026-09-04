@@ -72,6 +72,44 @@ _OPENERS = [
     ("EL PASO'S GOT PLANS", "🔥"),
 ]
 
+# Per-format openers. The daily list is unchanged and still keyed the same
+# way, so a digest caption is identical to what it was before formats existed.
+_OPENERS_BY_KIND: dict[str, list[tuple[str, str]]] = {
+    "digest": _OPENERS,
+    "breaking": [("JUST ANNOUNCED", "🚨"), ("HEADS UP, EL PASO", "📣")],
+    "weekend": [
+        ("YOUR WEEKEND, SORTED", "🎉"),
+        ("EL PASO THIS WEEKEND", "🌵"),
+        ("NO EXCUSES THIS WEEKEND", "🔥"),
+    ],
+    "monthly": [
+        ("THE MONTH AHEAD", "🗓"),
+        ("EL PASO, THIS MONTH", "📅"),
+        ("MARK YOUR CALENDAR", "✍️"),
+    ],
+    "horizon": [
+        ("SAVE THE DATE", "🎟"),
+        ("TICKETS ARE OUT", "🎫"),
+        ("PLAN AHEAD, EL PASO", "🔭"),
+    ],
+}
+
+# The line under the header. "worth leaving the couch for" reads wrong on a
+# post about a concert six months out.
+_SUBHEADS: dict[str, str] = {
+    "digest": "El Paso's not sleeping on this one — {n} thing{s} worth leaving the couch for:",
+    "breaking": "{n} thing{s} just landed:",
+    "weekend": "{n} thing{s} to get you out of the house this weekend:",
+    "monthly": "{n} thing{s} worth planning around this month:",
+    "horizon": "{n} thing{s} already on sale — get in early:",
+}
+
+_KIND_HASHTAGS: dict[str, list[str]] = {
+    "weekend": ["#elpasoweekend", "#weekendplans"],
+    "monthly": ["#elpasothismonth", "#elpasoevents"],
+    "horizon": ["#savethedate", "#elpasotickets"],
+}
+
 
 def _time_label(start_local: Optional[Any]) -> str:
     # Suppressed rather than guessed when the stored time isn't credible —
@@ -86,8 +124,8 @@ def _time_label(start_local: Optional[Any]) -> str:
     return f"{hour}:{minute}{suffix}" if minute != "00" else f"{hour}{suffix}"
 
 
-def _hashtags(rows: list[dict[str, Any]]) -> list[str]:
-    tags = list(_CORE_HASHTAGS)
+def _hashtags(rows: list[dict[str, Any]], kind: str = "digest") -> list[str]:
+    tags = list(_CORE_HASHTAGS) + _KIND_HASHTAGS.get(kind, [])
     for row in rows:
         for cat in row.get("categories") or []:
             tag = _CATEGORY_HASHTAGS.get(cat)
@@ -125,23 +163,29 @@ def build_caption(
     *,
     site: str = "epchisme.com",
     max_caption: int = MAX_CAPTION,
+    kind: str = "digest",
+    period_label: Optional[str] = None,
 ) -> str:
     """Assemble the caption, degrading gracefully if it runs long.
 
     `picked` is a list of selection.Candidate, already in chronological order.
+    `kind` defaults to "digest", so every existing call site produces exactly
+    the caption it did before formats existed.
     """
-    opener, flourish = _OPENERS[day.toordinal() % len(_OPENERS)]
-    header = f"{opener} {flourish} — {_date_label(day)}"
+    openers = _OPENERS_BY_KIND.get(kind, _OPENERS)
+    # Keyed on the ordinal rather than randomised, so re-rendering the same
+    # post yields the same caption — which is what lets a rebuild after a
+    # dropped event stay stable instead of rewriting the opener too.
+    opener, flourish = openers[day.toordinal() % len(openers)]
+    header = f"{opener} {flourish} — {period_label or _date_label(day)}"
     n = len(picked)
     if n == 0:
         subhead = "Nothing on the radar right now — check back later."
     else:
-        subhead = (
-            f"El Paso's not sleeping on this one — {n} thing{'s' if n != 1 else ''} "
-            "worth leaving the couch for:"
-        )
+        template = _SUBHEADS.get(kind, _SUBHEADS["digest"])
+        subhead = template.format(n=n, s="s" if n != 1 else "")
     footer = f"\n\nFull list + map → {site}"
-    tags = _hashtags([c.row for c in picked])
+    tags = _hashtags([c.row for c in picked], kind=kind)
 
     # Progressive degradation, cheapest loss first: venue suffixes, then title
     # length, then whole lines, then optional hashtags.

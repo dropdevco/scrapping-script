@@ -1,6 +1,6 @@
 """CLI for the daily Instagram carousel.
 
-    python -m scraper.social build   [--date YYYY-MM-DD] [--dry-run] [--out DIR]
+    python -m scraper.social build   [--date YYYY-MM-DD] [--kind KIND] [--dry-run] [--out DIR]
     python -m scraper.social apply-edits [--post-id UUID] [--dry-run]
     python -m scraper.social autoapprove [--date YYYY-MM-DD] [--dry-run]
     python -m scraper.social publish [--date YYYY-MM-DD] [--dry-run]
@@ -85,7 +85,9 @@ def _parse_slots(raw: str, default_hour: int) -> list[tuple[Optional[str], int]]
 
 
 # ── build ──────────────────────────────────────────────────────────────────────
-async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> int:
+async def build(
+    day: Optional[date], dry_run: bool, out_dir: Optional[str], kind: str = "digest"
+) -> int:
     tz_name = settings.ig_timezone
     day = day or _today(tz_name)
     storage = Storage()
@@ -93,10 +95,18 @@ async def build(day: Optional[date], dry_run: bool, out_dir: Optional[str]) -> i
         log.error("Supabase is not configured; nothing to do.")
         return 1
 
-    slots = _parse_slots(settings.ig_digest_slots, settings.ig_suggested_publish_hour)
+    # Slots split one DAY into several digests; they have no meaning for a
+    # weekend or monthly roundup, which is one post per period by definition.
+    if kind == "digest":
+        slots = _parse_slots(settings.ig_digest_slots, settings.ig_suggested_publish_hour)
+    else:
+        slots = [(None, settings.ig_suggested_publish_hour)]
+
     rc = 0
     for slot_name, slot_hour in slots:
-        rc |= await _build_one(storage, day, tz_name, dry_run, out_dir, slot_name, slot_hour)
+        rc |= await _build_one(
+            storage, day, tz_name, dry_run, out_dir, slot_name, slot_hour, kind
+        )
     return rc
 
 
@@ -108,20 +118,31 @@ async def _build_one(
     out_dir: Optional[str],
     slot_name: Optional[str],
     slot_hour: int,
+    kind: str = "digest",
 ) -> int:
-    label = f" [{slot_name}]" if slot_name else ""
-    start_iso, end_iso = selection.day_bounds(day, tz_name)
-    log.info("building carousel for %s%s (%s .. %s)", day, label, start_iso, end_iso)
+    label = f" [{slot_name or kind}]"
+    bounds = selection.BOUNDS_FOR_KIND.get(kind, selection.day_bounds)
+    start_iso, end_iso = bounds(day, tz_name)
+    profile = selection.PROFILES.get(kind, selection.DEFAULT_PROFILE)
+    period = selection.period_key(kind, day, tz_name)
+    log.info("building %s carousel for %s%s (%s .. %s)", kind, day, label, start_iso, end_iso)
 
-    rows = await storage.query_events_for_day(CITY, start_iso, end_iso)
-    log.info("%d approved El Paso event(s) today%s", len(rows), label)
+    rows = await storage.query_events_for_range(CITY, start_iso, end_iso)
+    log.info("%d approved El Paso event(s) in window%s", len(rows), label)
     if not rows:
-        return await _skip(storage, day, "no events for this date", dry_run, slot_name)
+        return await _skip(storage, day, "no events in this window", dry_run, slot_name, kind)
 
     # Recurrence suppression spans this window regardless of slot, so a later
     # slot the same day naturally down-ranks whatever an earlier slot already
     # published — no slot-aware selection logic needed.
-    recent_keys = await storage.recent_slide_keys((day - timedelta(days=14)).isoformat())
+    # Suppression is scoped to this kind's own history: a monthly roundup
+    # SHOULD repeat what the daily posts covered, which is what makes it a
+    # roundup. The lookback is longer for the slower formats, since "we
+    # already showed this" means a different span for a weekly post.
+    lookback = {"digest": 14, "breaking": 14, "weekend": 35, "monthly": 120, "horizon": 200}
+    recent_keys = await storage.recent_slide_keys(
+        (day - timedelta(days=lookback.get(kind, 14))).isoformat(), kinds=(kind,)
+    )
 
     # Rank first, then fetch photos in rank order — so we only pay for
     # downloads we're likely to use. A dead/missing photo no longer drops the
@@ -129,7 +150,7 @@ async def _build_one(
     # so the event keeps its slot with photo=None rather than losing it to a
     # lower-ranked candidate purely for lacking a source image.
     ranked = selection.choose(
-        rows, tz_name=tz_name, recent_keys=recent_keys, max_slides=len(rows)
+        rows, tz_name=tz_name, recent_keys=recent_keys, max_slides=len(rows), profile=profile
     )
 
     picked: list[selection.Candidate] = []
@@ -151,6 +172,7 @@ async def _build_one(
             f"only {len(picked)} usable slide(s), minimum is {settings.ig_min_slides}",
             dry_run,
             slot_name,
+            kind,
         )
 
     # Re-order to chronological for the reader, keeping each photo with its
@@ -162,12 +184,21 @@ async def _build_one(
     picked = [c for c, _ in paired]
     photos = [p for _, p in paired]
 
+    period_label = _period_label(kind, start_iso, end_iso)
     total = len(picked) + 1
-    jpegs = [render.render_cover(day, len(picked), settings.ig_handle)]
+    jpegs = [
+        render.render_cover(
+            day, len(picked), settings.ig_handle, kind=kind, period_label=period_label
+        )
+    ]
     for i, (cand, photo) in enumerate(zip(picked, photos, strict=True), start=2):
-        jpegs.append(render.render_event_slide(i, total, cand.row, photo, cand.start_local))
+        jpegs.append(
+            render.render_event_slide(i, total, cand.row, photo, cand.start_local, kind=kind)
+        )
 
-    text = caption_mod.build_caption(day, picked, site=settings.ig_handle)
+    text = caption_mod.build_caption(
+        day, picked, site=settings.ig_handle, kind=kind, period_label=period_label
+    )
     log.info("rendered %d slide(s), caption %d chars%s", len(jpegs), len(text), label)
 
     if out_dir:
@@ -192,8 +223,9 @@ async def _build_one(
         {
             "post_date": day.isoformat(),
             "status": "draft",
-            "kind": "digest",
+            "kind": kind,
             "slot": slot_name,
+            "period_key": period,
             "event_ids": [str(c.row["id"]) for c in picked],
             "slide_keys": [c.key for c in picked],
             "caption": text,
@@ -245,21 +277,50 @@ async def _build_one(
 
 
 async def _skip(
-    storage: Storage, day: date, reason: str, dry_run: bool, slot_name: Optional[str] = None
+    storage: Storage,
+    day: date,
+    reason: str,
+    dry_run: bool,
+    slot_name: Optional[str] = None,
+    kind: str = "digest",
 ) -> int:
-    label = f" [{slot_name}]" if slot_name else ""
+    label = f" [{slot_name or kind}]"
     log.info("skipping %s%s: %s", day, label, reason)
     if not dry_run and storage.enabled:
+        # No period_key: 'skipped' is terminal and outside the live-period
+        # unique index, so a later successful build of the same weekend is not
+        # blocked by an earlier thin one.
         await storage.create_ig_draft(
             {
                 "post_date": day.isoformat(),
                 "status": "skipped",
-                "kind": "digest",
+                "kind": kind,
                 "slot": slot_name,
                 "error": reason,
             }
         )
     return 0
+
+
+def _period_label(kind: str, start_iso: str, end_iso: str) -> Optional[str]:
+    """The headline date line for a format's cover and caption.
+
+    None for the daily post, which keeps its existing "MONTH D" default —
+    passing a label there would change output that is currently pinned by
+    tests and by the look of the account.
+    """
+    start = datetime.fromisoformat(start_iso).date()
+    # end is exclusive; the last day actually covered is the one before it.
+    last = datetime.fromisoformat(end_iso).date() - timedelta(days=1)
+    if kind == "weekend":
+        if start.month == last.month:
+            return f"{start.strftime('%b')} {start.day}-{last.day}".upper()
+        return f"{start.strftime('%b')} {start.day} - {last.strftime('%b')} {last.day}".upper()
+    if kind == "monthly":
+        return start.strftime("%B").upper()
+    if kind == "horizon":
+        return f"{start.strftime('%B')} {start.year}".upper()
+    return None
 
 
 # ── apply-edits ────────────────────────────────────────────────────────────────
@@ -1034,6 +1095,12 @@ def main() -> int:
     b.add_argument("--date")
     b.add_argument("--dry-run", action="store_true")
     b.add_argument("--out", help="also write slides to this directory")
+    b.add_argument(
+        "--kind",
+        default="digest",
+        choices=sorted(selection.BOUNDS_FOR_KIND),
+        help="which format to build (default: the daily digest)",
+    )
 
     p = sub.add_parser("publish", help="publish approved posts")
     p.add_argument("--date")
@@ -1071,7 +1138,7 @@ def main() -> int:
     day = date.fromisoformat(args.date) if getattr(args, "date", None) else None
 
     if args.cmd == "build":
-        return asyncio.run(build(day, args.dry_run, args.out))
+        return asyncio.run(build(day, args.dry_run, args.out, args.kind))
     if args.cmd == "publish":
         return asyncio.run(publish(day, args.dry_run))
     if args.cmd == "apply-edits":

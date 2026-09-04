@@ -28,26 +28,29 @@ a checklist, written so the next setup doesn't re-derive any of it.
    **Gotcha:** if you call this before step 2's message lands, you get `{"result":[]}`
    — not an error, just nothing pending yet. Send the message, then retry immediately.
    The `chat.id` in the response is what goes in `TELEGRAM_CHAT_ID`.
-4. **Registering the webhook** (once the receiving endpoint is deployed — see Part 3):
+4. **Registering the webhook** (once the receiving endpoint is deployed — see Part 3).
+   Set `SITE_BASE_URL` and `TELEGRAM_WEBHOOK_SECRET`, then:
    ```bash
-   curl -s -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
-     -d "url=https://<host>/api/telegram/webhook" \
-     -d "secret_token=<a random string you generate — separate from the bot token>"
+   python -m scraper.social telegram-webhook --set
    ```
-   Verify with `getWebhookInfo` — a healthy registration shows
-   `"pending_update_count":0` and no `last_error_message`.
+   Inspect an existing registration with `python -m scraper.social telegram-webhook`
+   (no flag). A healthy one shows `pending_update_count: 0` and no `last_error_message`.
 
-   **Gotcha — the single most time-costly one:** if the target domain has a bare-domain
-   → `www` (or any other) redirect, `setWebhook` still accepts the bare URL, but
-   Telegram **does not follow redirects when delivering webhooks**. It'll show a
-   `"last_error_message":"Wrong response from the webhook: 308 Permanent Redirect"`
-   and silently never deliver anything. Before registering, always confirm the exact
-   URL resolves without a redirect:
-   ```bash
-   curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" -X POST "https://<candidate-host>/api/telegram/webhook"
-   ```
-   If that's a 3xx, register the redirect TARGET instead, not the URL you assumed was
-   canonical.
+   **Gotcha — the single most time-costly one, now automated:** if the target domain
+   has a bare-domain → `www` (or any other) redirect, Telegram's `setWebhook` accepts
+   the bare URL, but Telegram **does not follow redirects when delivering webhooks**.
+   You get `"last_error_message":"Wrong response from the webhook: 308 Permanent
+   Redirect"` and silently never receive anything. `--set` preflights the URL and
+   refuses to register a redirecting one, naming the target it should have used
+   instead. `SITE_BASE_URL` must therefore be the FINAL host, `www` included.
+
+   **Keep it healthy.** `python -m scraper.social check-telegram` verifies the bot is
+   live, that the registered URL matches `SITE_BASE_URL`, that there is no last
+   delivery error, and that no backlog is piling up. It runs in the `preflight` job of
+   `ig_daily.yml` on every scheduled run and **exits non-zero** when something is
+   wrong — deliberately, because every send in this pipeline is best-effort and a dead
+   bot is otherwise indistinguishable from a quiet week. It reports over email
+   (Resend), since an alert delivered over the broken channel is not an alert.
 5. **Webhook auth is two independent checks**, not the bot token itself:
    - Telegram echoes the `secret_token` from step 4 back in an
      `X-Telegram-Bot-Api-Secret-Token` header on every delivery — verify it server-side

@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 from ..core.config import settings
 from ..core.http import HttpClient
-from . import slides_store
+from . import slides_store, telegram
 
 log = logging.getLogger("scraper.social.notify")
 
@@ -45,9 +45,8 @@ async def notify_alert(http: HttpClient, text: str) -> None:
     if not (settings.telegram_bot_token and settings.telegram_chat_id):
         return
     try:
-        await http.post_json(
-            f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
-            json={"chat_id": settings.telegram_chat_id, "text": text},
+        await telegram.call(
+            http, "sendMessage", {"chat_id": settings.telegram_chat_id, "text": text}
         )
     except Exception as exc:  # noqa: BLE001
         log.error("alert notify failed: %s", exc)
@@ -118,43 +117,93 @@ async def _notify_telegram(
 ) -> None:
     if not (settings.telegram_bot_token and settings.telegram_chat_id):
         return
-    base = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+
+    # Two INDEPENDENT sends, and the order matters. The media group is a
+    # preview; the message below it carries the buttons that are the only way
+    # to act on this draft from a phone. They used to share one try block,
+    # which meant a single unreachable image URL — Meta and Telegram both
+    # fetch these server-side, so any Supabase hiccup does it — swallowed the
+    # buttons too, and the failure looked identical to "the bot went quiet".
+    preview_failed = False
     try:
         urls = slides_store.signed_urls(
             storage_client, settings.ig_slides_bucket, slide_paths[:TELEGRAM_MAX_MEDIA_GROUP]
         )
         media = [{"type": "photo", "media": u} for u in urls]
-        await http.post_json(
-            f"{base}/sendMediaGroup", json={"chat_id": settings.telegram_chat_id, "media": media}
+        await telegram.call(
+            http, "sendMediaGroup", {"chat_id": settings.telegram_chat_id, "media": media}
         )
+    except Exception as exc:  # noqa: BLE001
+        preview_failed = True
+        log.error("telegram slide preview failed (buttons still sent): %s", exc)
 
-        approve_label = "✅ Approve"
-        if scheduled_for:
-            approve_label += f" for {_format_local_time(scheduled_for, settings.ig_timezone)}"
+    try:
+        when = _format_local_time(scheduled_for, settings.ig_timezone) if scheduled_for else None
         buttons = [
             [
-                {"text": approve_label, "callback_data": f"apv:{post_id}"},
-                {"text": "⚡ Publish now", "callback_data": f"now:{post_id}"},
+                {"text": "✅ Post now", "callback_data": f"now:{post_id}"},
+                {"text": "🕗 Tomorrow", "callback_data": f"pos:{post_id}"},
             ],
-            [{"text": "❌ Reject", "callback_data": f"rej:{post_id}"}],
+            [
+                {"text": "✏️ Caption", "callback_data": f"cap:{post_id}"},
+                {"text": "🗑 Cancel", "callback_data": f"rej:{post_id}"},
+            ],
         ]
         if review_url:
-            buttons[-1].append({"text": "\U0001f50d Full preview", "url": review_url})
+            buttons.append([{"text": "\U0001f50d Full preview", "url": review_url}])
 
         slot_label = f" — {slot.title()}" if slot else ""
+        # State the opt-out contract in the message itself. A post that ships
+        # unless you stop it, announced by a message whose main button says
+        # "Approve", trains exactly the wrong habit.
+        if settings.ig_auto_approve and when:
+            lead = f"Goes out automatically at {when} unless you cancel."
+        elif when:
+            lead = f"Waiting for approval — suggested for {when}."
+        else:
+            lead = "Waiting for approval."
+        head = f"Today in El Paso{slot_label} — {day.isoformat()}\n{lead}"
+        if preview_failed:
+            head += "\n⚠️ Slide preview failed to send; open the full preview to see them."
         # Plain text, no parse_mode: event titles routinely contain _ * [ ] —
         # any of which breaks Telegram's Markdown parser and drops the message.
-        text = f"Today in El Paso{slot_label} — {day.isoformat()}\n\n{caption[:3500]}"
-        await http.post_json(
-            f"{base}/sendMessage",
-            json={
+        await telegram.call(
+            http,
+            "sendMessage",
+            {
                 "chat_id": settings.telegram_chat_id,
-                "text": text,
+                "text": f"{head}\n\n{caption[:3500]}",
                 "reply_markup": {"inline_keyboard": buttons},
             },
         )
     except Exception as exc:  # noqa: BLE001
         log.error("telegram notify failed: %s", exc)
+
+
+async def send_email(http: HttpClient, subject: str, html: str) -> bool:
+    """Best-effort Resend send. Returns whether it went out.
+
+    Extracted so the "Telegram is broken" alert has somewhere to go that isn't
+    Telegram — an alert delivered over the channel it is reporting on is not
+    an alert.
+    """
+    if not (settings.resend_api_key and settings.notify_admin_email):
+        return False
+    try:
+        await http.post_json(
+            "https://api.resend.com/emails",
+            json={
+                "from": settings.notify_email_from,
+                "to": [settings.notify_admin_email],
+                "subject": subject,
+                "html": html,
+            },
+            headers={"Authorization": f"Bearer {settings.resend_api_key}"},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.error("email notify failed: %s", exc)
+        return False
 
 
 async def _notify_email(
@@ -171,27 +220,15 @@ async def _notify_email(
             "IG_NOTIFY_SECRET or SITE_BASE_URL unset — skipping email, no review link to send"
         )
         return
-    try:
-        slot_label = f" — {slot.title()}" if slot else ""
-        when = (
-            f" Suggested to go out around {_format_local_time(scheduled_for, settings.ig_timezone)}."
-            if scheduled_for
-            else ""
-        )
-        html = (
-            f"<p>Today's Instagram carousel{slot_label} is ready to review.{when}</p>"
-            f'<p><a href="{review_url}">Review &amp; approve — {day.isoformat()}</a></p>'
-            f"<p>Link expires in {settings.ig_notify_ttl_hours}h.</p>"
-        )
-        await http.post_json(
-            "https://api.resend.com/emails",
-            json={
-                "from": settings.notify_email_from,
-                "to": [settings.notify_admin_email],
-                "subject": f"Chisme IG post ready{slot_label} — {day.isoformat()}",
-                "html": html,
-            },
-            headers={"Authorization": f"Bearer {settings.resend_api_key}"},
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.error("email notify failed: %s", exc)
+    slot_label = f" — {slot.title()}" if slot else ""
+    when = (
+        f" Suggested to go out around {_format_local_time(scheduled_for, settings.ig_timezone)}."
+        if scheduled_for
+        else ""
+    )
+    html = (
+        f"<p>Today's Instagram carousel{slot_label} is ready to review.{when}</p>"
+        f'<p><a href="{review_url}">Review &amp; approve — {day.isoformat()}</a></p>'
+        f"<p>Link expires in {settings.ig_notify_ttl_hours}h.</p>"
+    )
+    await send_email(http, f"Chisme IG post ready{slot_label} — {day.isoformat()}", html)

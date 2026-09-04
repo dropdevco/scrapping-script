@@ -124,6 +124,21 @@ class Settings:
         # happening tonight" without requiring real engagement data, which a
         # brand-new account doesn't have yet.
         self.ig_suggested_publish_hour = _int("IG_SUGGESTED_PUBLISH_HOUR", 17)
+        # Opt-out posting. With this on, a draft nobody touched by its
+        # auto_approve_at deadline is approved automatically and ships on the
+        # next publish sweep — silence is consent. It exists because opt-in
+        # posting did not survive contact with a busy human: over one sample
+        # month, 17 of 25 built drafts were never approved and simply expired
+        # unseen, which is why the account posted on five scattered days.
+        #
+        # NOT the same switch as IG_AUTOPOST above, and the difference is the
+        # whole point: IG_AUTOPOST publishes at BUILD time and skips the
+        # Telegram ping entirely, so there is no review window at all. This
+        # keeps the ping and the all-day window, and only removes the
+        # requirement that someone tap Approve. If IG_AUTOPOST is on, the post
+        # is already gone before this is ever consulted.
+        self.ig_auto_approve = _bool("IG_AUTO_APPROVE", False)
+        self.ig_auto_approve_hour = _int("IG_AUTO_APPROVE_HOUR", self.ig_suggested_publish_hour)
         # Empty means today's single-unnamed-digest behavior. Set to e.g.
         # "morning:11,evening:18" to run two independently-scheduled digests
         # a day — each gets its own name (stored as ig_posts.slot) and
@@ -144,6 +159,12 @@ class Settings:
             c.strip() for c in (os.getenv("TELEGRAM_CHAT_ID") or "").split(",") if c.strip()
         ]
         self.telegram_chat_id = self.telegram_chat_ids[0] if self.telegram_chat_ids else None
+        # Echoed back by Telegram in the X-Telegram-Bot-Api-Secret-Token header
+        # on every delivery, and checked by the Next.js webhook. Python needs it
+        # only to register the webhook (`telegram-webhook --set`) — but it must
+        # be the SAME value the webhook host has, or every delivery 401s with no
+        # outward sign beyond getWebhookInfo's last_error_message.
+        self.telegram_webhook_secret = _clean(os.getenv("TELEGRAM_WEBHOOK_SECRET"))
         self.resend_api_key = _clean(os.getenv("RESEND_API_KEY"))
         self.notify_admin_email = _clean(os.getenv("NOTIFY_ADMIN_EMAIL"))
         self.notify_email_from = (

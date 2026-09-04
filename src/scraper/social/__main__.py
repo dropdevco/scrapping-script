@@ -1,6 +1,7 @@
 """CLI for the daily Instagram carousel.
 
     python -m scraper.social build   [--date YYYY-MM-DD] [--dry-run] [--out DIR]
+    python -m scraper.social autoapprove [--date YYYY-MM-DD] [--dry-run]
     python -m scraper.social publish [--date YYYY-MM-DD] [--dry-run]
     python -m scraper.social prune
 """
@@ -24,11 +25,16 @@ from . import caption as caption_mod
 from . import notify as notify_mod
 from . import publish as publish_mod
 from . import render, selection, slides_store
+from . import telegram as telegram_mod
 from .imaging import fetch_photo
 
 log = logging.getLogger("scraper.social")
 
 CITY = "El Paso"
+
+# Publish attempts before a post is given up on. Meta intermittently
+# refuses to fetch slide URLs, and one bad sweep should not cost the day.
+MAX_PUBLISH_ATTEMPTS = 3
 
 
 def _today(tz_name: str) -> date:
@@ -170,6 +176,11 @@ async def _build_one(
         return 0
 
     scheduled_for = _suggested_schedule(day, tz_name, slot_hour)
+    # Reusing _suggested_schedule gives the deadline the same never-in-the-past
+    # clamp: a draft built late (a re-run, a slow scrape) gets a deadline of
+    # "now" and ships on the next sweep, rather than sitting until tomorrow
+    # when the staleness guard would expire it unpublished.
+    auto_approve_at = _suggested_schedule(day, tz_name, settings.ig_auto_approve_hour)
     draft = await storage.create_ig_draft(
         {
             "post_date": day.isoformat(),
@@ -180,6 +191,9 @@ async def _build_one(
             "slide_keys": [c.key for c in picked],
             "caption": text,
             "scheduled_for": scheduled_for,
+            "auto_approve_at": auto_approve_at,
+            "window_start": start_iso,
+            "window_end": end_iso,
         }
     )
     if draft is None:
@@ -211,7 +225,7 @@ async def _build_one(
                 day=day,
                 slide_paths=paths,
                 caption=text,
-                scheduled_for=scheduled_for,
+                scheduled_for=auto_approve_at if settings.ig_auto_approve else scheduled_for,
                 slot=slot_name,
             )
 
@@ -238,6 +252,82 @@ async def _skip(
                 "error": reason,
             }
         )
+    return 0
+
+
+# ── autoapprove ────────────────────────────────────────────────────────────────
+async def autoapprove(day: Optional[date] = None, dry_run: bool = False) -> int:
+    """Flip untouched drafts whose deadline has passed to 'approved'.
+
+    This is the whole of opt-out posting. The morning build files a draft and
+    pings Telegram; the human has all day to cancel, postpone or edit it; and
+    if the deadline arrives with the row still sitting in 'draft', silence is
+    read as consent.
+
+    Runs as a step immediately before `publish` in the same sweep, rather than
+    on its own 17:00 cron. Two reasons: a post crossing its deadline then ships
+    in that same run instead of up to 30 minutes later, and there is no second
+    schedule to keep DST-correct — the deadline is a stored timestamptz, so the
+    comparison is right in both halves of the year no matter when the sweep
+    happens to fire.
+    """
+    if not settings.ig_auto_approve:
+        log.info("IG_AUTO_APPROVE is off — leaving drafts for a human to approve")
+        return 0
+    if settings.ig_autopost:
+        # Nothing to do: IG_AUTOPOST already published at build time, so there
+        # is no draft to age out. Say so rather than looking like a no-op.
+        log.warning("IG_AUTOPOST is on, so posts never reach 'draft' — autoapprove is inert")
+        return 0
+
+    tz_name = settings.ig_timezone
+    today = _today(tz_name)
+    storage = Storage()
+    if not storage.enabled:
+        log.error("Supabase is not configured; nothing to do.")
+        return 1
+
+    pending = await storage.drafts_past_deadline()
+    if day:
+        pending = [r for r in pending if str(r.get("post_date")) == day.isoformat()]
+    if not pending:
+        log.info("no drafts past their deadline")
+        return 0
+
+    approved = 0
+    for row in pending:
+        post_id = str(row["id"])
+        post_date = date.fromisoformat(str(row["post_date"]))
+
+        if post_date < today:
+            # Never resurrect a stale draft. _publish_one would only expire it
+            # a moment later anyway ("TODAY IN EL PASO — Sep 1" published on
+            # Sep 3, every event already over), and leaving it in 'draft'
+            # means the sweep re-examines it forever.
+            log.info("draft %s is dated %s, today is %s — expiring", post_id, post_date, today)
+            if not dry_run:
+                await storage.update_ig_post(
+                    post_id,
+                    {"status": "expired", "error": f"deadline passed on {post_date}, never approved"},
+                )
+            continue
+        if post_date > today:
+            continue  # built ahead of time; its own day has not arrived
+
+        if dry_run:
+            log.info("dry run: would auto-approve %s (%s)", post_id, post_date)
+            approved += 1
+            continue
+
+        if await storage.auto_approve_ig_post(post_id):
+            log.info("auto-approved %s (deadline passed, no human action)", post_id)
+            approved += 1
+        else:
+            # Not an error: a human cancelled or approved it between the query
+            # above and this CAS. They win.
+            log.info("draft %s changed status before the sweep reached it", post_id)
+
+    log.info("auto-approved %d post(s)", approved)
     return 0
 
 
@@ -289,7 +379,7 @@ async def _publish_one(
         )
         return 0
 
-    if int(row.get("attempts") or 0) >= 3:
+    if int(row.get("attempts") or 0) >= MAX_PUBLISH_ATTEMPTS:
         await storage.update_ig_post(
             post_id, {"status": "failed", "error": "attempt limit reached"}
         )
@@ -325,14 +415,45 @@ async def _publish_one(
         )
     except Exception as exc:  # noqa: BLE001
         log.error("publish failed for %s: %s", post_id, exc)
-        await storage.update_ig_post(
-            post_id, {"status": "failed", "attempts": attempts, "error": str(exc)[:500]}
-        )
+
+        # Hand the row back for another sweep instead of killing the day.
+        #
+        # 'failed' is terminal — approved_ready_to_publish only selects
+        # 'approved' — so writing it here on the FIRST error made the
+        # attempts<3 cap above dead code, and one transient hiccup (Meta
+        # refusing to fetch the signed slide URLs is the common one; it took
+        # out 3 of 25 days in one sample month) permanently lost that day's
+        # post. Under opt-in nobody noticed, because most days were never
+        # published anyway. Under opt-out posting this is the dominant
+        # failure mode, so a retryable error now goes back to 'approved'.
+        #
+        # NOT retried once ig_creation_id exists: that id is persisted before
+        # media_publish precisely so recovery knows the carousel reached Meta.
+        # Retrying past that point risks a duplicate public post, which costs
+        # far more than a missed one (see publish_carousel's docstring).
+        reached_meta = bool(row.get("ig_creation_id"))
+        retryable = attempts < MAX_PUBLISH_ATTEMPTS and not reached_meta
+        patch = {"attempts": attempts, "error": str(exc)[:500]}
+        patch["status"] = "approved" if retryable else "failed"
+        await storage.update_ig_post(post_id, patch)
+
+        if retryable:
+            log.warning(
+                "publish attempt %d/%d failed for %s — retrying on the next sweep",
+                attempts,
+                MAX_PUBLISH_ATTEMPTS,
+                post_id,
+            )
+            return 0
+
         # Otherwise this is invisible on the Telegram side — the row is
         # correctly marked failed, but nobody watching the chat has any way
         # to tell "tried and failed" apart from "never ran".
+        reason = "container already reached Meta" if reached_meta else "no attempts left"
         await notify_mod.notify_alert(
-            http, f"Publish failed for {post_date.isoformat()}: {str(exc)[:300]}"
+            http,
+            f"Publish failed for {post_date.isoformat()} ({reason}, "
+            f"attempt {attempts}/{MAX_PUBLISH_ATTEMPTS}): {str(exc)[:300]}",
         )
         return 1
 
@@ -432,6 +553,97 @@ async def check_token(min_days: int = 14) -> int:
     return 0
 
 
+# ── check-telegram / telegram-webhook ──────────────────────────────────────────
+async def check_telegram() -> int:
+    """Fail loudly when the notification channel is broken.
+
+    Every send in this codebase is best-effort by design — a failed ping must
+    not fail a build that produced a perfectly good draft. The cost of that
+    choice is that a dead bot is indistinguishable from a quiet week. This is
+    the check that tells them apart, and it deliberately exits non-zero: with
+    opt-out posting, a broken channel means posts ship with nobody able to
+    stop them, which is worse than a noisy CI failure.
+    """
+    if not telegram_mod.configured():
+        log.error("TELEGRAM_BOT_TOKEN is not set.")
+        return 1
+
+    expected = telegram_mod.webhook_url()
+    async with HttpClient() as http:
+        try:
+            me = await telegram_mod.get_me(http)
+            info = await telegram_mod.get_webhook_info(http)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Telegram API is unreachable: %s", exc)
+            await _alert_offline_channel(http, f"Telegram API unreachable: {str(exc)[:300]}")
+            return 1
+
+        log.info("bot is live as @%s", (me or {}).get("username") or "?")
+        problems = telegram_mod.health_problems(info, expected)
+        if not problems:
+            log.info("webhook healthy at %s (0 pending)", info.get("url"))
+            return 0
+
+        for p in problems:
+            log.error("telegram webhook: %s", p)
+        await _alert_offline_channel(
+            http, "Telegram webhook is unhealthy:\n" + "\n".join(f"- {p}" for p in problems)
+        )
+        return 1
+
+
+async def _alert_offline_channel(http: HttpClient, text: str) -> None:
+    """Report a Telegram problem somewhere that isn't Telegram.
+
+    Email if Resend is configured; the non-zero exit that follows makes GitHub
+    email the repo owner regardless. Both, because either alone gets missed.
+    """
+    sent = await notify_mod.send_email(
+        http, "Chisme: Telegram notifications are broken", f"<pre>{text}</pre>"
+    )
+    if not sent:
+        log.error("no email fallback configured — this job's failure is the only alert")
+
+
+async def telegram_webhook(set_it: bool) -> int:
+    if not telegram_mod.configured():
+        log.error("TELEGRAM_BOT_TOKEN is not set.")
+        return 1
+    url = telegram_mod.webhook_url()
+    async with HttpClient() as http:
+        try:
+            if set_it:
+                if not settings.telegram_webhook_secret:
+                    log.error(
+                        "TELEGRAM_WEBHOOK_SECRET is not set. It must match the value the "
+                        "webhook host (Vercel) checks, or every delivery will 401."
+                    )
+                    return 1
+                info = await telegram_mod.set_webhook(
+                    http, url, settings.telegram_webhook_secret
+                )
+                log.info("registered %s", url)
+            else:
+                info = await telegram_mod.get_webhook_info(http)
+        except Exception as exc:  # noqa: BLE001
+            log.error("%s", exc)
+            return 1
+
+    for key in (
+        "url",
+        "pending_update_count",
+        "last_error_date",
+        "last_error_message",
+        "max_connections",
+    ):
+        if info.get(key) not in (None, ""):
+            log.info("%-22s %s", key, info[key])
+    problems = telegram_mod.health_problems(info, url)
+    for p in problems:
+        log.warning("problem: %s", p)
+    return 1 if problems else 0
+
+
 # ── refresh-token ──────────────────────────────────────────────────────────────
 async def refresh_token() -> int:
     """Extend the long-lived token's window and print the replacement.
@@ -495,9 +707,23 @@ def main() -> int:
     p.add_argument("--date")
     p.add_argument("--dry-run", action="store_true", help="build containers but do not publish")
 
+    aa = sub.add_parser(
+        "autoapprove", help="approve drafts whose auto-approve deadline has passed"
+    )
+    aa.add_argument("--date")
+    aa.add_argument("--dry-run", action="store_true", help="report what would be approved")
+
     sub.add_parser("prune", help="delete slides past the retention window")
 
     sub.add_parser("refresh-token", help="extend the long-lived IG token and print the new one")
+    sub.add_parser("check-telegram", help="fail if the Telegram webhook is unhealthy")
+    tw = sub.add_parser("telegram-webhook", help="inspect or (re)register the Telegram webhook")
+    tw.add_argument(
+        "--set",
+        dest="set_webhook",
+        action="store_true",
+        help="register SITE_BASE_URL/api/telegram/webhook (refuses a redirecting URL)",
+    )
     t = sub.add_parser("check-token", help="fail if the IG token is close to expiry")
     t.add_argument("--min-days", type=int, default=14)
 
@@ -509,10 +735,16 @@ def main() -> int:
         return asyncio.run(build(day, args.dry_run, args.out))
     if args.cmd == "publish":
         return asyncio.run(publish(day, args.dry_run))
+    if args.cmd == "autoapprove":
+        return asyncio.run(autoapprove(day, args.dry_run))
     if args.cmd == "refresh-token":
         return asyncio.run(refresh_token())
     if args.cmd == "check-token":
         return asyncio.run(check_token(args.min_days))
+    if args.cmd == "check-telegram":
+        return asyncio.run(check_telegram())
+    if args.cmd == "telegram-webhook":
+        return asyncio.run(telegram_webhook(args.set_webhook))
     return asyncio.run(prune())
 
 

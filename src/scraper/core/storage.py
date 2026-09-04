@@ -402,6 +402,52 @@ class Storage:
 
         return await asyncio.to_thread(_q)
 
+    async def drafts_past_deadline(self, now_iso: Optional[str] = None) -> list[dict[str, Any]]:
+        """Drafts whose auto_approve_at has arrived and that nobody touched.
+
+        A NULL auto_approve_at is excluded, not treated as "immediately due":
+        rows built before opt-out posting existed have no deadline, and reading
+        NULL as "overdue" would publish a month of stale backlog on first run.
+        """
+        if not self.enabled:
+            return []
+        now = now_iso or datetime.now(timezone.utc).isoformat()
+
+        def _q() -> list[dict[str, Any]]:
+            return (
+                self._client.table("ig_posts")
+                .select("*")
+                .eq("status", "draft")
+                .not_.is_("auto_approve_at", "null")
+                .lte("auto_approve_at", now)
+                .order("post_date", desc=False)
+                .execute()
+                .data
+                or []
+            )
+
+        return await asyncio.to_thread(_q)
+
+    async def auto_approve_ig_post(self, post_id: str) -> bool:
+        """CAS a draft into 'approved' because its deadline passed. True only
+        for the winner — same idiom as claim_ig_post, and for the same reason:
+        a human tapping Cancel at 16:59:59 must beat the sweep, and whichever
+        of the two loses has to lose cleanly rather than overwrite the other."""
+        if not self.enabled:
+            return False
+
+        def _q() -> bool:
+            res = (
+                self._client.table("ig_posts")
+                .update({"status": "approved", "approved_by": "auto"})
+                .eq("id", post_id)
+                .eq("status", "draft")
+                .execute()
+            )
+            return len(res.data or []) == 1
+
+        return await asyncio.to_thread(_q)
+
     async def update_ig_post(self, post_id: str, patch: dict[str, Any]) -> None:
         if not self.enabled:
             return

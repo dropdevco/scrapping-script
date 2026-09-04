@@ -1,23 +1,21 @@
+import { tgCall } from "@/lib/ig/telegram";
+
 const REPO_OWNER = "dropdevco";
 const REPO_NAME = "scrapping-script";
 const WORKFLOW_FILE = "ig_daily.yml";
 
 /* Best-effort alert, same contract as scraper.social.notify.notify_alert on
    the Python side: a failure here must never raise into the caller, but
-   silence would defeat the entire point of calling it. */
+   silence would defeat the entire point of calling it.
+
+   Goes through tgCall rather than its own fetch — this used to be a second
+   copy of sendMessage that checked neither the HTTP status nor Telegram's
+   own `ok` field, which is a strange thing for an alerting function to do:
+   the alert about a broken dispatch could itself fail without a trace. */
 async function alert(text: string): Promise<void> {
-  const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = (process.env.TELEGRAM_CHAT_ID ?? "").split(",")[0]?.trim();
-  if (!botToken || !chatId) return;
-  try {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text }),
-    });
-  } catch (err) {
-    console.error("githubDispatch alert failed:", err);
-  }
+  if (!chatId) return;
+  await tgCall("sendMessage", { chat_id: chatId, text });
 }
 
 /* "Publish now" needs to actually mean now — the scheduled sweep only runs

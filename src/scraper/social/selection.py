@@ -84,6 +84,25 @@ class Candidate:
     start_local: Optional[datetime]
 
 
+def candidates_from_rows(rows: list[dict[str, Any]], tz_name: str) -> list[Candidate]:
+    """Wrap already-chosen rows as Candidates, preserving the given order.
+
+    `choose` ranks and filters; a rebuild must do neither. The post's slide
+    order was settled when it was first built and a human has since reviewed
+    it, so re-scoring here would silently reshuffle slides they already
+    approved. Score is left at 0.0 — nothing downstream of a rebuild reads it.
+    """
+    return [
+        Candidate(
+            row=row,
+            key=dedupe_key(row),
+            score=0.0,
+            start_local=parse_start(row, tz_name),
+        )
+        for row in rows
+    ]
+
+
 def day_bounds(day: date, tz_name: str) -> tuple[str, str]:
     """Half-open [start, end) ISO bounds for one local calendar day.
 

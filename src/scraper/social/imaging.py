@@ -48,6 +48,20 @@ class SourcePhoto:
         return max(target[0] / self.width, target[1] / self.height)
 
 
+def encode_jpeg(photo: "SourcePhoto", quality: int = 90) -> bytes:
+    """Encode a source photo for storage.
+
+    Deliberately not render._encode: that one asserts the image is exactly a
+    1080x1350 slide canvas. This is for keeping an ORIGINAL a human sent in,
+    at its own size, so a later re-render can lay it out afresh.
+    """
+    from io import BytesIO
+
+    buf = BytesIO()
+    photo.image.save(buf, "JPEG", quality=quality, optimize=True, progressive=False)
+    return buf.getvalue()
+
+
 async def fetch_photo(
     http: HttpClient,
     url: Optional[str],

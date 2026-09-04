@@ -24,6 +24,11 @@ class FakeStorage:
         self.updates: list[tuple[str, dict]] = []
         # Rows a concurrent human already moved out of 'draft'; the CAS loses.
         self.taken: set[str] = set()
+        # Posts with a Telegram edit still waiting to be re-rendered.
+        self.editing: set[str] = set()
+
+    async def has_unapplied_edits(self, post_id):
+        return post_id in self.editing
 
     async def drafts_past_deadline(self, now_iso=None):
         return list(self.rows)
@@ -41,8 +46,8 @@ class FakeStorage:
 TODAY = date.today()
 
 
-def _row(post_id, day):
-    return {"id": post_id, "post_date": day.isoformat()}
+def _row(post_id, day, error=None):
+    return {"id": post_id, "post_date": day.isoformat(), "error": error}
 
 
 @pytest.fixture
@@ -142,3 +147,34 @@ async def test_date_filter_scopes_to_one_day(wired):
     store = wired([_row("p1", TODAY), _row("p2", other)])
     await social.autoapprove(day=TODAY)
     assert store.approved == ["p1"]
+
+
+async def test_a_pending_edit_holds_the_post_back(wired, monkeypatch):
+    """Fail closed. Publishing a carousel that still contains the event
+    someone explicitly asked to remove is worse than publishing late."""
+    store = wired([_row("p1", TODAY)])
+    store.editing.add("p1")
+    sent: list[str] = []
+
+    async def _alert(http, text):
+        sent.append(text)
+
+    monkeypatch.setattr(social.notify_mod, "notify_alert", _alert)
+    assert await social.autoapprove() == 0
+    assert store.approved == []
+    assert sent and "did not auto-post" in sent[0]
+
+
+async def test_the_held_back_alert_fires_once_not_every_sweep(wired, monkeypatch):
+    """The sweep runs every 30 minutes; without the marker this would nag all
+    afternoon about a single stuck post."""
+    store = wired([_row("p1", TODAY, error="held: unapplied edits at " + TODAY.isoformat())])
+    store.editing.add("p1")
+    sent: list[str] = []
+
+    async def _alert(http, text):
+        sent.append(text)
+
+    monkeypatch.setattr(social.notify_mod, "notify_alert", _alert)
+    await social.autoapprove()
+    assert sent == []

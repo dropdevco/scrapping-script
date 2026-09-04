@@ -146,6 +146,10 @@ async def _notify_telegram(
             ],
             [
                 {"text": "✏️ Caption", "callback_data": f"cap:{post_id}"},
+                {"text": "🚫 Drop event", "callback_data": f"edt:{post_id}"},
+            ],
+            [
+                {"text": "🖼 Swap photo", "callback_data": f"swp:{post_id}"},
                 {"text": "🗑 Cancel", "callback_data": f"rej:{post_id}"},
             ],
         ]

@@ -5,9 +5,11 @@ import {
   publishIgPostNowRow,
   updateIgPostCaptionRow,
   approveIgPostRow,
+  requestIgEdit,
+  igPostEventChoices,
   MAX_CAPTION_CHARS,
 } from "@/lib/ig/moderate";
-import { triggerBuild } from "@/lib/ig/githubDispatch";
+import { triggerBuild, triggerRebuild } from "@/lib/ig/githubDispatch";
 import { tgCall } from "@/lib/ig/telegram";
 
 /* Telegram is its own auth boundary here — no token in the callback_data.
@@ -39,7 +41,10 @@ function allowedChatIds(): Set<string> {
    keep, nothing to expire, and it survives a cold start or a redeploy
    mid-edit. */
 const CAPTION_PROMPT = "Reply to this message with the new caption for post";
+const PHOTO_PROMPT = "Reply to this message with a photo for event";
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+// Global variant: the photo prompt carries two ids (event, then post).
+const UUID_RE_G = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
 /* The UTC instant for a given wall-clock time in an IANA zone.
 
@@ -92,6 +97,39 @@ export async function POST(request: Request) {
   const allowed = allowedChatIds();
 
   const msg = update?.message;
+
+  /* A replacement photo comes back as message.photo with no text, so it has
+     to be picked up before the text branch below. Telegram sends an array of
+     rescaled versions; the last is the largest. */
+  if (msg && Array.isArray(msg.photo) && msg.photo.length) {
+    const chatId = String(msg.chat?.id ?? "");
+    if (!allowed.has(chatId)) return NextResponse.json({ ok: true });
+    const repliedTo: string | undefined = msg.reply_to_message?.text;
+    if (repliedTo?.includes(PHOTO_PROMPT)) {
+      const ids = repliedTo.match(UUID_RE_G) ?? [];
+      const [eventId, postId] = ids;
+      const fileId = msg.photo[msg.photo.length - 1]?.file_id;
+      if (eventId && postId && fileId) {
+        // The file_id is stored rather than a download URL: getFile's URL
+        // embeds the bot token and expires in about an hour, while a rebuild
+        // triggered days later still needs to resolve this photo.
+        const result = await requestIgEdit(postId, "swap_photo", {
+          event_id: eventId,
+          file_id: fileId,
+        });
+        if (result.ok) await triggerRebuild(postId);
+        await tgCall("sendMessage", {
+          chat_id: chatId,
+          reply_to_message_id: msg.message_id,
+          text: result.ok
+            ? "Got it — swapping that photo in and rebuilding the carousel."
+            : `Couldn't swap the photo: ${result.message}`,
+        });
+      }
+    }
+    return NextResponse.json({ ok: true });
+  }
+
   if (msg && typeof msg.text === "string") {
     const chatId = String(msg.chat?.id ?? "");
     // Silently ignored rather than answered — unlike a callback_query (whose
@@ -138,15 +176,64 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: true });
   }
 
-  const [action, postId] = String(cb.data ?? "").split(":");
+  const [action, postId, arg] = String(cb.data ?? "").split(":");
   let result: { ok: boolean; message?: string } | null = null;
   let clearButtons = true;
+
+  /* "Which one?" keyboard, shared by drop and swap. Sent as a NEW message
+     rather than by editing the notification, so the slide preview strip above
+     stays readable while choosing. */
+  async function sendEventPicker(prefix: "drp" | "swp", verb: string) {
+    const choices = await igPostEventChoices(postId);
+    if (!choices.length) return { ok: false, message: "No events on that post." };
+    await tgCall("sendMessage", {
+      chat_id: chatId,
+      text: `Which event should I ${verb}?`,
+      reply_markup: {
+        inline_keyboard: choices.map((c) => [
+          {
+            // `drp:<uuid>:<index>` is 44 bytes, inside Telegram's 64-byte
+            // callback_data limit.
+            text: `${c.index + 1}. ${c.title.slice(0, 40)}`,
+            callback_data: `${prefix}:${postId}:${c.index}`,
+          },
+        ]),
+      },
+    });
+    return { ok: true, message: "Pick one" };
+  }
 
   if (action === "apv" && postId) result = await approveIgPostRow(postId);
   else if (action === "now" && postId) result = await publishIgPostNowRow(postId);
   else if (action === "rej" && postId) result = await cancelIgPostRow(postId);
   else if (action === "pos" && postId) result = await postponeIgPostRow(postId, tomorrowAtPublishHour());
-  else if (action === "cap" && postId) {
+  else if (action === "edt" && postId) {
+    clearButtons = false;
+    result = await sendEventPicker("drp", "remove");
+  } else if (action === "swp" && postId && arg === undefined) {
+    clearButtons = false;
+    result = await sendEventPicker("swp", "replace the photo for");
+  } else if (action === "drp" && postId && arg !== undefined) {
+    const choices = await igPostEventChoices(postId);
+    const chosen = choices[Number(arg)];
+    result = await requestIgEdit(postId, "drop_event", { index: Number(arg) });
+    if (result.ok) {
+      await triggerRebuild(postId);
+      result = { ok: true, message: `Removing "${chosen?.title ?? "that event"}" — rebuilding…` };
+    }
+  } else if (action === "swp" && postId && arg !== undefined) {
+    const choices = await igPostEventChoices(postId);
+    const chosen = choices[Number(arg)];
+    clearButtons = false;
+    const sent = await tgCall("sendMessage", {
+      chat_id: chatId,
+      text: `${PHOTO_PROMPT} ${chosen?.id ?? ""} on post ${postId}`,
+      reply_markup: { force_reply: true, selective: true },
+    });
+    result = sent.ok
+      ? { ok: true, message: "Send the replacement photo" }
+      : { ok: false, message: "Couldn't open the photo picker" };
+  } else if (action === "cap" && postId) {
     // The buttons stay live: editing the caption is not a terminal action, and
     // the user will still want Cancel or Post now afterwards.
     clearButtons = false;

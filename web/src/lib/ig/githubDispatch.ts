@@ -36,7 +36,10 @@ async function alert(text: string): Promise<void> {
    status is checked explicitly. Caught live: this exact gap existed here
    while the analogous one was being fixed on the Python side for
    IG_ACCESS_TOKEN — same bug, two languages. */
-export async function triggerWorkflowJob(job: "build" | "publish" | "both" | "prune"): Promise<void> {
+export async function triggerWorkflowJob(
+  job: "build" | "publish" | "both" | "prune" | "rebuild",
+  extra: Record<string, string> = {},
+): Promise<void> {
   const token = process.env.GH_DISPATCH_TOKEN;
   if (!token) return;
   try {
@@ -49,7 +52,7 @@ export async function triggerWorkflowJob(job: "build" | "publish" | "both" | "pr
           Accept: "application/vnd.github+json",
           "X-GitHub-Api-Version": "2022-11-28",
         },
-        body: JSON.stringify({ ref: "main", inputs: { job } }),
+        body: JSON.stringify({ ref: "main", inputs: { job, ...extra } }),
       },
     );
     if (!res.ok) {
@@ -69,4 +72,12 @@ export async function triggerImmediatePublish(): Promise<void> {
 
 export async function triggerBuild(): Promise<void> {
   return triggerWorkflowJob("build");
+}
+
+/* Rebuild a specific draft now, rather than waiting for the publish sweep to
+   pick the edit up. Best-effort in exactly the way triggerImmediatePublish is:
+   `apply-edits` also runs on every sweep, so a failure here costs latency, not
+   correctness — which is the whole reason the sweep step exists. */
+export async function triggerRebuild(postId: string): Promise<void> {
+  await triggerWorkflowJob("rebuild", { post_id: postId });
 }

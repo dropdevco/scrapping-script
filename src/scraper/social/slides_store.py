@@ -54,6 +54,21 @@ def signed_urls(
     return out
 
 
+def remove_objects(client: Any, bucket: str, paths: list[str]) -> int:
+    """Delete specific objects. Used when a rebuild shortens a carousel and
+    the trailing slides from the previous render become orphans — slide_paths
+    is positional, so a stale NN.jpg left behind would never be referenced
+    again but would still count against the bucket until retention swept it."""
+    if not paths:
+        return 0
+    try:
+        client.storage.from_(bucket).remove(paths)
+        return len(paths)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not remove %d stale slide object(s): %s", len(paths), exc)
+        return 0
+
+
 def prune_before(client: Any, bucket: str, cutoff: date) -> int:
     """Delete every slide folder dated before `cutoff`.
 

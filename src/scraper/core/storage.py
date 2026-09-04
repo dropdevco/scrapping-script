@@ -448,6 +448,117 @@ class Storage:
 
         return await asyncio.to_thread(_q)
 
+    async def get_ig_post(self, post_id: str) -> Optional[dict[str, Any]]:
+        if not self.enabled:
+            return None
+
+        def _q() -> Optional[dict[str, Any]]:
+            rows = (
+                self._client.table("ig_posts").select("*").eq("id", post_id).execute().data or []
+            )
+            return rows[0] if rows else None
+
+        return await asyncio.to_thread(_q)
+
+    async def pending_edits(self, post_id: Optional[str] = None) -> list[dict[str, Any]]:
+        """Unapplied edit requests, oldest first — apply order is request order."""
+        if not self.enabled:
+            return []
+
+        def _q() -> list[dict[str, Any]]:
+            q = (
+                self._client.table("ig_post_edits")
+                .select("*")
+                .is_("applied_at", "null")
+            )
+            if post_id:
+                q = q.eq("post_id", post_id)
+            return q.order("requested_at", desc=False).execute().data or []
+
+        return await asyncio.to_thread(_q)
+
+    async def has_unapplied_edits(self, post_id: str) -> bool:
+        """Gate on the auto-approve sweep.
+
+        A post with an edit still in flight must not ship: publishing a
+        carousel that still contains the event someone explicitly asked to
+        remove is worse than publishing late.
+        """
+        return bool(await self.pending_edits(post_id))
+
+    async def mark_edits_applied(
+        self, edit_ids: list[str], error: Optional[str] = None
+    ) -> None:
+        if not self.enabled or not edit_ids:
+            return
+        patch: dict[str, Any] = {"applied_at": datetime.now(timezone.utc).isoformat()}
+        if error:
+            patch["error"] = error[:500]
+
+        def _q() -> None:
+            self._client.table("ig_post_edits").update(patch).in_("id", edit_ids).execute()
+
+        try:
+            await asyncio.to_thread(_q)
+        except Exception as exc:  # noqa: BLE001
+            log.error("marking edits applied failed: %s", exc)
+
+    async def request_ig_edit(
+        self, post_id: str, op: str, payload: dict[str, Any]
+    ) -> Optional[dict[str, Any]]:
+        if not self.enabled:
+            return None
+
+        def _q() -> Optional[dict[str, Any]]:
+            data = (
+                self._client.table("ig_post_edits")
+                .insert({"post_id": post_id, "op": op, "payload": payload})
+                .execute()
+                .data
+                or []
+            )
+            return data[0] if data else None
+
+        return await asyncio.to_thread(_q)
+
+    async def events_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
+        """Fetch events by id. Order is NOT preserved — callers that care
+        (every rebuild does) must re-impose the post's own stored order."""
+        if not self.enabled or not ids:
+            return []
+
+        def _q() -> list[dict[str, Any]]:
+            return (
+                self._client.table("events").select("*").in_("id", ids).execute().data or []
+            )
+
+        return await asyncio.to_thread(_q)
+
+    async def apply_ig_post_edit_result(
+        self, post_id: str, patch: dict[str, Any]
+    ) -> bool:
+        """Final CAS of a rebuild: write the new slides only if the post is
+        still a draft.
+
+        Zero rows means a human approved (or the sweep auto-approved) it while
+        the rebuild was running — the carousel may already be at Meta, so the
+        rebuild must abandon rather than overwrite what is being published.
+        """
+        if not self.enabled:
+            return False
+
+        def _q() -> bool:
+            res = (
+                self._client.table("ig_posts")
+                .update(patch)
+                .eq("id", post_id)
+                .eq("status", "draft")
+                .execute()
+            )
+            return len(res.data or []) == 1
+
+        return await asyncio.to_thread(_q)
+
     async def due_for_metrics(self, window_hours: int, label: str) -> list[dict[str, Any]]:
         """Published posts old enough for this window and missing its snapshot.
 

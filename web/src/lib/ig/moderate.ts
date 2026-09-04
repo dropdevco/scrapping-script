@@ -132,3 +132,68 @@ export async function updateIgPostCaptionRow(
   if (!data?.length) return { ok: false, message: "That post has already gone out." };
   return { ok: true };
 }
+
+/* An edit request the webhook cannot carry out itself.
+
+   Dropping an event or swapping a photo means re-rendering the carousel with
+   Pillow, which this serverless handler cannot do. So a tap records the
+   INTENT here and `python -m scraper.social apply-edits` performs it — either
+   from the immediate dispatch, or from the next publish sweep if that
+   dispatch failed. Until it is applied, the row blocks auto-approval, so a
+   post can never ship still containing the event someone asked to remove. */
+export async function requestIgEdit(
+  postId: string,
+  op: "drop_event" | "swap_photo",
+  payload: Record<string, unknown>,
+): Promise<ModerateResult> {
+  // Only a draft is editable: past that the publisher may already have
+  // claimed the row, and re-rendering slides out from under Meta is worse
+  // than refusing.
+  const { data: post, error: readErr } = await supabaseAdmin()
+    .from("ig_posts")
+    .select("id, status, event_ids")
+    .eq("id", postId)
+    .single();
+  if (readErr) return { ok: false, message: readErr.message };
+  if (post?.status !== "draft") return { ok: false, message: "That post has already gone out." };
+
+  if (op === "drop_event") {
+    // Checked here as well as in apply-edits so the user gets an instant
+    // answer rather than a rebuild that silently refuses ten minutes later.
+    const remaining = ((post.event_ids as string[] | null) ?? []).length - 1;
+    const min = Number(process.env.IG_MIN_SLIDES || 4);
+    if (remaining < min) {
+      return {
+        ok: false,
+        message: `Can't drop — that leaves ${remaining} slides (minimum ${min}). Cancel the post instead?`,
+      };
+    }
+  }
+
+  const { error } = await supabaseAdmin()
+    .from("ig_post_edits")
+    .insert({ post_id: postId, op, payload });
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+/* Titles for the "which one?" keyboard. ig_posts stores only event_ids, and
+   querying here avoids both a denormalised column and titles going stale. */
+export async function igPostEventChoices(
+  postId: string,
+): Promise<{ id: string; title: string; index: number }[]> {
+  const { data: post } = await supabaseAdmin()
+    .from("ig_posts")
+    .select("event_ids")
+    .eq("id", postId)
+    .single();
+  const ids = ((post?.event_ids as string[] | null) ?? []).filter(Boolean);
+  if (!ids.length) return [];
+  const { data: events } = await supabaseAdmin()
+    .from("events")
+    .select("id, title")
+    .in("id", ids);
+  const byId = new Map((events ?? []).map((e) => [e.id as string, e.title as string]));
+  // Indexed by position in event_ids, which is the order apply-edits uses.
+  return ids.map((id, index) => ({ id, index, title: byId.get(id) ?? "(untitled)" }));
+}

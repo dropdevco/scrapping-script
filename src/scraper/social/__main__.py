@@ -1,6 +1,7 @@
 """CLI for the daily Instagram carousel.
 
     python -m scraper.social build   [--date YYYY-MM-DD] [--dry-run] [--out DIR]
+    python -m scraper.social apply-edits [--post-id UUID] [--dry-run]
     python -m scraper.social autoapprove [--date YYYY-MM-DD] [--dry-run]
     python -m scraper.social publish [--date YYYY-MM-DD] [--dry-run]
     python -m scraper.social metrics
@@ -28,6 +29,7 @@ from . import publish as publish_mod
 from . import render, selection, slides_store
 from . import metrics as metrics_mod
 from . import telegram as telegram_mod
+from . import imaging as imaging_mod
 from .imaging import fetch_photo
 
 log = logging.getLogger("scraper.social")
@@ -37,6 +39,9 @@ CITY = "El Paso"
 # Publish attempts before a post is given up on. Meta intermittently
 # refuses to fetch slide URLs, and one bad sweep should not cost the day.
 MAX_PUBLISH_ATTEMPTS = 3
+
+# Marker in ig_posts.error so a held-back post alerts once, not every sweep.
+_HELD = "held:"
 
 
 def _today(tz_name: str) -> date:
@@ -257,6 +262,259 @@ async def _skip(
     return 0
 
 
+# ── apply-edits ────────────────────────────────────────────────────────────────
+async def apply_edits(post_id: Optional[str] = None, dry_run: bool = False) -> int:
+    """Re-render a draft to satisfy edits requested from Telegram.
+
+    This job exists because the webhook cannot run Pillow: a tap in Telegram
+    records an intent in ig_post_edits, and the re-render happens here. It is
+    invoked two ways on purpose — dispatched immediately when the tap happens
+    (so the turnaround feels instant) and again from the publish sweep (so a
+    failed dispatch, an expired GH_DISPATCH_TOKEN, or a dropped webhook cannot
+    strand a post forever). The sweep is the guarantee; the dispatch is only
+    latency.
+    """
+    storage = Storage()
+    if not storage.enabled:
+        log.error("Supabase is not configured; nothing to do.")
+        return 1
+
+    edits = await storage.pending_edits(post_id)
+    if not edits:
+        log.info("no pending edits")
+        return 0
+
+    by_post: dict[str, list[dict[str, Any]]] = {}
+    for edit in edits:
+        by_post.setdefault(str(edit["post_id"]), []).append(edit)
+
+    rc = 0
+    async with HttpClient() as http:
+        for pid, post_edits in by_post.items():
+            rc |= await _apply_edits_to_post(storage, http, pid, post_edits, dry_run)
+    return rc
+
+
+async def _apply_edits_to_post(
+    storage: Storage,
+    http: HttpClient,
+    post_id: str,
+    edits: list[dict[str, Any]],
+    dry_run: bool,
+) -> int:
+    ids = [str(e["id"]) for e in edits]
+    post = await storage.get_ig_post(post_id)
+    if not post:
+        await storage.mark_edits_applied(ids, "post no longer exists")
+        return 0
+    if post.get("status") != "draft":
+        # Editing something already on its way out is not meaningful. Retire
+        # the requests so they stop blocking the auto-approve sweep forever.
+        log.info("post %s is %s, not draft — discarding %d edit(s)", post_id, post["status"], len(ids))
+        await storage.mark_edits_applied(ids, f"post was {post['status']} when edits ran")
+        return 0
+
+    tz_name = settings.ig_timezone
+    day = date.fromisoformat(str(post["post_date"]))
+    event_ids = [str(e) for e in (post.get("event_ids") or [])]
+    overrides = dict(post.get("photo_overrides") or {})
+
+    # Apply intents in request order, against the stored id list.
+    for edit in edits:
+        op = edit["op"]
+        payload = edit.get("payload") or {}
+        if op == "drop_event":
+            idx = int(payload.get("index", -1))
+            if 0 <= idx < len(event_ids):
+                dropped = event_ids.pop(idx)
+                log.info("dropping event %s (index %d) from %s", dropped, idx, post_id)
+            else:
+                log.warning("drop_event index %s out of range for %s", idx, post_id)
+        elif op == "swap_photo":
+            event_id, file_id = payload.get("event_id"), payload.get("file_id")
+            if not (event_id and file_id):
+                continue
+            path = await _store_swapped_photo(storage, http, day, post_id, str(event_id), str(file_id))
+            if path:
+                overrides[str(event_id)] = path
+                log.info("photo override stored for event %s", event_id)
+
+    if len(event_ids) < settings.ig_min_slides:
+        reason = (
+            f"that would leave {len(event_ids)} slide(s), below the minimum of "
+            f"{settings.ig_min_slides}"
+        )
+        log.error("refusing to rebuild %s: %s", post_id, reason)
+        await storage.mark_edits_applied(ids, reason)
+        await notify_mod.notify_alert(
+            http, f"Couldn't apply your edit to {day.isoformat()} — {reason}. The post is unchanged."
+        )
+        return 0
+
+    # Re-query the source events over the post's own stored window, then put
+    # them back into the post's order — events_by_ids does not preserve it.
+    rows = await storage.events_by_ids(event_ids)
+    by_id = {str(r["id"]): r for r in rows}
+    ordered = [by_id[i] for i in event_ids if i in by_id]
+    if len(ordered) < settings.ig_min_slides:
+        reason = f"only {len(ordered)} of {len(event_ids)} events could be re-read"
+        await storage.mark_edits_applied(ids, reason)
+        return 1
+
+    candidates = selection.candidates_from_rows(ordered, tz_name)
+    photos = []
+    for cand in candidates:
+        override = overrides.get(str(cand.row["id"]))
+        photos.append(await _load_photo(storage, http, cand.row, override))
+
+    jpegs, caption_text = _render_carousel(
+        day, candidates, photos, rebuild_caption=not post.get("caption_is_custom")
+    )
+    if caption_text is None:
+        caption_text = str(post.get("caption") or "")
+
+    if dry_run:
+        log.info("dry run: would rebuild %s to %d slide(s)", post_id, len(jpegs))
+        return 0
+
+    paths = [slides_store.object_path(day, post_id, i) for i in range(len(jpegs))]
+    try:
+        slides_store.upload_slides(storage.client, settings.ig_slides_bucket, paths, jpegs)
+    except Exception as exc:  # noqa: BLE001
+        log.error("rebuild upload failed for %s: %s", post_id, exc)
+        await storage.mark_edits_applied(ids, f"upload: {exc}"[:400])
+        return 1
+
+    # The carousel got shorter, so trailing objects from the previous render
+    # are now orphans. slide_paths is positional and rewritten wholesale.
+    stale = [p for p in (post.get("slide_paths") or []) if p not in paths]
+    if stale:
+        slides_store.remove_objects(storage.client, settings.ig_slides_bucket, stale)
+
+    ok = await storage.apply_ig_post_edit_result(
+        post_id,
+        {
+            "slide_paths": paths,
+            "event_ids": event_ids,
+            "slide_keys": [c.key for c in candidates],
+            "caption": caption_text,
+            "photo_overrides": overrides,
+        },
+    )
+    if not ok:
+        log.warning("post %s left draft mid-rebuild — abandoning", post_id)
+        await storage.mark_edits_applied(ids, "post was approved while the rebuild ran")
+        await notify_mod.notify_alert(
+            http,
+            f"Your edit to {day.isoformat()} arrived just as the post went out — "
+            "it published unchanged.",
+        )
+        return 0
+
+    await storage.mark_edits_applied(ids)
+    log.info("rebuilt %s: %d slide(s)", post_id, len(paths))
+
+    # A fresh notification rather than an edit of the old one: a sendMediaGroup
+    # cannot be edited in place, so the only way to show the new carousel is to
+    # send it again.
+    await notify_mod.notify_draft_ready(
+        http,
+        storage_client=storage.client,
+        post_id=post_id,
+        day=day,
+        slide_paths=paths,
+        caption=caption_text,
+        scheduled_for=post.get("auto_approve_at") or post.get("scheduled_for"),
+        slot=post.get("slot"),
+    )
+    return 0
+
+
+async def _store_swapped_photo(
+    storage: Storage,
+    http: HttpClient,
+    day: date,
+    post_id: str,
+    event_id: str,
+    file_id: str,
+) -> Optional[str]:
+    """Download a photo the human sent to the bot and keep it in our own bucket.
+
+    Stored rather than re-fetched from Telegram on each rebuild because
+    getFile's URL embeds the bot token and expires in about an hour, while a
+    later drop_event can trigger another rebuild days later. The object lives
+    under the post's own prefix, so slides_store.prune_before sweeps it on the
+    same retention schedule as the slides.
+    """
+    try:
+        info = await telegram_mod.call(http, "getFile", {"file_id": file_id})
+        path = (info or {}).get("file_path")
+        if not path:
+            return None
+        url = f"{telegram_mod.API}/file/bot{settings.telegram_bot_token}/{path}"
+        # Same quality gate as every other slide photo — a forwarded, twice-
+        # compressed screenshot should be refused here rather than rendered
+        # into a blurry slide.
+        photo = await fetch_photo(http, url)
+        if photo is None:
+            await notify_mod.notify_alert(
+                http, "That image is too small or unreadable for a slide — send a larger one."
+            )
+            return None
+        object_path = f"{day.isoformat()}/{post_id}/src-{event_id}.jpg"
+        slides_store.upload_slides(
+            storage.client,
+            settings.ig_slides_bucket,
+            [object_path],
+            [imaging_mod.encode_jpeg(photo)],
+        )
+        return object_path
+    except Exception as exc:  # noqa: BLE001
+        log.error("photo swap failed for event %s: %s", event_id, exc)
+        return None
+
+
+async def _load_photo(storage: Storage, http: HttpClient, row: dict[str, Any], override: Optional[str]):
+    """An accepted swap wins over the scraped image_url."""
+    if override:
+        try:
+            urls = slides_store.signed_urls(storage.client, settings.ig_slides_bucket, [override])
+            photo = await fetch_photo(http, urls[0])
+            if photo is not None:
+                return photo
+            log.warning("override %s could not be read back; falling back", override)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("override %s unreadable (%s); falling back", override, exc)
+    return await fetch_photo(http, row.get("image_url"))
+
+
+def _render_carousel(
+    day: date,
+    candidates: list["selection.Candidate"],
+    photos: list[Any],
+    *,
+    rebuild_caption: bool = True,
+) -> tuple[list[bytes], Optional[str]]:
+    """Cover + one slide per candidate.
+
+    The cover is re-rendered too, not just the event slides: it prints the
+    event COUNT, which is exactly what a drop changes. And every slide is
+    re-rendered rather than only the tail, because _variant_for and
+    _accent_for are functions of slide POSITION — removing slide 3 changes the
+    layout and accent of every slide after it.
+    """
+    total = len(candidates) + 1
+    jpegs = [render.render_cover(day, len(candidates), settings.ig_handle)]
+    for i, (cand, photo) in enumerate(zip(candidates, photos, strict=True), start=2):
+        jpegs.append(render.render_event_slide(i, total, cand.row, photo, cand.start_local))
+    caption = (
+        caption_mod.build_caption(day, candidates, site=settings.ig_handle)
+        if rebuild_caption
+        else None
+    )
+    return jpegs, caption
+
+
 # ── autoapprove ────────────────────────────────────────────────────────────────
 async def autoapprove(day: Optional[date] = None, dry_run: bool = False) -> int:
     """Flip untouched drafts whose deadline has passed to 'approved'.
@@ -315,6 +573,28 @@ async def autoapprove(day: Optional[date] = None, dry_run: bool = False) -> int:
             continue
         if post_date > today:
             continue  # built ahead of time; its own day has not arrived
+
+        if await storage.has_unapplied_edits(post_id):
+            # Fail closed. Shipping a carousel that still contains the event
+            # someone explicitly asked to remove is worse than shipping late,
+            # so an in-flight edit holds the post rather than being raced.
+            # apply-edits runs immediately before this in the same sweep, so
+            # the normal case is that the edit is already applied by now; a
+            # still-pending one means something is actually wrong.
+            log.warning("draft %s has unapplied edits — holding it back", post_id)
+            if not dry_run and not str(row.get("error") or "").startswith(_HELD):
+                # Marker in `error` so this alerts once, not on every sweep
+                # for the rest of the day.
+                await storage.update_ig_post(
+                    post_id, {"error": f"{_HELD} unapplied edits at {post_date.isoformat()}"}
+                )
+                async with HttpClient() as http:
+                    await notify_mod.notify_alert(
+                        http,
+                        f"Held back {post_date.isoformat()}: an edit you asked for hasn't "
+                        "been applied, so it did not auto-post. Check /admin/ig.",
+                    )
+            continue
 
         if dry_run:
             log.info("dry run: would auto-approve %s (%s)", post_id, post_date)
@@ -759,6 +1039,10 @@ def main() -> int:
     p.add_argument("--date")
     p.add_argument("--dry-run", action="store_true", help="build containers but do not publish")
 
+    ae = sub.add_parser("apply-edits", help="re-render drafts to satisfy Telegram edits")
+    ae.add_argument("--post-id")
+    ae.add_argument("--dry-run", action="store_true")
+
     aa = sub.add_parser(
         "autoapprove", help="approve drafts whose auto-approve deadline has passed"
     )
@@ -790,6 +1074,8 @@ def main() -> int:
         return asyncio.run(build(day, args.dry_run, args.out))
     if args.cmd == "publish":
         return asyncio.run(publish(day, args.dry_run))
+    if args.cmd == "apply-edits":
+        return asyncio.run(apply_edits(args.post_id, args.dry_run))
     if args.cmd == "autoapprove":
         return asyncio.run(autoapprove(day, args.dry_run))
     if args.cmd == "refresh-token":

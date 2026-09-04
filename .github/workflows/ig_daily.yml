@@ -27,7 +27,11 @@ on:
         description: "Which job to run"
         default: "both"
         type: choice
-        options: ["both", "build", "publish", "prune"]
+        options: ["both", "build", "publish", "prune", "rebuild"]
+      post_id:
+        description: "Post to rebuild (only used by job=rebuild)"
+        required: false
+        default: ""
 
 # Never let two runs publish concurrently. The CAS claim in the publisher is the
 # real guard; this just avoids the wasted work of racing to it.
@@ -73,7 +77,9 @@ jobs:
   # on an unhealthy webhook, which makes GitHub email the owner — the one alert
   # path that does not depend on Telegram working.
   preflight:
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.job != 'prune'
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+        github.event.inputs.job != 'prune' && github.event.inputs.job != 'rebuild'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -94,7 +100,8 @@ jobs:
   build:
     # Only after a scrape (so we render the freshest data), or on demand.
     if: >-
-      github.event_name == 'workflow_dispatch' && github.event.inputs.job != 'publish' ||
+      github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.job != 'publish' && github.event.inputs.job != 'rebuild' ||
       github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -126,10 +133,31 @@ jobs:
       - name: Build carousel
         run: python -m scraper.social build
 
+  # Fired by the Telegram webhook the moment someone drops an event or sends a
+  # replacement photo, so the rebuilt carousel comes back in a minute rather
+  # than at the next half-hour sweep.
+  rebuild:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'rebuild'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[social]"
+      - name: Apply edits
+        run: python -m scraper.social apply-edits --post-id "${{ github.event.inputs.post_id }}"
+
   publish:
     if: >-
       github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' && github.event.inputs.job != 'build'
+      github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.job != 'build' && github.event.inputs.job != 'rebuild'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -146,6 +174,14 @@ jobs:
       # a post crossing its deadline ships in the SAME sweep instead of up to
       # 30 minutes later, and so there is no second schedule to keep
       # DST-correct. A no-op while IG_AUTO_APPROVE is unset.
+      # Backstop for the immediate dispatch the webhook fires. That dispatch
+      # can fail (expired GH_DISPATCH_TOKEN, GitHub outage) and must not be
+      # able to strand a post: this step is the actual guarantee, the dispatch
+      # is only latency. Ordered BEFORE autoapprove so a pending edit is
+      # normally applied by the time the deadline is evaluated.
+      - name: Apply pending Telegram edits
+        run: python -m scraper.social apply-edits
+
       - name: Auto-approve drafts past their deadline
         run: python -m scraper.social autoapprove
 

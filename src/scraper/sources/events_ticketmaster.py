@@ -13,6 +13,12 @@ from ..core.media import clean_image_url
 from ..core.models import Event, Kind, SearchParams
 from .base import Source
 
+# The API's own per-page maximum.
+_PAGE_SIZE = 200
+# Ticketmaster refuses deep paging past ~1000 items (page * size), and a city
+# with that many listed events is not a case this pipeline needs to serve.
+_MAX_PAGES = 5
+
 _ENDPOINT = "https://app.ticketmaster.com/discovery/v2/events.json"
 
 
@@ -101,7 +107,7 @@ class TicketmasterSource(Source):
     async def fetch(self, params: SearchParams, http: HttpClient) -> list[Event]:
         query: dict[str, Any] = {
             "apikey": settings.ticketmaster_api_key,
-            "size": min(params.limit, 200),
+            "size": min(params.limit, _PAGE_SIZE),
             "sort": "date,asc",
         }
         if params.query:
@@ -117,9 +123,26 @@ class TicketmasterSource(Source):
                 "%Y-%m-%dT%H:%M:%SZ"
             )
 
-        data = await http.get_json(_ENDPOINT, params=query)
-        events_raw = (data or {}).get("_embedded", {}).get("events", [])
-        return [self._parse(e) for e in events_raw]
+        # Paginate. `size` is capped at 200 by the API, and results are sorted
+        # date-ascending, so a single request silently drops the FURTHEST-OUT
+        # events once a city has more than 200 in the window — precisely the
+        # ones a "save the date" post is made of. Measured for El Paso on
+        # 2026-09-03: a 200-day window returned 187 events on one page, but a
+        # 240-day window returned 215 across two, so widening the scrape
+        # horizon without this would have quietly lost the far end.
+        out: list[Event] = []
+        for page in range(_MAX_PAGES):
+            if page:
+                query["page"] = page
+            data = await http.get_json(_ENDPOINT, params=query)
+            events_raw = ((data or {}).get("_embedded") or {}).get("events") or []
+            out.extend(self._parse(e) for e in events_raw)
+
+            page_info = (data or {}).get("page") or {}
+            total_pages = int(page_info.get("totalPages") or 1)
+            if page + 1 >= total_pages or len(out) >= params.limit or not events_raw:
+                break
+        return out[: params.limit]
 
     def _parse(self, e: dict[str, Any]) -> Event:
         venues = (e.get("_embedded") or {}).get("venues") or []

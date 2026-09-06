@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import type { EventRow } from "@/lib/types";
 
-/* Leaflet touches `window` — must never render on the server. */
+/* Google Maps touches `window` — must never render on the server. */
 const EventMap = dynamic(() => import("./event-map").then((m) => m.EventMap), {
   ssr: false,
   loading: () => (

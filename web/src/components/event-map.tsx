@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
-import L from "leaflet";
+import { APIProvider, Map as GoogleMap, Marker, InfoWindow } from "@vis.gl/react-google-maps";
 import type { EventRow } from "@/lib/types";
 import { useLang } from "./lang-context";
 import { formatEventDate } from "@/lib/datetime";
@@ -19,97 +18,66 @@ type VenuePin = {
   events: EventRow[];
 };
 
-const BORDER_CENTER: [number, number] = [31.72, -106.46]; // between El Paso + Juárez
+const BORDER_CENTER = { lat: 31.72, lng: -106.46 }; // between El Paso + Juárez
 
-function dot(count: number) {
+const GOOGLE_MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
+
+/* Warm-cream palette matching the site's paper/ink/cosmo tokens — Google's
+   default blue/green basemap clashes with the rest of the page otherwise. */
+const MAP_STYLE: google.maps.MapTypeStyle[] = [
+  { elementType: "geometry", stylers: [{ color: "#f3ebda" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#4a4550" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#fffcf5" }] },
+  { featureType: "poi", elementType: "labels", stylers: [{ visibility: "off" }] },
+  { featureType: "poi.business", stylers: [{ visibility: "off" }] },
+  { featureType: "poi.park", elementType: "geometry", stylers: [{ color: "#e6e2c8" }] },
+  { featureType: "transit", stylers: [{ visibility: "off" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#fffcf5" }] },
+  { featureType: "road", elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#fbf6ec" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#f0d9e4" }] },
+  { featureType: "administrative", elementType: "geometry.stroke", stylers: [{ color: "#d8d0c0" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#dbe2df" }] },
+];
+
+/* Plain {width,height}/{x,y} objects rather than `new google.maps.Size(...)`
+   — markers can render before the Maps script (and the `google` global)
+   has finished loading, and the API only ever reads these as data anyway. */
+function dotIcon(count: number): google.maps.Icon {
   const size = count > 1 ? 30 : 22;
-  return L.divIcon({
-    className: "venue-dot",
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-    html: `<div style="
-      width:${size}px;height:${size}px;border-radius:9999px;
-      background:#e6117f;color:#ffffff;
-      display:flex;align-items:center;justify-content:center;
-      font:700 11px system-ui;border:2px solid #141118;
-      box-shadow:2px 2px 0 rgba(20,17,24,.9);
-    ">${count > 1 ? count : ""}</div>`,
-  });
+  const r = size / 2 - 1.5;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">
+    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="#e6117f" stroke="#141118" stroke-width="2" />
+  </svg>`;
+  return {
+    url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
+    scaledSize: { width: size, height: size } as google.maps.Size,
+    anchor: { x: size / 2, y: size / 2 } as google.maps.Point,
+    labelOrigin: { x: size / 2, y: size / 2 } as google.maps.Point,
+  };
 }
 
-/*
-  Two-finger panning on touch devices.
-
-  The map card is 62dvh — on a phone that is most of the screen, so with
-  Leaflet's default one-finger dragging there is almost nowhere left to put
-  your thumb to scroll the PAGE: every swipe gets eaten by the map and the
-  user is stranded. Same reasoning as the hero scratch surface.
-
-  So on coarse pointers we hand one-finger swipes back to the page and only
-  enable dragging while two fingers are down (the convention embedded maps
-  use), with a brief hint the first time a one-finger drag is swallowed.
-  Pointer devices are untouched — dragging stays on for the mouse.
-*/
-function TouchPanGate({ hint }: { hint: string }) {
-  const map = useMap();
-  const [nudge, setNudge] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
+/* Touch devices need two fingers to pan (one-finger swipes are left for
+   scrolling the page — the map card is 62dvh, most of a phone screen).
+   Google's own "cooperative" gesture handling does this natively, complete
+   with its own translated hint bubble, so it needs no custom gate like
+   Leaflet did. Pointer devices stay "greedy": free drag + scroll-to-zoom. */
+function useGestureHandling(): "cooperative" | "greedy" {
+  const [coarse, setCoarse] = useState(() => window.matchMedia("(pointer: coarse)").matches);
   useEffect(() => {
-    if (!window.matchMedia("(pointer: coarse)").matches) return;
-    const container = map.getContainer();
-    map.dragging.disable();
-
-    const showNudge = () => {
-      setNudge(true);
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => setNudge(false), 1600);
-    };
-
-    const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length >= 2) {
-        map.dragging.enable();
-        setNudge(false);
-        if (timer.current) clearTimeout(timer.current);
-      } else {
-        map.dragging.disable();
-      }
-    };
-    const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length < 2) showNudge();
-    };
-    const onTouchEnd = (e: TouchEvent) => {
-      if (e.touches.length < 2) map.dragging.disable();
-    };
-
-    container.addEventListener("touchstart", onTouchStart, { passive: true });
-    container.addEventListener("touchmove", onTouchMove, { passive: true });
-    container.addEventListener("touchend", onTouchEnd, { passive: true });
-    container.addEventListener("touchcancel", onTouchEnd, { passive: true });
-
-    return () => {
-      if (timer.current) clearTimeout(timer.current);
-      container.removeEventListener("touchstart", onTouchStart);
-      container.removeEventListener("touchmove", onTouchMove);
-      container.removeEventListener("touchend", onTouchEnd);
-      container.removeEventListener("touchcancel", onTouchEnd);
-    };
-  }, [map]);
-
-  if (!nudge) return null;
-
-  return (
-    <div className="pointer-events-none absolute inset-0 z-[500] flex items-center justify-center">
-      <span className="rounded-full border-[1.5px] border-ink bg-card/95 px-4 py-2 font-condensed text-[12px] font-semibold uppercase tracking-[0.14em] text-ink shadow-[2px_2px_0_var(--color-ink)]">
-        {hint}
-      </span>
-    </div>
-  );
+    const mq = window.matchMedia("(pointer: coarse)");
+    const onChange = () => setCoarse(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return coarse ? "cooperative" : "greedy";
 }
 
 export function EventMap({ events }: { events: EventRow[] }) {
   const { lang, t } = useLang();
   const locale = dateLocale(lang);
+  const gestureHandling = useGestureHandling();
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
   const pins = useMemo(() => {
     // Grouped by COORDINATE, not venue id: the same physical place often has
@@ -134,31 +102,59 @@ export function EventMap({ events }: { events: EventRow[] }) {
     return [...bySpot.values()];
   }, [events]);
 
+  const selectedPin = pins.find((p) => p.key === selectedKey) ?? null;
+
+  if (!GOOGLE_MAPS_API_KEY) {
+    return (
+      <div className="flex h-full w-full items-center justify-center bg-paper-2 px-6 text-center text-sm text-ink-soft">
+        Missing NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
+      </div>
+    );
+  }
+
   return (
-    <MapContainer
-      center={BORDER_CENTER}
-      zoom={11}
-      scrollWheelZoom
-      className="h-full w-full"
-      attributionControl
-    >
-      <TouchPanGate hint={t.mapTwoFinger} />
-      <TileLayer
-        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
-        url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-      />
-      {pins.map((pin) => (
-        <Marker key={pin.key} position={[pin.lat, pin.lng]} icon={dot(pin.events.length)}>
-          <Popup maxWidth={280}>
+    <APIProvider apiKey={GOOGLE_MAPS_API_KEY} language={lang === "es" ? "es" : "en"}>
+      <GoogleMap
+        defaultCenter={BORDER_CENTER}
+        defaultZoom={11}
+        gestureHandling={gestureHandling}
+        disableDefaultUI={false}
+        streetViewControl={false}
+        mapTypeControl={false}
+        clickableIcons={false}
+        styles={MAP_STYLE}
+        onClick={() => setSelectedKey(null)}
+        style={{ width: "100%", height: "100%" }}
+      >
+        {pins.map((pin) => (
+          <Marker
+            key={pin.key}
+            position={{ lat: pin.lat, lng: pin.lng }}
+            icon={dotIcon(pin.events.length)}
+            label={
+              pin.events.length > 1
+                ? { text: String(pin.events.length), color: "#ffffff", fontSize: "11px", fontWeight: "700" }
+                : undefined
+            }
+            onClick={() => setSelectedKey(pin.key)}
+          />
+        ))}
+
+        {selectedPin && (
+          <InfoWindow
+            position={{ lat: selectedPin.lat, lng: selectedPin.lng }}
+            maxWidth={280}
+            onCloseClick={() => setSelectedKey(null)}
+          >
             <div style={{ minWidth: 200 }}>
               <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 2 }}>
-                {pin.name ?? pin.events[0]?.venue ?? ""}
+                {selectedPin.name ?? selectedPin.events[0]?.venue ?? ""}
               </p>
-              {pin.city && (
-                <p style={{ fontSize: 11, opacity: 0.6, marginBottom: 8 }}>{pin.city}</p>
+              {selectedPin.city && (
+                <p style={{ fontSize: 11, opacity: 0.6, marginBottom: 8 }}>{selectedPin.city}</p>
               )}
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {pin.events.slice(0, 4).map((e) => (
+                {selectedPin.events.slice(0, 4).map((e) => (
                   <Link
                     key={e.id}
                     href={`/events/${e.id}`}
@@ -173,16 +169,16 @@ export function EventMap({ events }: { events: EventRow[] }) {
                     {e.title}
                   </Link>
                 ))}
-                {pin.events.length > 4 && (
+                {selectedPin.events.length > 4 && (
                   <span style={{ fontSize: 11, opacity: 0.6 }}>
-                    +{pin.events.length - 4} {t.eventsFound}
+                    +{selectedPin.events.length - 4} {t.eventsFound}
                   </span>
                 )}
               </div>
             </div>
-          </Popup>
-        </Marker>
-      ))}
-    </MapContainer>
+          </InfoWindow>
+        )}
+      </GoogleMap>
+    </APIProvider>
   );
 }

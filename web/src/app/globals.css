@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import "leaflet/dist/leaflet.css";
 
 /*
   Chisme — pop-art × Cosmopolitan magazine-collage design tokens.
@@ -134,26 +133,17 @@ body {
   mask-repeat: repeat-x, no-repeat;
 }
 
-/* ── Leaflet light-theme polish ──────────────────────────────────────── */
-.leaflet-container {
-  background: var(--color-paper-2);
-  font-family: var(--font-sans), system-ui, sans-serif;
+/* ── Google Maps InfoWindow polish ───────────────────────────────────── */
+.gm-style-iw-c {
+  background: var(--color-card) !important;
+  border: 1.5px solid var(--color-ink) !important;
+  border-radius: 0.75rem !important;
+  box-shadow: 3px 4px 0 rgba(20, 17, 24, 0.12) !important;
+  padding: 0.65rem 0.85rem !important;
 }
-.leaflet-popup-content-wrapper,
-.leaflet-popup-tip {
-  background: var(--color-card);
-  color: var(--color-ink);
-  border: 1.5px solid var(--color-ink);
-  border-radius: 0.75rem;
-  box-shadow: 3px 4px 0 rgba(20, 17, 24, 0.12);
-}
-.leaflet-popup-content { margin: 0.65rem 0.85rem; }
-.leaflet-container a.leaflet-popup-close-button { color: var(--color-ink-soft); }
-
-.venue-dot {
-  background: transparent;
-  border: none;
-}
+.gm-style-iw-d { overflow: visible !important; }
+.gm-style-iw-t::after { background: var(--color-card) !important; box-shadow: none !important; }
+.gm-style-iw-tc::after { background: var(--color-card) !important; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

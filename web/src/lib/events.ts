@@ -9,11 +9,29 @@ export type EventFilters = {
   categories?: string[]; // multi-select — OR semantics
 };
 
-/* Juárez appears in data as "Juárez", "Ciudad Juárez", unaccented "Juarez"… */
+/* Juárez appears in data as "Ciudad Juárez", "Juárez, CHH/Chih", unaccented
+   "Juarez"… A bare "Juárez" pattern is NOT safe on its own: it also matches
+   "Benito Juárez", a Mexico City borough (and a common street/plaza name
+   honoring the historical president in cities all over Mexico) — the state
+   qualifier or "Ciudad" prefix is what actually pins it to the border city. */
 const CITY_PATTERNS: Record<string, string[]> = {
   "el paso": ["El Paso"],
-  juarez: ["Juárez", "Juarez"],
+  juarez: ["Ciudad Juárez", "Ciudad Juarez", "Juárez, CHH", "Juarez, CHH", "Juárez, Chih", "Juarez, Chih"],
 };
+
+const ALL_REGION_PATTERNS = Object.values(CITY_PATTERNS).flat();
+
+/* Applied to every surface, not just the city filter tabs — scraped sources
+   have turned up everything from remote-work webinars with no venue at all
+   to venues geocoded clear across Mexico. Checking `venue` alongside
+   `location` matters: a handful of legitimate local events (e.g. a state
+   park listing) only ever got their address into the free-text `venue`
+   field, never the formatted `location` one. */
+function regionFilter(patterns: string[] = ALL_REGION_PATTERNS): string {
+  // Double-quoted: PostgREST's `or=(...)` logic tree splits on bare commas,
+  // and a pattern like "Juárez, CHH" has one right in the value.
+  return patterns.flatMap((p) => [`location.ilike."%${p}%"`, `venue.ilike."%${p}%"`]).join(",");
+}
 
 function range(when: string | undefined): { from?: Date; to?: Date } {
   const now = new Date();
@@ -57,10 +75,10 @@ function applyEventFilters<T>(query: T, filters: EventFilters): T {
     if (term) q = q.or(`title.ilike.%${term}%,venue.ilike.%${term}%,description.ilike.%${term}%`);
   }
 
-  if (filters.city && CITY_PATTERNS[filters.city]) {
-    const pats = CITY_PATTERNS[filters.city].map((p) => `location.ilike.%${p}%`);
-    q = q.or(pats.join(","));
-  }
+  // Always on, not just when a city tab is selected — the site never shows
+  // anything outside El Paso / Juárez, regardless of what a source scraped.
+  const patterns = (filters.city && CITY_PATTERNS[filters.city]) || ALL_REGION_PATTERNS;
+  q = q.or(regionFilter(patterns));
 
   if (filters.categories && filters.categories.length > 0) {
     // OR semantics: event matches if it carries ANY selected category.
@@ -90,6 +108,7 @@ export async function fetchEvent(id: string): Promise<EventRow | null> {
     .from("events")
     .select("*, venues(*)")
     .eq("id", id)
+    .or(regionFilter())
     .maybeSingle();
   if (error) throw new Error(`event query failed: ${error.message}`);
   return (data as EventRow) ?? null;
@@ -127,6 +146,7 @@ export async function fetchCrawlerEvents(limit = 500): Promise<EventRow[]> {
     .select("*, venues(*)")
     .eq("status", "approved")
     .gte("start_time", new Date().toISOString())
+    .or(regionFilter())
     .order("start_time", { ascending: true, nullsFirst: false })
     .limit(limit);
   if (error) throw new Error(`crawler events query failed: ${error.message}`);

@@ -10,6 +10,7 @@ events instead of blocking the run.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -60,6 +61,17 @@ DIRECTORIES: tuple[Directory, ...] = (
     Directory("visita_juarez", "https://visitajuarez.mx/", "juarez", 24),
     Directory("juarez_municipal_events", "https://www.juarez.gob.mx/", "juarez", 18),
     Directory("uacj_agenda", "https://www.uacj.mx/agenda/", "juarez", 24),
+    # Chihuahua state Secretaría de Cultura's statewide calendar. Covers
+    # Centro Cultural de las Fronteras, Centro Cultural Paso del Norte
+    # (as "Teatro Experimental Octavio Trías" / "CCPN"), and the Juárez
+    # Cineteca and public libraries — a real find: a single Wix-hosted
+    # events widget mixing Chihuahua-capital and Juárez events together,
+    # so _event_matches_directory_region does the real filtering.
+    Directory("cultura_chihuahua_juarez", "https://www.culturachihuahua.com/agendacultural", "juarez", 5),
+    # YOSIVOY: a small bilingual Juárez-El Paso border culture aggregator
+    # that also picks up independent venues (cafés, studios) the
+    # government/university calendars never mention.
+    Directory("yosivoy_juarez", "https://yosivoy.yociudadano.com.mx/cartelera", "juarez", 5),
 )
 
 EVENT_LINK_RE = re.compile(
@@ -210,21 +222,87 @@ def _event_matches_directory_region(event: Event, directory: Directory) -> bool:
                 "juárez, chihuahua",
             )
         )
+    # No bare "juarez"/"juárez" here — "Benito Juárez" is also a street/avenue
+    # name all over Chihuahua state (state-wide sources like
+    # cultura_chihuahua_juarez mix Chihuahua-capital venues in freely, and one
+    # sits on "Av. Benito Juárez" in the state capital, nowhere near the
+    # border). Same qualified forms as the ticketing-site branch above.
     return any(
         token in haystack
         for token in (
-            "juarez",
-            "juárez",
             "cd.juarez",
             "cd. juarez",
+            "cd juarez",
             "ciudad juarez",
             "ciudad juárez",
+            "juarez, chih",
+            "juárez, chih",
+            "juarez chih",
+            "juárez chih",
+            "juarez, chihuahua",
+            "juárez, chihuahua",
             "paso del norte",
             "chamizal",
             "mexicanidad",
             "uacj",
         )
     )
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    """Wix's warmup JSON ships real ISO-8601 UTC instants, not the loose
+    text every other directory here needs regexes for."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+_SPANISH_MONTHS = {
+    "enero": 1,
+    "febrero": 2,
+    "marzo": 3,
+    "abril": 4,
+    "mayo": 5,
+    "junio": 6,
+    "julio": 7,
+    "agosto": 8,
+    "septiembre": 9,
+    "octubre": 10,
+    "noviembre": 11,
+    "diciembre": 12,
+}
+_SPANISH_DATE_RE = re.compile(r"(\d{1,2})\s+de\s+([a-záéíóúñ]+)", re.IGNORECASE)
+_SPANISH_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+
+
+def _parse_spanish_datetime(date_text: Optional[str], time_text: Optional[str]) -> Optional[datetime]:
+    """Parses text like "domingo 13 de septiembre" + "07:00 hrs" — no year,
+    unlike every other date format this module parses, since YOSIVOY's card
+    only ever shows day/month. Same forward-roll as _parse_datetime once
+    the year is assumed."""
+    if not date_text:
+        return None
+    match = _SPANISH_DATE_RE.search(date_text)
+    if not match:
+        return None
+    month = _SPANISH_MONTHS.get(match.group(2).lower())
+    if not month:
+        return None
+    hour = minute = 0
+    if time_text:
+        time_match = _SPANISH_TIME_RE.search(time_text)
+        if time_match:
+            hour, minute = int(time_match.group(1)), int(time_match.group(2))
+    try:
+        parsed = datetime(date.today().year, month, int(match.group(1)), hour, minute)
+    except ValueError:
+        return None
+    if parsed.date() < date.today():
+        parsed = parsed.replace(year=parsed.year + 1)
+    return parsed
 
 
 def _parse_datetime(date_text: str, time_text: Optional[str] = None) -> Optional[datetime]:
@@ -319,6 +397,10 @@ class EventDirectoriesSource(Source):
             out.extend(self._axs_listing_events(html, url))
         elif source_name == "city_of_el_paso_events":
             out.extend(await self._city_listing_events(html, url, http))
+        elif source_name == "cultura_chihuahua_juarez":
+            out.extend(self._culturachihuahua_listing_events(html))
+        elif source_name == "yosivoy_juarez":
+            out.extend(self._yosivoy_listing_events(html))
         return out
 
     def _elpasolive_listing_events(self, html: str, url: str) -> list[Event]:
@@ -390,6 +472,124 @@ class EventDirectoriesSource(Source):
                     url=url,
                     categories=guess_categories(title),
                     raw={"directory": "axs_el_paso", "date": date_text, "time": match.group("time")},
+                )
+            )
+        return events
+
+    def _culturachihuahua_listing_events(self, html: str) -> list[Event]:
+        """Wix ships every event as JSON in a `#wix-warmup-data` script tag
+        (its own SSR hydration payload) rather than in the visible markup —
+        the flattened text has no reliable field boundaries to regex apart,
+        but this JSON carries real ISO timestamps, a formatted address, and
+        venue coordinates directly, sparing a later geocode() call entirely.
+
+        This is a *statewide* Chihuahua calendar, not a Juarez-only one —
+        it mixes in Chihuahua-capital venues freely, so this method makes no
+        region judgment itself; _event_matches_directory_region filters the
+        output same as every other directory here.
+        """
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        tag = soup.find("script", id="wix-warmup-data")
+        if not tag or not tag.string:
+            return []
+        try:
+            warmup = json.loads(tag.string)
+        except ValueError:
+            return []
+
+        raw_events: list[dict[str, Any]] = []
+        for app in (warmup.get("appsWarmupData") or {}).values():
+            if not isinstance(app, dict):
+                continue
+            for widget in app.values():
+                if not isinstance(widget, dict):
+                    continue
+                candidates = ((widget.get("events") or {}).get("events"))
+                if isinstance(candidates, list):
+                    raw_events.extend(candidates)
+
+        events: list[Event] = []
+        for item in raw_events:
+            title = item.get("title")
+            if not title:
+                continue
+            scheduling = (item.get("scheduling") or {}).get("config") or {}
+            location = item.get("location") or {}
+            full_address = location.get("fullAddress") or {}
+            geocode = full_address.get("geocode") or {}
+            slug = item.get("slug")
+            events.append(
+                Event(
+                    source=self.name,
+                    source_id=f"cultura_chihuahua_juarez:{item.get('id') or slug or title}",
+                    title=title,
+                    description=item.get("description") or item.get("about") or None,
+                    start_time=_parse_iso(scheduling.get("startDate")),
+                    end_time=_parse_iso(scheduling.get("endDate")),
+                    venue=location.get("name"),
+                    location=full_address.get("formattedAddress") or location.get("address"),
+                    lat=geocode.get("latitude"),
+                    lng=geocode.get("longitude"),
+                    url=f"https://www.culturachihuahua.com/events-1/{slug}" if slug else None,
+                    image_url=(item.get("mainImage") or {}).get("url"),
+                    categories=guess_categories(title),
+                    raw={
+                        "directory": "cultura_chihuahua_juarez",
+                        "scheduling": item.get("scheduling"),
+                        "location": location,
+                    },
+                )
+            )
+        return events
+
+    def _yosivoy_listing_events(self, html: str) -> list[Event]:
+        """Each event is a `.ev-item` card. Unlike the JSON sources above,
+        this markup has no machine-readable date at all — just Spanish
+        prose ("domingo 13 de septiembre") with no year, so the year is
+        inferred the same way _parse_datetime does: assume this year, roll
+        to next if that lands in the past.
+        """
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        events: list[Event] = []
+        for card in soup.select(".ev-item"):
+            title_el = card.select_one(".ev-title")
+            title = title_el.get_text(" ", strip=True) if title_el else None
+            if not title:
+                continue
+
+            venue = date_text = time_text = None
+            for meta in card.select(".ev-meta-item"):
+                icon = meta.select_one("i")
+                kind = icon.get("data-feather") if icon else None
+                text = meta.get_text(" ", strip=True)
+                if kind == "map-pin":
+                    venue = text
+                elif kind == "calendar":
+                    date_text = text
+                elif kind == "clock":
+                    time_text = text
+
+            desc_el = card.select_one(".ev-desc")
+            link_el = card.select_one("a.ev-link")
+            img_el = card.select_one(".ev-img-wrap img")
+
+            events.append(
+                Event(
+                    source=self.name,
+                    source_id=f"yosivoy_juarez:{link_el['href'] if link_el and link_el.get('href') else title}",
+                    title=title,
+                    description=desc_el.get_text(" ", strip=True) if desc_el else None,
+                    start_time=_parse_spanish_datetime(date_text, time_text),
+                    venue=venue,
+                    location=f"{venue}, Juárez, Chih., México" if venue else "Juárez, Chih., México",
+                    url=link_el["href"] if link_el and link_el.get("href") else None,
+                    image_url=img_el["src"] if img_el and img_el.get("src") else None,
+                    categories=guess_categories(title),
+                    raw={"directory": "yosivoy_juarez", "date": date_text, "time": time_text},
                 )
             )
         return events

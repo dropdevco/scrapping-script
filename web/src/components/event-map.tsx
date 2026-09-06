@@ -20,6 +20,13 @@ type VenuePin = {
 
 const BORDER_CENTER = { lat: 31.72, lng: -106.46 }; // between El Paso + Juárez
 
+/* Covers El Paso, Juárez, and nearby towns (Las Cruces, Alamogordo) that
+   legitimately show up in the data. `strictBounds` stops both panning and
+   zooming out past this box — a handful of venues have bad geocodes clear
+   across Mexico (Mexico City, Guadalajara), and without a hard limit the
+   map would happily scroll a visitor there. */
+const REGION_BOUNDS = { north: 32.4, south: 31.35, east: -105.7, west: -106.9 };
+
 const GOOGLE_MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
 
 /* Warm-cream palette matching the site's paper/ink/cosmo tokens — Google's
@@ -117,6 +124,7 @@ export function EventMap({ events }: { events: EventRow[] }) {
       <GoogleMap
         defaultCenter={BORDER_CENTER}
         defaultZoom={11}
+        restriction={{ latLngBounds: REGION_BOUNDS, strictBounds: true }}
         gestureHandling={gestureHandling}
         disableDefaultUI={false}
         streetViewControl={false}

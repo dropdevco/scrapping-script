@@ -1,5 +1,14 @@
 # Chisme Setup Guide
 
+> **PARTIALLY STALE.** The environment-setup and deployment steps below are still useful. The
+> **Design System**, **Key Features** and **Next Steps** sections describe a version of the app that no
+> longer exists — it uses Google Maps (not Leaflet), a light-first cream/pink theme (not a dark desert
+> one), Fraunces/Archivo/Oswald (not Bricolage Grotesque/Geist), and there is no `tailwind.config.ts`.
+>
+> Current documentation: **[`docs/components/web-app.md`](../docs/components/web-app.md)** and
+> **[`docs/operations/configuration.md`](../docs/operations/configuration.md)** for the complete env
+> var inventory (this file lists only two of the ~15 the app needs in Vercel).
+
 Chisme is a fullstack El Paso + Juárez events discovery site. This guide covers local development setup and deployment.
 
 ## Prerequisites

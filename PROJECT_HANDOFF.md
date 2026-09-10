@@ -2,6 +2,20 @@
 
 Last updated: 2026-08-06
 
+> **SUPERSEDED as a reference — kept for its Change Log, which is a genuine historical record.**
+>
+> The current engineering documentation lives in **[`docs/`](docs/README.md)**. Start at
+> [`docs/onboarding.md`](docs/onboarding.md).
+>
+> The session protocol below was **not followed after 2026-08-06**, so this file's factual sections
+> describe the project as it was a month before the current HEAD. Specifically wrong now: the migration
+> count, the map library (Leaflet → Google Maps), the workflow job count (two → four), the publish cron
+> window, the test scope, and the design-system description.
+>
+> **The authoritative record for everything after 2026-08-06 is the git commit bodies**, which are
+> unusually detailed, plus `docs/`. The Change Log below remains worth reading for context on how the
+> project got here, and `docs/architecture/adr/` distils its decisions.
+
 This file is the durable context document for this repo, meant to replace re-exploration. Read this file FIRST, before grepping the codebase, when starting a new session/harness on this repo — it should answer "what is this, how is it built, what's the current state" without needing to re-derive it from source. Update it every time you make a meaningful change, especially when changing architecture, data contracts, setup steps, UI style, source behavior, migrations, or testing expectations.
 
 **Protocol for every session (any harness — Claude Code, Codex, other agents):**

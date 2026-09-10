@@ -1,5 +1,10 @@
 # scraper-mcp
 
+> **Engineering documentation lives in [`docs/`](docs/README.md).** New to the project? Start at
+> [`docs/onboarding.md`](docs/onboarding.md). This README covers the scraper's own setup and MCP
+> surface; `docs/` covers the whole product — architecture, decision records, the data model,
+> runbooks, and conventions.
+
 A reusable **MCP server** your agent calls to gather information on demand, then store it in
 **Supabase** for later retrieval. Two headline jobs:
 
@@ -58,11 +63,17 @@ Built on this scraper is **Chisme** — a bilingual (EN/ES) web app for discover
 **Features:**
 - Event listing with smart search, time filters (today / this week), city filters
 - Event detail pages with venue info + Google Maps links
-- Interactive map: 50+ geotagged venues, clustered pins
+- Interactive map (Google Maps): ~100 geotagged events, co-located pins collapsed with a count
 - Event submission form (Google OAuth): crowd-sourced additions with moderation queue
-- Dark-first design, responsive mobile/desktop, fully bilingual UI toggle
+- Light-first pop-art design, responsive mobile/desktop, fully bilingual UI toggle
 
-**See** `web/SETUP.md` for local development, environment setup, and deployment.
+Built on the same database: a **daily Instagram carousel** with a Telegram human-approval loop
+(`src/scraper/social/`), and a **Google Sheet export** that grounds a GoHighLevel chatbot
+(`src/scraper/kb/`).
+
+**See** [`docs/components/web-app.md`](docs/components/web-app.md) for the web app, and
+[`docs/operations/configuration.md`](docs/operations/configuration.md) for the complete environment
+inventory. `web/SETUP.md` has the original setup walkthrough, but parts of it are stale.
 
 ---
 
@@ -101,9 +112,9 @@ web/                      Next.js 16 fullstack events site (Chisme)
   SETUP.md              Local dev + deployment guide
   
 supabase/migrations/
-  0001_init.sql         Event/trend/run tables
-  0002_venues.sql       Venue-centric schema (location as primary entity)
-  
+  0001_init.sql … 0010_ig_post_kinds.sql   ten migrations, applied in order
+                        (see docs/data/migrations.md)
+
 .github/workflows/scheduled_scrape.yml
 .claude/launch.json       Next.js dev server config
 ```
@@ -194,7 +205,8 @@ python -m scraper.scheduler events   # events only
 python -m scraper.scheduler trends   # trends only
 ```
 
-Configure with `SCHEDULE_LOCATION`, `SCHEDULE_TOPICS`, `SCHEDULE_DAYS`. The included GitHub Action
+Configure with `SCHEDULE_LOCATIONS` (semicolon-separated; the singular `SCHEDULE_LOCATION` is a
+back-compat override that loses to it), `SCHEDULE_TOPICS`, `SCHEDULE_DAYS`. The included GitHub Action
 (`.github/workflows/scheduled_scrape.yml`) runs it daily — add your keys as repo **Secrets** and the
 `SCHEDULE_*`/`REDDIT_USER_AGENT` values as repo **Variables**, or trigger it manually from the Actions
 tab.

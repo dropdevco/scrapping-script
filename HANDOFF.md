@@ -1,5 +1,15 @@
 # HANDOFF
 
+> **SUPERSEDED — written 2026-08-21, kept for historical context only.**
+>
+> The current engineering documentation lives in **[`docs/`](docs/README.md)**. Start at
+> [`docs/onboarding.md`](docs/onboarding.md).
+>
+> Known-wrong claims in this file: the migration count (six — there are **ten**), the test scope
+> (`tests/social/` only — there are also `tests/kb/` and `tests/sources/`, 239 tests total), the map
+> library (Leaflet — it is **Google Maps**), and the state of Instagram posting (described as not yet
+> running unattended — the pipeline has been posting since mid-August).
+
 Onboarding doc for a fresh AI agent (any harness) picking up this repo cold. See also
 `PROJECT_HANDOFF.md` in this same directory — a much longer, session-by-session log maintained by
 prior agent sessions (last updated 2026-08-06) with deep detail on the Instagram automation

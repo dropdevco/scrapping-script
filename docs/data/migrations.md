@@ -1,7 +1,8 @@
 # Migrations
 
-Ten migrations, `0001_init` through `0010_ig_post_kinds`, applied by hand. There is no migration
-framework, no tracking table, and no automation — **which is exactly why the discipline below matters.**
+Eleven migrations, `0001_init` through `0011_internal_table_rls`, applied by hand (0011 written but not
+yet applied — see below). There is no migration framework, no tracking table, and no automation —
+**which is exactly why the discipline below matters.**
 
 ---
 
@@ -34,6 +35,7 @@ Several migrations say so explicitly in a comment; copy that habit.
 | 0008 | `ig_post_metrics` | The table, unique + fetched indexes; RLS, no policies | Opt-out publishing needs a feedback signal that does not depend on anyone looking |
 | 0009 | `ig_post_edits` | The table + pending index; `photo_overrides`, `caption_is_custom`. **Does not enable RLS** | Telegram-driven edits, shaped by the serverless/Pillow split |
 | 0010 | `ig_post_kinds` | Widens the `kind` CHECK to five values; `period_key`; the live-period index | Four formats over one renderer |
+| 0011 | `internal_table_rls` | RLS, no policies, on `runs` and `ig_post_edits` — **written, not yet applied to the live database** | Closes the P0 gap tracked since 0009; matches the 0004/0008 posture |
 
 ---
 
@@ -125,8 +127,9 @@ Always `--dry-run` before `backfill_merge_duplicates.py`; it issues DELETEs.
 - **No migration-tracking table.** Which migrations have been applied to the live project is tracked
   only by humans. Adding a `schema_migrations` table (and backfilling it with 0001–0010) would be a
   small, high-value change.
-- **`runs` and `ig_post_edits` have RLS disabled.** See
-  [schema.md](schema.md#two-tables-with-rls-never-enabled).
+- **`0011` (RLS on `runs`/`ig_post_edits`) is written but not applied.** Needs `SUPABASE_DB_URL` and
+  `python -m scraper.apply_migration supabase/migrations/0011_internal_table_rls.sql`, then verification.
+  See [schema.md](schema.md#two-tables-whose-rls-fix-is-written-but-not-yet-applied).
 - **Storage buckets are not in version control.** `ig-slides` exists because someone called
   `create_bucket()` once; a fresh environment has no bucket.
 - **No rollback procedure is documented anywhere**, for migrations or for deploys.
@@ -135,4 +138,4 @@ All tracked in [known-gaps.md](../known-gaps.md).
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-10.*
+*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-12.*

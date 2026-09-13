@@ -223,8 +223,8 @@ equivalence**; that is a known gap.
 | `trends` | on | 1 |
 | `ig_posts` | on | **none** — deny-all for anon |
 | `ig_post_metrics` | on | **none** — deny-all for anon |
-| `ig_post_edits` | **off** | — |
-| `runs` | **off** | — |
+| `ig_post_edits` | on (0011, unapplied) | **none** — deny-all for anon |
+| `runs` | on (0011, unapplied) | **none** — deny-all for anon |
 
 | Policy | Table | Cmd | Roles | Predicate |
 |---|---|---|---|---|
@@ -247,14 +247,17 @@ The scraper, the carousel pipeline, the KB export and every admin server action 
 key, which bypasses RLS entirely.** RLS will not protect a public surface built on a service-role read.
 See [invariants §3](../architecture/invariants.md#a-public-facing-read-must-filter-status-itself).
 
-### Two tables with RLS never enabled
+### Two tables whose RLS fix is written but not yet applied
 
-`runs` and `ig_post_edits` have no `enable row level security` statement in any migration. On Supabase,
-a `public` table without RLS is reachable through PostgREST by the anon key. `ig_post_edits` in
-particular drives what gets dropped from a post that publishes publicly.
+`runs` and `ig_post_edits` had no `enable row level security` statement in any migration through 0010.
+`0011_internal_table_rls.sql` closes that — same posture as `ig_posts`/`ig_post_metrics`, RLS on with
+zero policies (deny-all for anon/authenticated; service-role is unaffected).
 
-**This is the highest-priority item in [known-gaps.md](../known-gaps.md).** The live grants have not
-been verified against the database — only against the migrations, which unambiguously never enable it.
+**The migration is not yet applied to the live database** — this repo's DDL path
+([migrations.md](migrations.md#how-they-are-applied)) needs `SUPABASE_DB_URL`, which was not available
+when 0011 was written. Run `python -m scraper.apply_migration supabase/migrations/0011_internal_table_rls.sql`,
+then verify `relrowsecurity` on both tables, before treating this as closed. See
+[known-gaps.md](../known-gaps.md).
 
 ---
 

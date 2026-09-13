@@ -11,21 +11,27 @@ something, add it.
 
 ---
 
-## P0 — verify first, fix if confirmed
+## P0 — migration written, needs applying and verifying
 
-### Row-level security is never enabled on `runs` or `ig_post_edits`
+### Row-level security was never enabled on `runs` or `ig_post_edits`
 
-No migration contains an `enable row level security` statement for either table. Every other `public`
-table has one. On Supabase, a `public` table without RLS is reachable through PostgREST **by the anon
-key**, which is published in the browser bundle.
+No migration through 0010 contains an `enable row level security` statement for either table. Every
+other `public` table has one. On Supabase, a `public` table without RLS is reachable through PostgREST
+**by the anon key**, which is published in the browser bundle.
 
 `ig_post_edits` is the serious one: it drives what gets dropped from a carousel that publishes
 publicly.
 
-- **Verify:** query the live database for `relrowsecurity` on both tables, and try an anon-key read.
-- **Fix if confirmed:** a new migration enabling RLS with zero policies (a deny-all), matching what
-  `0004` and `0008` do for the other internal tables.
-- **Refs:** [schema.md](data/schema.md#row-level-security), all ten files in `supabase/migrations/`.
+- **Fix written:** `supabase/migrations/0011_internal_table_rls.sql` enables RLS with zero policies (a
+  deny-all) on both, matching what `0004` and `0008` do for the other internal tables.
+- **Not yet applied to the live database.** Needs `SUPABASE_DB_URL` (not available in every
+  environment) and `python -m scraper.apply_migration supabase/migrations/0011_internal_table_rls.sql`
+  — see [migrations.md](data/migrations.md#how-they-are-applied). The Supabase MCP tool cannot run this
+  DDL even if it's connected; do not attempt it that way.
+- **Verify after applying:** query `relrowsecurity` on both tables, and confirm an anon-key read on
+  each now returns nothing.
+- **Refs:** [schema.md](data/schema.md#two-tables-whose-rls-fix-is-written-but-not-yet-applied), all
+  eleven files in `supabase/migrations/`.
 
 ---
 
@@ -227,7 +233,7 @@ None of these are inspectable from the repository. Each is worth five minutes fr
 
 | Question | How to check |
 |---|---|
-| Is RLS actually enabled on `runs` / `ig_post_edits`? | Query the live database. **This is the P0 above** |
+| Has `0011_internal_table_rls.sql` been applied yet? | Query `relrowsecurity` on `runs` / `ig_post_edits`. **This is the P0 above** |
 | Is `NEXT_PUBLIC_SITE_URL` set in Vercel Production? | `curl https://www.epchisme.com/robots.txt` and look at the `Sitemap:` host |
 | Which Actions secrets and variables are populated, and to what? | Repo settings. Note `SITE_BASE_URL`, `SCHEDULE_DAYS`, `SCHEDULE_LOCATIONS` and `SCHEDULE_LOCATION` in particular |
 | Is `IG_AUTO_APPROVE` / `IG_AUTOPOST` on? | Repo variables. Both default `false`; the docs are written as though opt-out is the intended steady state |

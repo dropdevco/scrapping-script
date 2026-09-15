@@ -723,7 +723,7 @@ def _time_stamp(start_local: Optional[Any]) -> Optional[str]:
 # composition is doing its job, and the thing that actually distinguishes
 # "tonight" from "book this now" is the words and the colour, not the grid.
 _COVER_SPECS: dict[str, tuple[str, str, tuple[int, int, int]]] = {
-    "digest": ("TODAY IN", "EL PASO", COSMO),
+    "digest": ("TOMORROW IN", "EL PASO", COSMO),
     "breaking": ("JUST IN", "EL PASO", COSMO),
     "weekend": ("THIS WEEKEND", "IN EL PASO", POP_YELLOW),
     "monthly": ("THIS MONTH IN", "EL PASO", COSMO),

@@ -1,13 +1,17 @@
 name: ig-daily
 
-# Daily "Today in El Paso" Instagram carousel.
+# Daily "Tomorrow in El Paso" Instagram carousel.
 #
 #   build    renders slides and files a draft for review in /admin/ig
 #   publish  ships anything a human has approved
 #
 # The build is chained to the scrape via workflow_run rather than its own cron:
 # a fixed offset would only be a hope, since Actions cron routinely drifts
-# 10-20 minutes and the scrape itself can take up to 20.
+# 10-20 minutes and the scrape itself can take up to 20. That early-morning
+# build is also what makes the digest advance notice work at all: the daily
+# post covers the NEXT local day's events (build()'s event_day), so posting
+# it the same morning it is built gives a reader all day to see a 7am event
+# before it happens, instead of finding out about it that same afternoon.
 on:
   workflow_run:
     workflows: ["scheduled-scrape"]

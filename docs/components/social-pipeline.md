@@ -99,8 +99,8 @@ selection, rendering or captions.
 
 | Kind | Window | Cover kicker | Count label | Suppression lookback |
 |---|---|---|---|---|
-| `digest` | one local day | "TODAY IN / EL PASO" | "N things happening" | 14 d |
-| `breaking` | one local day | "JUST IN / EL PASO" | "N things happening" | 14 d |
+| `digest` | one local day, **the day after `day`** | "TOMORROW IN / EL PASO" | "N things happening" | 14 d |
+| `breaking` | one local day (`day` itself) | "JUST IN / EL PASO" | "N things happening" | 14 d |
 | `weekend` | Fri 00:00 → Mon 00:00, on or after `day` | "THIS WEEKEND / IN EL PASO" | "N things to do" | 35 d |
 | `monthly` | the calendar month | "THIS MONTH IN / EL PASO" | "N things to do" | 120 d |
 | `horizon` | 60 days starting ~6 months out | "SAVE THE DATE / EL PASO" | "N on sale now" | 200 d |
@@ -108,6 +108,13 @@ selection, rendering or captions.
 One renderer serves all five — see [ADR-0008](../architecture/adr/0008-one-parameterised-renderer.md).
 Recurrence suppression is scoped **by kind**: a monthly roundup is supposed to repeat what the dailies
 covered.
+
+**The digest ships a day ahead of the events it covers.** `build()` computes an `event_day = day + 1`
+for `kind == "digest"` and threads it through `day_bounds`, `render_cover` and `build_caption`, while
+`post_date`/`scheduled_for`/`auto_approve_at` stay pinned to `day` (the day the post actually ships).
+This is deliberate: a 7am event is only useful to know about if the post goes out the evening before,
+not that same afternoon. `breaking` deliberately keeps the old same-day window — advance notice
+contradicts a "just announced" post.
 
 ---
 

@@ -39,7 +39,7 @@ Four triggers:
 
 | Trigger | Schedule | Purpose |
 |---|---|---|
-| `workflow_run` on `scheduled-scrape` completing | — | Builds the daily digest |
+| `workflow_run` on `scheduled-scrape` completing | — | Builds the daily digest (see below — it covers the *next* local day) |
 | `schedule` | `0,30 13-23,0-2 * * *` — 28 ticks/day | The publish sweep |
 | `schedule` | `0 18 * * 4` — Thursdays | Builds the `weekend` post |
 | `schedule` | `0 18 1 * *` — the 1st | Builds the `monthly` post |
@@ -59,6 +59,14 @@ Concurrency group `ig-daily`, `cancel-in-progress: false`.
 in MDT but **00:00 UTC the next day** in MST, so the old `0,30 14-23` window covered summer and
 silently missed every winter post — which then expired unpublished. It must straddle midnight UTC.
 Test-enforced by a test that parses this YAML file.
+
+**The digest is deliberately posted the morning *before* the day it covers.** `scheduled-scrape` fires
+at 05:00 local, and the chained `build` computes `event_day = day + 1` for `kind == "digest"` — so the
+carousel that goes out through this same sweep is already advance notice for tomorrow, not same-day
+news of things already half over (a 7am event announced at 5pm was the original complaint). No cron
+here needed to change to get that: the build already ran early enough, it just used to query the wrong
+day. `post_date`/`scheduled_for`/`auto_approve_at` still key off `day` (build day), so the staleness
+guard below is unaffected.
 
 ### The four jobs
 

@@ -37,9 +37,9 @@ container id *before* `media_publish` (`publish.py:157-158`):
 > public post costs far more than a missed one."
 
 **Staleness is checked before any network call.** `publish` verifies `post_date == today` first — a
-post approved late that only succeeds the next morning would otherwise publish "TODAY IN EL PASO —
-Aug 5" on Aug 6, with every event already over. Described in the handoff as *the single most
-important guard in the feature.*
+post approved late that only succeeds the next morning would otherwise publish "TOMORROW IN EL PASO —
+Aug 6" (built Aug 5 as advance notice for Aug 6's events) on Aug 6 itself, with the whole point of the
+early warning gone. Described in the handoff as *the single most important guard in the feature.*
 
 **Idempotent-by-query, not by cron precision.** Metrics collection selects "published long enough ago
 **and** missing this window" rather than "published exactly N hours ago", so a skipped run backfills

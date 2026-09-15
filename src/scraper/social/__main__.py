@@ -90,6 +90,11 @@ async def build(
 ) -> int:
     tz_name = settings.ig_timezone
     day = day or _today(tz_name)
+    # The daily digest ships a day ahead of the events it covers — built and
+    # posted "today" so a 7am event tomorrow is known about tonight, instead
+    # of announced hours after it's already over. Every other kind still
+    # covers the period starting on `day` itself.
+    event_day = day + timedelta(days=1) if kind == "digest" else day
     storage = Storage()
     if not storage.enabled and not dry_run:
         log.error("Supabase is not configured; nothing to do.")
@@ -105,7 +110,7 @@ async def build(
     rc = 0
     for slot_name, slot_hour in slots:
         rc |= await _build_one(
-            storage, day, tz_name, dry_run, out_dir, slot_name, slot_hour, kind
+            storage, day, event_day, tz_name, dry_run, out_dir, slot_name, slot_hour, kind
         )
     return rc
 
@@ -113,6 +118,7 @@ async def build(
 async def _build_one(
     storage: Storage,
     day: date,
+    event_day: date,
     tz_name: str,
     dry_run: bool,
     out_dir: Optional[str],
@@ -122,10 +128,13 @@ async def _build_one(
 ) -> int:
     label = f" [{slot_name or kind}]"
     bounds = selection.BOUNDS_FOR_KIND.get(kind, selection.day_bounds)
-    start_iso, end_iso = bounds(day, tz_name)
+    start_iso, end_iso = bounds(event_day, tz_name)
     profile = selection.PROFILES.get(kind, selection.DEFAULT_PROFILE)
-    period = selection.period_key(kind, day, tz_name)
-    log.info("building %s carousel for %s%s (%s .. %s)", kind, day, label, start_iso, end_iso)
+    period = selection.period_key(kind, event_day, tz_name)
+    log.info(
+        "building %s carousel for %s%s, posting %s (%s .. %s)",
+        kind, event_day, label, day, start_iso, end_iso,
+    )
 
     rows = await storage.query_events_for_range(CITY, start_iso, end_iso)
     log.info("%d approved El Paso event(s) in window%s", len(rows), label)
@@ -188,7 +197,7 @@ async def _build_one(
     total = len(picked) + 1
     jpegs = [
         render.render_cover(
-            day, len(picked), settings.ig_handle, kind=kind, period_label=period_label
+            event_day, len(picked), settings.ig_handle, kind=kind, period_label=period_label
         )
     ]
     for i, (cand, photo) in enumerate(zip(picked, photos, strict=True), start=2):
@@ -197,7 +206,7 @@ async def _build_one(
         )
 
     text = caption_mod.build_caption(
-        day, picked, site=settings.ig_handle, kind=kind, period_label=period_label
+        event_day, picked, site=settings.ig_handle, kind=kind, period_label=period_label
     )
     log.info("rendered %d slide(s), caption %d chars%s", len(jpegs), len(text), label)
 
@@ -261,11 +270,12 @@ async def _build_one(
                 http,
                 storage_client=storage.client,
                 post_id=post_id,
-                day=day,
+                day=event_day,
                 slide_paths=paths,
                 caption=text,
                 scheduled_for=auto_approve_at if settings.ig_auto_approve else scheduled_for,
                 slot=slot_name,
+                kind=kind,
             )
 
     # Phase 2: same code path, no separate flag plumbing.
@@ -377,6 +387,11 @@ async def _apply_edits_to_post(
 
     tz_name = settings.ig_timezone
     day = date.fromisoformat(str(post["post_date"]))
+    kind = str(post.get("kind") or "digest")
+    # post_date is the day the post ships; the daily digest covers the day
+    # after that (see build()'s event_day), so the rebuilt cover/caption must
+    # keep pointing at the same day the original render did.
+    event_day = day + timedelta(days=1) if kind == "digest" else day
     event_ids = [str(e) for e in (post.get("event_ids") or [])]
     overrides = dict(post.get("photo_overrides") or {})
 
@@ -429,7 +444,7 @@ async def _apply_edits_to_post(
         photos.append(await _load_photo(storage, http, cand.row, override))
 
     jpegs, caption_text = _render_carousel(
-        day, candidates, photos, rebuild_caption=not post.get("caption_is_custom")
+        event_day, candidates, photos, rebuild_caption=not post.get("caption_is_custom")
     )
     if caption_text is None:
         caption_text = str(post.get("caption") or "")
@@ -482,11 +497,12 @@ async def _apply_edits_to_post(
         http,
         storage_client=storage.client,
         post_id=post_id,
-        day=day,
+        day=event_day,
         slide_paths=paths,
         caption=caption_text,
         scheduled_for=post.get("auto_approve_at") or post.get("scheduled_for"),
         slot=post.get("slot"),
+        kind=kind,
     )
     return 0
 

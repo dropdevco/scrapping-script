@@ -1,12 +1,14 @@
-"""Daily Instagram carousel: "Today in El Paso".
+"""Daily Instagram carousel: "Tomorrow in El Paso".
 
 Turns the events already in Supabase into one carousel post per day — slide 1 a
 branded cover, slides 2..N one event each (source photo with the title, time and
-venue rendered onto it).
+venue rendered onto it). The daily digest ships the evening before the day it
+covers (see __main__.build's event_day), so a 7am event is known about the
+night before instead of announced after it's already over.
 
 Pipeline (see __main__.py for the CLI):
 
-    build   select today's events -> download + re-encode photos -> render
+    build   select tomorrow's events -> download + re-encode photos -> render
             1080x1350 JPEG slides -> upload to Supabase Storage -> insert an
             ig_posts row as 'draft'
     publish claim an 'approved' row and push it through the Graph API's

@@ -92,6 +92,7 @@ async def notify_draft_ready(
     caption: str,
     scheduled_for: Optional[str] = None,
     slot: Optional[str] = None,
+    kind: str = "digest",
 ) -> None:
     review_url: Optional[str] = None
     token = make_review_token(post_id)
@@ -99,7 +100,16 @@ async def notify_draft_ready(
         review_url = f"{settings.site_base_url}/admin/ig/review/{token}"
 
     await _notify_telegram(
-        http, storage_client, post_id, day, slide_paths, caption, review_url, scheduled_for, slot
+        http,
+        storage_client,
+        post_id,
+        day,
+        slide_paths,
+        caption,
+        review_url,
+        scheduled_for,
+        slot,
+        kind,
     )
     await _notify_email(http, day, review_url, scheduled_for, slot)
 
@@ -114,6 +124,7 @@ async def _notify_telegram(
     review_url: Optional[str],
     scheduled_for: Optional[str],
     slot: Optional[str],
+    kind: str = "digest",
 ) -> None:
     if not (settings.telegram_bot_token and settings.telegram_chat_id):
         return
@@ -166,7 +177,10 @@ async def _notify_telegram(
             lead = f"Waiting for approval — suggested for {when}."
         else:
             lead = "Waiting for approval."
-        head = f"Today in El Paso{slot_label} — {day.isoformat()}\n{lead}"
+        # The digest ships the evening before the events it lists — see
+        # build()'s event_day — so its header must say "Tomorrow", not "Today".
+        day_word = "Tomorrow" if kind == "digest" else "Today"
+        head = f"{day_word} in El Paso{slot_label} — {day.isoformat()}\n{lead}"
         if preview_failed:
             head += "\n⚠️ Slide preview failed to send; open the full preview to see them."
         # Plain text, no parse_mode: event titles routinely contain _ * [ ] —

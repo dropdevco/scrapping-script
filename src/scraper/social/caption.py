@@ -63,12 +63,14 @@ _CATEGORY_EMOJI = {
 _DEFAULT_EMOJI = "✨"
 
 # (opener text, flourish emoji) — day.toordinal() % len(_OPENERS) picks one,
-# so it varies day to day without needing real randomness.
+# so it varies day to day without needing real randomness. The digest ships
+# the evening before the day it covers (see build()'s event_day), so these
+# read as advance notice, not same-day hype.
 _OPENERS = [
-    ("TONIGHT'S THE NIGHT", "🌙"),
+    ("TOMORROW'S THE DAY", "🌙"),
     ("EL PASO, LISTEN UP", "📣"),
-    ("HAPPENING TODAY", "⚡"),
-    ("DON'T SLEEP ON TODAY", "👀"),
+    ("HAPPENING TOMORROW", "⚡"),
+    ("DON'T SLEEP ON TOMORROW", "👀"),
     ("EL PASO'S GOT PLANS", "🔥"),
 ]
 

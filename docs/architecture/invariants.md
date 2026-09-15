@@ -248,8 +248,9 @@ two-step"* (`moderate.ts:86-92`).
 
 ### `publish` verifies `post_date == today` before any network call
 
-A post approved late that only succeeds the next morning would otherwise publish "TODAY IN EL PASO —
-Aug 5" on Aug 6, with every event already over (`social/__main__.py:716-723`).
+A post approved late that only succeeds the next morning would otherwise publish "TOMORROW IN EL PASO —
+Aug 6" (built Aug 5 for Aug 6's events) on Aug 6 itself, with the whole point of the day's advance
+notice gone (`social/__main__.py:716-723`).
 
 ### A pending edit fails closed
 

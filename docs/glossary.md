@@ -66,7 +66,7 @@ constraint.
 
 | Kind | Window | Voice |
 |---|---|---|
-| `digest` | one local day | "TODAY IN EL PASO" — the daily post |
+| `digest` | one local day, the day *after* build day | "TOMORROW IN EL PASO" — the daily post, shipped the evening before |
 | `weekend` | Fri 00:00 → Mon 00:00 | "THIS WEEKEND" — built Thursdays |
 | `monthly` | the calendar month | "THIS MONTH IN EL PASO" — built on the 1st |
 | `horizon` | a 60-day span starting ~6 months out | "SAVE THE DATE" — ticketed events only |

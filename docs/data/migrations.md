@@ -1,8 +1,8 @@
 # Migrations
 
-Eleven migrations, `0001_init` through `0011_internal_table_rls`, applied by hand (0011 written but not
-yet applied — see below). There is no migration framework, no tracking table, and no automation —
-**which is exactly why the discipline below matters.**
+Eleven migrations, `0001_init` through `0011_internal_table_rls`, applied by hand. There is no
+migration framework, no tracking table, and no automation — **which is exactly why the discipline
+below matters.**
 
 ---
 
@@ -13,7 +13,7 @@ Stated in `0002_venues.sql:1-2` and restated in 0003 through 0006:
 > No drops, no deletes, no alterations of existing columns. Safe to run against a live database with
 > data.
 
-In ten migrations there is exactly **one** drop, and it is of an *index*, replaced in the same file by
+In eleven migrations there is exactly **one** drop, and it is of an *index*, replaced in the same file by
 a superset — behaviour-preserving by construction because every existing row collapsed to the old key.
 
 Every new column gets a default or is nullable, so pre-existing rows keep behaving exactly as before.
@@ -35,7 +35,7 @@ Several migrations say so explicitly in a comment; copy that habit.
 | 0008 | `ig_post_metrics` | The table, unique + fetched indexes; RLS, no policies | Opt-out publishing needs a feedback signal that does not depend on anyone looking |
 | 0009 | `ig_post_edits` | The table + pending index; `photo_overrides`, `caption_is_custom`. **Does not enable RLS** | Telegram-driven edits, shaped by the serverless/Pillow split |
 | 0010 | `ig_post_kinds` | Widens the `kind` CHECK to five values; `period_key`; the live-period index | Four formats over one renderer |
-| 0011 | `internal_table_rls` | RLS, no policies, on `runs` and `ig_post_edits` — **written, not yet applied to the live database** | Closes the P0 gap tracked since 0009; matches the 0004/0008 posture |
+| 0011 | `internal_table_rls` | RLS, no policies, on `runs` and `ig_post_edits`. Applied 2026-09-17 | Closes the anon-key gap open since 0001/0009; matches the 0004/0008 posture |
 
 ---
 
@@ -102,9 +102,9 @@ The alternative is pasting into the Supabase SQL Editor, which works fine for a 
    `0010:7-11`: a name collision makes it `..._check1`, and `drop … if exists` on the wrong name
    silently drops nothing — so the subsequent `add constraint` fails or, worse, the old constraint
    survives.
-6. **Consider RLS explicitly.** New tables do not get it by default, and two existing tables are
-   missing it. If the table should be invisible to the anon key, enable RLS with zero policies (that is
-   a deny-all) as 0004 and 0008 do.
+6. **Consider RLS explicitly.** New tables do not get it by default — 0001 and 0009 both shipped a
+   table without it, which 0011 had to close. If the table should be invisible to the anon key, enable
+   RLS with zero policies (that is a deny-all) as 0004 and 0008 do.
 7. **Apply it**, then verify the change from a real query rather than assuming.
 8. **Update the code and [schema.md](schema.md) in the same commit.**
 9. **Run `python -m scraper.kb export`** if the change touches stored event data, per the standing
@@ -125,11 +125,8 @@ Always `--dry-run` before `backfill_merge_duplicates.py`; it issues DELETEs.
 ## Known gaps in this area
 
 - **No migration-tracking table.** Which migrations have been applied to the live project is tracked
-  only by humans. Adding a `schema_migrations` table (and backfilling it with 0001–0010) would be a
+  only by humans. Adding a `schema_migrations` table (and backfilling it with 0001–0011) would be a
   small, high-value change.
-- **`0011` (RLS on `runs`/`ig_post_edits`) is written but not applied.** Needs `SUPABASE_DB_URL` and
-  `python -m scraper.apply_migration supabase/migrations/0011_internal_table_rls.sql`, then verification.
-  See [schema.md](schema.md#two-tables-whose-rls-fix-is-written-but-not-yet-applied).
 - **Storage buckets are not in version control.** `ig-slides` exists because someone called
   `create_bucket()` once; a fresh environment has no bucket.
 - **No rollback procedure is documented anywhere**, for migrations or for deploys.
@@ -138,4 +135,4 @@ All tracked in [known-gaps.md](../known-gaps.md).
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-12.*
+*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-17.*

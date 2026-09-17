@@ -98,7 +98,7 @@ The observability log: `id`, `tool`, `params` (jsonb), `source_counts` (jsonb), 
 The **per-source counts are the only way to distinguish "a source found nothing" from "a source is
 silently broken"**, so this table is the first place to look when coverage drops.
 
-> **RLS is never enabled on this table.** See [Row-level security](#row-level-security).
+> **RLS was not enabled on this table until 0011.** See [Row-level security](#row-level-security).
 
 ---
 
@@ -175,7 +175,7 @@ Indexed on `(post_id) WHERE applied_at IS NULL`. `requested_at` is also the natu
 Why a table rather than a jsonb column on `ig_posts`:
 [ADR-0009](../architecture/adr/0009-edit-intents-as-rows.md).
 
-> **RLS is never enabled on this table.** See below.
+> **RLS was not enabled on this table until 0011.** See below.
 
 ---
 
@@ -223,8 +223,8 @@ equivalence**; that is a known gap.
 | `trends` | on | 1 |
 | `ig_posts` | on | **none** — deny-all for anon |
 | `ig_post_metrics` | on | **none** — deny-all for anon |
-| `ig_post_edits` | on (0011, unapplied) | **none** — deny-all for anon |
-| `runs` | on (0011, unapplied) | **none** — deny-all for anon |
+| `ig_post_edits` | on (0011) | **none** — deny-all for anon |
+| `runs` | on (0011) | **none** — deny-all for anon |
 
 | Policy | Table | Cmd | Roles | Predicate |
 |---|---|---|---|---|
@@ -247,17 +247,17 @@ The scraper, the carousel pipeline, the KB export and every admin server action 
 key, which bypasses RLS entirely.** RLS will not protect a public surface built on a service-role read.
 See [invariants §3](../architecture/invariants.md#a-public-facing-read-must-filter-status-itself).
 
-### Two tables whose RLS fix is written but not yet applied
+### Two tables that shipped without RLS
 
-`runs` and `ig_post_edits` had no `enable row level security` statement in any migration through 0010.
-`0011_internal_table_rls.sql` closes that — same posture as `ig_posts`/`ig_post_metrics`, RLS on with
+`runs` and `ig_post_edits` had no `enable row level security` statement in any migration through 0010,
+which left both reachable through PostgREST by the published anon key.
+`0011_internal_table_rls.sql` closed that — same posture as `ig_posts`/`ig_post_metrics`, RLS on with
 zero policies (deny-all for anon/authenticated; service-role is unaffected).
 
-**The migration is not yet applied to the live database** — this repo's DDL path
-([migrations.md](migrations.md#how-they-are-applied)) needs `SUPABASE_DB_URL`, which was not available
-when 0011 was written. Run `python -m scraper.apply_migration supabase/migrations/0011_internal_table_rls.sql`,
-then verify `relrowsecurity` on both tables, before treating this as closed. See
-[known-gaps.md](../known-gaps.md).
+Applied to the live database on 2026-09-17 and verified there: `relrowsecurity` is true on both, an
+anon-key read of `runs` (325 rows) returns `[]`, an insert as the `anon` role into either table fails
+with `42501`, and service-role reads still succeed. `runs` turned out to already have RLS on before
+0011 ran — enabled out of band, not by any migration — while `ig_post_edits` was still open.
 
 ---
 
@@ -294,4 +294,4 @@ Worth knowing before you assume the database is validating something:
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-10.*
+*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-17.*

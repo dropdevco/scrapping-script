@@ -24,23 +24,66 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from .core.config import settings
-from .core.dedupe import _TITLE_ONLY_THRESHOLD, _TOKEN_OVERLAP_THRESHOLD, _norm, _similar, _title_token_overlap
-from .core.dedupe import merge_ticket_links
+from .core.dedupe import city_of, is_same_stored_event, merge_ticket_links
 from .core.eventtime import local_day
 from .core.models import TicketLink
 
 log = logging.getLogger("scraper.backfill_merge_duplicates")
 
 
-def _is_same_event(a_title: str, b_title: str) -> bool:
-    if _similar(_norm(a_title), _norm(b_title)) >= _TITLE_ONLY_THRESHOLD:
-        return True
-    return _title_token_overlap(a_title, b_title) >= _TOKEN_OVERLAP_THRESHOLD
+def _repoint_ig_posts(client, keeper_id: str, loser_ids: list[str], dry_run: bool) -> None:
+    """Move any live ig_posts reference off a row that is about to be deleted.
+
+    ig_posts.event_ids is a plain array of event ids with no FK, so deleting a
+    loser silently strands it -- the carousel then rebuilds with one fewer
+    event, or falls below IG_MIN_SLIDES and skips the day entirely. Only live
+    posts matter; published and rejected ones are history.
+    """
+    try:
+        posts = (
+            client.table("ig_posts")
+            .select("id,event_ids,status")
+            .in_("status", ["draft", "approved", "publishing"])
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("  could not check ig_posts for stranded references: %s", exc)
+        return
+
+    losers = set(loser_ids)
+    for post in posts:
+        ids = [str(i) for i in (post.get("event_ids") or [])]
+        if not losers.intersection(ids):
+            continue
+        rewritten: list[str] = []
+        for i in ids:
+            replacement = keeper_id if i in losers else i
+            if replacement not in rewritten:
+                rewritten.append(replacement)
+        log.info("        repointing ig_post %s (%s)", post["id"], post.get("status"))
+        if not dry_run:
+            try:
+                client.table("ig_posts").update({"event_ids": rewritten}).eq(
+                    "id", post["id"]
+                ).execute()
+            except Exception as exc:  # noqa: BLE001
+                log.error("        failed to repoint ig_post %s: %s", post["id"], exc)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Merge duplicate events already stored.")
     ap.add_argument("--dry-run", action="store_true", help="report without writing")
+    ap.add_argument(
+        "--cross-venue",
+        action="store_true",
+        help=(
+            "also merge across DIFFERENT venue rows (an aggregator's brand vs the "
+            "building's own name). Harder-gated than the same-venue pass and "
+            "off by default: always read a --dry-run of this one by hand."
+        ),
+    )
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -56,7 +99,10 @@ def main() -> int:
     now = datetime.now(timezone.utc).isoformat()
     rows = (
         client.table("events")
-        .select("id,title,venue_id,start_time,description,image_url,end_time,categories,ticket_links")
+        .select(
+            "id,title,venue,venue_id,location,start_time,description,image_url,"
+            "end_time,categories,ticket_links"
+        )
         .eq("status", "approved")
         .not_.is_("venue_id", "null")
         .gte("start_time", now)
@@ -80,7 +126,10 @@ def main() -> int:
         if local is None:
             continue
         day = local.date().isoformat()
-        by_venue_day[(r["venue_id"], day)].append(r)
+        # The cross-venue pass buckets by city+day instead of venue+day, which
+        # is the whole point: the two copies sit at different venue rows.
+        bucket = (city_of(r) or "?", day) if args.cross_venue else (r["venue_id"], day)
+        by_venue_day[bucket].append(r)
 
     groups = 0
     merges = 0
@@ -92,7 +141,7 @@ def main() -> int:
         for row in group:
             placed = False
             for cluster in clusters:
-                if _is_same_event(row["title"] or "", cluster[0]["title"] or ""):
+                if is_same_stored_event(row, cluster[0], allow_cross_venue=args.cross_venue):
                     cluster.append(row)
                     placed = True
                     break
@@ -125,20 +174,27 @@ def main() -> int:
             if categories != (keeper.get("categories") or []):
                 patch["categories"] = categories
 
-            loser_titles = ", ".join(f"{l['title']!r} ({l['id']})" for l in losers)
             log.info(
-                "MERGE %d source(s) -> keep %r (%s): %s",
-                len(losers),
-                keeper["title"],
-                keeper["id"],
-                loser_titles,
+                "MERGE %d source(s) -> keep %r @ %r (%s)",
+                len(losers), keeper["title"], keeper.get("venue"), keeper["id"],
             )
+            for loser in losers:
+                # Venue names are printed because on a cross-venue pass they are
+                # the part a human most needs to eyeball.
+                note = ""
+                k_start, l_start = local_day(keeper["start_time"]), local_day(loser["start_time"])
+                if k_start and l_start and k_start != l_start:
+                    note = f"  <-- TIME DISAGREES ({l_start:%H:%M} vs kept {k_start:%H:%M})"
+                log.info("        %r @ %r (%s)%s", loser["title"], loser.get("venue"), loser["id"], note)
             merges += len(losers)
+
+            loser_ids = [l["id"] for l in losers]
+            _repoint_ig_posts(client, keeper["id"], loser_ids, args.dry_run)
 
             if not args.dry_run:
                 try:
                     client.table("events").update(patch).eq("id", keeper["id"]).execute()
-                    client.table("events").delete().in_("id", [l["id"] for l in losers]).execute()
+                    client.table("events").delete().in_("id", loser_ids).execute()
                 except Exception as exc:  # noqa: BLE001
                     log.error("  failed to merge group for %r: %s", keeper["title"], exc)
 

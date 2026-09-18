@@ -13,6 +13,17 @@ on:
         type: choice
         options: ["all", "events", "trends"]
 
+# The cross-run merge in storage.py is a read-then-write with no locking: two
+# overlapping runs both SELECT "what's already stored" before either UPSERTs,
+# so both conclude the same event is new and both insert it. A manual dispatch
+# on top of the 11:00 cron is enough to do it.
+# cancel-in-progress: false, matching ig-daily — a cancelled scrape would still
+# fire the workflow_run that ig-daily's build keys off, and build a carousel
+# from half-written data.
+concurrency:
+  group: scheduled-scrape
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest

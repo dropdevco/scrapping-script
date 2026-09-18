@@ -79,8 +79,23 @@ async def run_events() -> None:
             force_refresh=True,
         )
         result = await orchestrator.run(params)
-        log.info("events @ %s: %s stored (sources ok: %s, failed: %s)",
-                 location, result["count"], result.get("sources_ok"), result.get("sources_failed"))
+        # result["count"] alone was the old log line, and it over-reported: it
+        # is the post-dedupe list length, counted BEFORE the cross-run merge
+        # removed the rows that folded into already-stored events. Print the
+        # whole funnel so a duplicate's origin is answerable from the log.
+        p = result.get("pipeline") or {}
+        log.info(
+            "events @ %s: %s raw -> %s after dedupe -> %s merged into existing "
+            "(%s cross-venue) -> %s upserted (sources ok: %s, failed: %s)",
+            location,
+            p.get("raw", "?"),
+            p.get("after_fuzzy", "?"),
+            p.get("merged_same_venue", 0) + p.get("merged_cross_venue", 0),
+            p.get("merged_cross_venue", 0),
+            p.get("upserted", "?"),
+            result.get("sources_ok"),
+            result.get("sources_failed"),
+        )
 
 
 async def run_trends() -> None:

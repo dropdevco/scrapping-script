@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from difflib import SequenceMatcher
+from typing import Any, Optional
 
+from .eventtime import local_day
 from .models import Document, Event, TicketLink, Trend
 from .ticket_labels import ticket_label
 
@@ -50,6 +53,22 @@ def _norm(text: str | None) -> str:
     if not text:
         return ""
     return _WS.sub(" ", text.strip().lower())
+
+
+def fold(text: str | None) -> str:
+    """Accent- and punctuation-insensitive form, for comparing titles.
+
+    _norm only lowercases and collapses whitespace, which is why
+    "SIN BANDERA - ESCENAS US TOUR" and "Sin Bandera – ESCENAS US TOUR" — the
+    same concert, stored twice on 2026-09-18 — compared at 0.97 rather than
+    1.0: a hyphen and an en-dash are different characters. Collapsing every
+    non-alphanumeric run to a single space removes that whole class of
+    near-miss, and NFKD plus combining-mark stripping does the same for
+    "MÁGICO" against "MAGICO".
+    """
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", stripped.lower()).split())
 
 
 def _hash(key: str) -> str:
@@ -118,6 +137,89 @@ def merge_ticket_links(a: list[TicketLink], b: list[TicketLink]) -> list[TicketL
     return list(seen.values())
 
 
+# ── stored-row identity (shared by storage's live merge and the backfill) ──────
+
+# Cross-venue matching has no venue confirmation, so the title has to carry the
+# whole claim: a much harder similarity bar than the venue-confirmed lane's 0.90.
+_CROSS_VENUE_TITLE_THRESHOLD = 0.95
+# ...and the title must actually say something. "Karaoke Night" reduces to one
+# distinctive word and would match every karaoke night in the city; "Yoga in the
+# Park" reduces to two. Three is the floor for treating a title as an identity.
+_CROSS_VENUE_MIN_TOKENS = 3
+
+_CITY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ciudad juarez", ("ciudad juarez", "cd juarez", "juarez", "chihuahua")),
+    ("el paso", ("el paso", "fort bliss", "socorro", "canutillo", "horizon city")),
+    ("las cruces", ("las cruces", "mesilla", "new mexico")),
+)
+
+
+def city_of(row: dict[str, Any]) -> Optional[str]:
+    """Coarse city for a stored row, or None when it cannot be determined.
+
+    None BLOCKS a cross-venue merge rather than permitting one: a touring act
+    playing Juárez on Friday and El Paso on Saturday is two real events, and
+    guessing here would erase one of them.
+    """
+    haystack = fold(f"{row.get('location') or ''} {row.get('venue') or ''}")
+    for city, needles in _CITY_PATTERNS:
+        if any(n in haystack for n in needles):
+            return city
+    return None
+
+
+def _day_of(row: dict[str, Any]) -> Optional[Any]:
+    """Local calendar day. Both sides go through local_day because the incoming
+    row carries a local offset while the stored one comes back from Postgres in
+    UTC, and comparing those .date() values directly files the same evening
+    event under two different days."""
+    raw = row.get("start_time")
+    if not raw:
+        return None
+    resolved = local_day(raw)
+    return resolved.date() if resolved else None
+
+
+def is_same_stored_event(
+    a: dict[str, Any], b: dict[str, Any], *, allow_cross_venue: bool = False
+) -> bool:
+    """Are these two STORED rows the same real happening?
+
+    One definition, used by both storage._merge_with_existing and
+    backfill_merge_duplicates, which previously carried divergent copies.
+
+    ``allow_cross_venue`` is the harder lane, for the case the venue-keyed lane
+    structurally cannot see: the same show listed by an aggregator under its own
+    brand ("El Paso Live") and by the building ("Plaza Theatre"). It carries no
+    venue confirmation, so every gate below has to do that work instead. The
+    standing bias is that a false merge silently hides a real event, which is
+    worse than an unmerged duplicate — so each gate fails closed.
+    """
+    day = _day_of(a)
+    if day is None or day != _day_of(b):
+        return False
+
+    title_a = a.get("title") or ""
+    title_b = b.get("title") or ""
+
+    if not allow_cross_venue:
+        # The caller has already proven venue + day, so the title alone decides.
+        if _similar(_norm(title_a), _norm(title_b)) >= _TITLE_ONLY_THRESHOLD:
+            return True
+        return _title_token_overlap(title_a, title_b) >= _TOKEN_OVERLAP_THRESHOLD
+
+    if len(_meaningful_tokens(title_a)) < _CROSS_VENUE_MIN_TOKENS:
+        return False
+    if len(_meaningful_tokens(title_b)) < _CROSS_VENUE_MIN_TOKENS:
+        return False
+
+    city = city_of(a)
+    if city is None or city != city_of(b):
+        return False
+
+    return _similar(fold(title_a), fold(title_b)) >= _CROSS_VENUE_TITLE_THRESHOLD
+
+
 def _merge_categories(a: list[str], b: list[str]) -> list[str]:
     seen: dict[str, None] = {}
     for c in (*a, *b):
@@ -183,10 +285,18 @@ def _merge_into(kept: Event, dup: Event) -> Event:
     return richer
 
 
-def dedupe_events(events: list[Event], fuzzy_threshold: float = _TITLE_ONLY_THRESHOLD) -> list[Event]:
+def dedupe_events(
+    events: list[Event],
+    fuzzy_threshold: float = _TITLE_ONLY_THRESHOLD,
+    stats: Optional[dict[str, int]] = None,
+) -> list[Event]:
     """Drop exact hash duplicates, then merge same-day near-identical events
     (by title, or by title+venue) into one record — unioning ticket links and
     categories rather than picking a single "winner" and discarding the rest.
+
+    Pass ``stats`` to record how much each stage collapsed; omitted, this
+    behaves exactly as before. Nothing in here used to log at all, so an
+    in-batch merge was completely invisible after the fact.
     """
     for e in events:
         seed_ticket_link(e)
@@ -197,6 +307,7 @@ def dedupe_events(events: list[Event], fuzzy_threshold: float = _TITLE_ONLY_THRE
         seen[key] = _merge_into(seen[key], e) if key in seen else e
 
     merged: list[Event] = []
+    fuzzy_merges = 0
     for e in seen.values():
         dup_index = next(
             (i for i, kept in enumerate(merged) if _same_real_event(e, kept, fuzzy_threshold)), None
@@ -205,6 +316,15 @@ def dedupe_events(events: list[Event], fuzzy_threshold: float = _TITLE_ONLY_THRE
             merged.append(e)
         else:
             merged[dup_index] = _merge_into(merged[dup_index], e)
+            fuzzy_merges += 1
+
+    if stats is not None:
+        stats.update(
+            raw=len(events),
+            after_exact=len(seen),
+            after_fuzzy=len(merged),
+            fuzzy_merges=fuzzy_merges,
+        )
     return merged
 
 

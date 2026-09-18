@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-import unicodedata
 from typing import Optional
+
+from .dedupe import fold
 
 
 def format_address(
@@ -89,16 +90,14 @@ _ZIP_PLUS_FOUR = re.compile(r"\b(\d{5})-\d{4}\b")
 
 
 def _fold(text: Optional[str]) -> str:
-    """Accent-, case- and punctuation-insensitive form. NFKD then dropping
-    combining marks makes "Juárez" and "Juarez" the same string."""
-    decomposed = unicodedata.normalize("NFKD", text or "")
-    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
-    lowered = stripped.lower()
-    # "#12" is a suite number; keep it as one by spelling it out before the
-    # punctuation sweep removes the marker entirely.
-    lowered = lowered.replace("#", " ste ")
-    lowered = _ZIP_PLUS_FOUR.sub(r"\1", lowered)
-    return " ".join(re.sub(r"[^a-z0-9]+", " ", lowered).split())
+    """Address-specific folding on top of the shared text fold.
+
+    Both steps here have to happen BEFORE the generic fold strips punctuation:
+    "#12" is a suite number and loses its meaning once the sigil is gone, and
+    the ZIP+4 pattern needs its hyphen to be recognisable as one.
+    """
+    pre = (text or "").replace("#", " ste ")
+    return fold(_ZIP_PLUS_FOUR.sub(r"\1", pre))
 
 
 def normalize_address(address: Optional[str]) -> str:

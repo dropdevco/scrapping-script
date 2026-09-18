@@ -18,6 +18,7 @@ from typing import Any, Optional
 from .address import venue_identity
 from .config import settings
 from .dedupe import _TITLE_ONLY_THRESHOLD, _TOKEN_OVERLAP_THRESHOLD, _norm, _similar, _title_token_overlap
+from .dedupe import is_same_stored_event
 from .dedupe import merge_ticket_links as _merge_ticket_links
 from .eventtime import event_tz, local_day, to_event_local
 from .models import Event, TicketLink, Trend
@@ -128,9 +129,16 @@ class Storage:
         return self._client
 
     # ── writes ────────────────────────────────────────────────────────────────
-    async def upsert_events(self, events: list[Event]) -> None:
+    async def upsert_events(self, events: list[Event]) -> dict[str, int]:
+        """Persist a batch, returning counters for the run telemetry.
+
+        The counters exist because the scrape logs could not answer "how did a
+        duplicate get in?" — nothing recorded how many rows were merged versus
+        inserted, and the only count that reached the log was computed before
+        this method ran, so it over-reported.
+        """
         if not self.enabled or not events:
-            return
+            return {}
         # Venues first, so event rows can reference them. A venue failure must never
         # break the event upsert — _upsert_venues returns {} and venue_id stays None.
         venue_ids = await asyncio.to_thread(self._upsert_venues, events)
@@ -151,9 +159,18 @@ class Storage:
         # it, every new ticketing site a venue's event is later found on would
         # create a second card for the same happening instead of adding a
         # ticket link to the existing one.
-        rows = await asyncio.to_thread(self._merge_with_existing, rows)
+        submitted = len(rows)
+        rows, counters = await asyncio.to_thread(self._merge_with_existing, rows)
+        upsert_ok = True
         if rows:
-            await asyncio.to_thread(self._upsert, "events", rows, "content_hash")
+            upsert_ok = await asyncio.to_thread(self._upsert, "events", rows, "content_hash")
+        return {
+            "submitted": submitted,
+            "venue_resolved": sum(1 for r in rows if r.get("venue_id")),
+            "upserted": len(rows),
+            "upsert_ok": int(upsert_ok),
+            **counters,
+        }
 
     async def upsert_trends(self, trends: list[Trend]) -> None:
         if not self.enabled or not trends:
@@ -723,18 +740,25 @@ class Storage:
         return await asyncio.to_thread(_q)
 
     # ── internals ───────────────────────────────────────────────────────────────
-    def _merge_with_existing(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _merge_with_existing(
+        self, rows: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Fold rows that are the same real event as something already stored
-        (same venue, same calendar day, near-identical title) into that
-        existing row's ticket_links instead of inserting a second card for
-        it. Returns the rows that should still go through the normal
-        content_hash upsert — new events, plus any row with no resolved venue
-        (a venue-less title-only cross-run match would be unreliable, so
-        those are left to the plain upsert path unmerged).
+        into that existing row's ticket_links instead of inserting a second
+        card for it. Returns the rows that should still go through the normal
+        content_hash upsert, plus counters for the run telemetry.
+
+        Two lanes. Lane 1 buckets by venue_id and is the original, unchanged
+        behaviour. Lane 2 then reconsiders only what lane 1 did not claim,
+        matching across DIFFERENT venue rows — the case lane 1 structurally
+        cannot see, where an aggregator lists a show under its own brand
+        ("El Paso Live") and the building lists it under its own name. All
+        three duplicate pairs found in production on 2026-09-18 were that
+        shape. Lane 2's gates live in dedupe.is_same_stored_event.
         """
         candidates = [r for r in rows if r.get("venue_id") and r.get("start_time")]
         if not candidates:
-            return rows
+            return rows, {}
 
         venue_ids = list({r["venue_id"] for r in candidates})
         # Local calendar days, and a window whose edges are LOCAL midnights.
@@ -748,16 +772,23 @@ class Storage:
             max(days) + timedelta(days=1), datetime.min.time(), tzinfo=tz
         )
 
+        cross_venue = settings.dedupe_cross_venue
         try:
-            existing = (
+            query = (
                 self._client.table("events")
                 .select(
-                    "id,title,venue_id,start_time,description,image_url,end_time,"
-                    "categories,ticket_links"
+                    "id,title,venue,venue_id,location,start_time,description,image_url,"
+                    "end_time,categories,ticket_links"
                 )
                 .eq("status", "approved")
-                .in_("venue_id", venue_ids)
-                .gte("start_time", window_start.isoformat())
+            )
+            # Lane 2 has to see rows at OTHER venues, so the venue filter is
+            # dropped when it is on. The window is a handful of days, so this
+            # is still one small query, not a table scan.
+            if not cross_venue:
+                query = query.in_("venue_id", venue_ids)
+            existing = (
+                query.gte("start_time", window_start.isoformat())
                 .lt("start_time", window_end.isoformat())
                 .execute()
                 .data
@@ -765,24 +796,73 @@ class Storage:
             )
         except Exception as exc:  # noqa: BLE001 - a failed lookup must not break the upsert
             log.warning("existing-event lookup failed, skipping cross-run merge: %s", exc)
-            return rows
+            return rows, {}
 
         by_venue: dict[str, list[dict[str, Any]]] = {}
         for e in existing:
             by_venue.setdefault(e["venue_id"], []).append(e)
 
         kept: list[dict[str, Any]] = []
-        merged_count = 0
+        counters = {"merged_same_venue": 0, "merged_cross_venue": 0, "cross_venue_ambiguous": 0}
         for row in rows:
             match = self._find_duplicate(row, by_venue.get(row.get("venue_id"), []))
-            if match is None:
-                kept.append(row)
-            else:
+            if match is not None:
                 self._apply_merge(match, row)
-                merged_count += 1
-        if merged_count:
-            log.info("merged %d event(s) into existing rows (new ticket link, not a new card)", merged_count)
-        return kept
+                counters["merged_same_venue"] += 1
+                continue
+
+            if cross_venue:
+                match = self._find_cross_venue_duplicate(row, existing, counters)
+                if match is not None:
+                    log.info(
+                        "cross-venue merge: %r @ %r -> stored %r @ %r (%s)",
+                        row.get("title"), row.get("venue"),
+                        match.get("title"), match.get("venue"), match.get("id"),
+                    )
+                    self._apply_merge(match, row)
+                    counters["merged_cross_venue"] += 1
+                    continue
+
+            kept.append(row)
+
+        total = counters["merged_same_venue"] + counters["merged_cross_venue"]
+        if total:
+            log.info(
+                "merged %d event(s) into existing rows (%d same-venue, %d cross-venue) "
+                "— new ticket links, not new cards",
+                total, counters["merged_same_venue"], counters["merged_cross_venue"],
+            )
+        return kept, counters
+
+    @staticmethod
+    def _find_cross_venue_duplicate(
+        row: dict[str, Any], existing: list[dict[str, Any]], counters: dict[str, int]
+    ) -> Optional[dict[str, Any]]:
+        """Lane 2: match against rows at a DIFFERENT venue.
+
+        Ambiguity is refused, not guessed. If a title matches two stored rows
+        then the title is not an identity for this event, and the cost of being
+        wrong is deleting one of them — so the duplicate is allowed to stand
+        and the case is logged loudly enough to investigate.
+        """
+        matches = [
+            e
+            for e in existing
+            if e.get("venue_id") != row.get("venue_id")
+            and is_same_stored_event(row, e, allow_cross_venue=True)
+        ]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            counters["cross_venue_ambiguous"] += 1
+            log.warning(
+                "cross-venue merge refused: %r @ %r matches %d stored rows (%s) — "
+                "leaving the duplicate rather than guessing",
+                row.get("title"), row.get("venue"), len(matches),
+                ", ".join(str(m.get("id")) for m in matches),
+            )
+            return None
+        return matches[0]
 
     @staticmethod
     def _find_duplicate(
@@ -812,7 +892,25 @@ class Storage:
         categories, backfill fields the existing row is missing. Never
         overwrites a field the existing row already has, and never touches
         the row's id/content_hash, so links elsewhere (the /events/[id] URL,
-        anything already pointing at this row) keep working."""
+        anything already pointing at this row) keep working.
+
+        That it never overwrites ``start_time`` is a GUARANTEE, not an
+        accident, and it is what makes the cross-venue lane safe to run on
+        rows whose times disagree: an aggregator listing a 19:30 show at 13:30
+        contributes its ticket link and nothing else. The disagreement is
+        logged rather than resolved, because picking a winner would be
+        inventing a fact.
+        """
+        existing_start, incoming_start = existing.get("start_time"), row.get("start_time")
+        if existing_start and incoming_start:
+            a, b = local_day(existing_start), local_day(incoming_start)
+            if a and b and abs((a - b).total_seconds()) > 90 * 60:
+                log.warning(
+                    "start_time disagreement on %r: stored %s, incoming %s (%r) — "
+                    "keeping the stored time",
+                    existing.get("title"), existing_start, incoming_start, row.get("venue"),
+                )
+
         existing_links = [TicketLink(**tl) for tl in (existing.get("ticket_links") or [])]
         new_links = [TicketLink(**tl) for tl in (row.get("ticket_links") or [])]
         patch: dict[str, Any] = {
@@ -928,11 +1026,16 @@ class Storage:
                 found += 1
         log.info("geocoded %d/%d new venue(s)", found, len(todo))
 
-    def _upsert(self, table: str, rows: list[dict[str, Any]], on_conflict: str) -> None:
+    def _upsert(self, table: str, rows: list[dict[str, Any]], on_conflict: str) -> bool:
+        """Returns whether the write landed. A swallowed failure here used to be
+        indistinguishable from a quiet run: the batch was lost, the log carried
+        one line, and the run still reported success."""
         try:
             self._client.table(table).upsert(rows, on_conflict=on_conflict).execute()
+            return True
         except Exception as exc:  # noqa: BLE001
             log.error("upsert into %s failed: %s", table, exc)
+            return False
 
     @staticmethod
     def _cutoff() -> str:

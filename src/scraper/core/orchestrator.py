@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timezone
-from typing import Any
+from typing import Any, Optional
 
 from .dedupe import (
     assign_hashes_events,
@@ -85,12 +85,21 @@ async def _gather(params: SearchParams, http: HttpClient):
     return items, summaries
 
 
-def _summ(summaries: list[SourceResult]) -> dict[str, Any]:
-    return {
+def _summ(
+    summaries: list[SourceResult], pipeline: Optional[dict[str, int]] = None
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
         "sources": [s.model_dump() for s in summaries],
         "sources_ok": [s.source for s in summaries if s.ok],
         "sources_failed": [s.source for s in summaries if not s.ok],
     }
+    # Persisted into runs.source_counts, which is the only durable record of
+    # what a scrape actually did. Without it "how did this duplicate get in?"
+    # is unanswerable after the fact — the Actions log is retention-limited and
+    # never carried per-row accounting at all.
+    if pipeline:
+        out["pipeline"] = pipeline
+    return out
 
 
 async def run(params: SearchParams) -> dict[str, Any]:
@@ -109,17 +118,19 @@ async def run(params: SearchParams) -> dict[str, Any]:
 
     # 3) Normalize + dedupe + persist by kind.
     tool = f"run_{params.kind.value}"
+    pipeline: dict[str, int] = {}
     try:
         if params.kind is Kind.EVENTS:
             events: list[Event] = [i for i in raw_items if isinstance(i, Event)]
             events = [e for e in events if _is_showable(e)]
             events = [_localize_times(e) for e in events]
-            events = dedupe_events(assign_hashes_events(events))
+            events = dedupe_events(assign_hashes_events(events), stats=pipeline)
             # Chronological, not by source registration order — otherwise a source
             # that returns lots of events crowds out other sources before storage.
             events.sort(key=_event_sort_key)
             events = events[: params.limit]
-            await storage.upsert_events(events)
+            pipeline["limited"] = len(events)
+            pipeline.update(await storage.upsert_events(events))
             items = [e.model_dump(mode="json") for e in events]
         elif params.kind is Kind.TRENDS:
             trends: list[Trend] = [i for i in raw_items if isinstance(i, Trend)]
@@ -138,13 +149,14 @@ async def run(params: SearchParams) -> dict[str, Any]:
         log.exception("normalize/persist failed")
         items, status, error = [], "error", str(exc)
 
-    await storage.log_run(tool, params.model_dump(mode="json"), _summ(summaries), status, error)
+    summary = _summ(summaries, pipeline)
+    await storage.log_run(tool, params.model_dump(mode="json"), summary, status, error)
 
     return {
         "count": len(items),
         "cached": False,
         "items": items,
-        **_summ(summaries),
+        **summary,
         "status": status,
         "error": error,
     }

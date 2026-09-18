@@ -80,6 +80,13 @@ class Settings:
         self.geocode_venues = _bool("GEOCODE_VENUES", True)
         self.geocode_max_per_run = _int("GEOCODE_MAX_PER_RUN", 25)
 
+        # Cross-venue duplicate merging (storage._merge_with_existing, lane 2).
+        # Catches the same show listed by an aggregator under its own brand and
+        # by the building itself — invisible to the venue_id-keyed lane. On by
+        # default; this is the switch to flip if it ever merges two real events,
+        # without needing a code change.
+        self.dedupe_cross_venue = _bool("DEDUPE_CROSS_VENUE", True)
+
         # Events
         self.ticketmaster_api_key = _clean(os.getenv("TICKETMASTER_API_KEY"))
 

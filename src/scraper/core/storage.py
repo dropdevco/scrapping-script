@@ -11,11 +11,11 @@ blocking the event loop.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from .address import venue_identity
 from .config import settings
 from .dedupe import _TITLE_ONLY_THRESHOLD, _TOKEN_OVERLAP_THRESHOLD, _norm, _similar, _title_token_overlap
 from .dedupe import merge_ticket_links as _merge_ticket_links
@@ -37,12 +37,16 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
 
 
 def _address_hash(address: Optional[str], venue_name: Optional[str]) -> str:
-    """Stable venue natural key. MUST match the SQL rule in 0002_venues.sql:
+    """Stable venue natural key — see address.venue_identity for the rules.
 
-    sha1( lower(trim(coalesce(address,''))) || '|' || lower(trim(coalesce(venue_name,''))) )
+    The raw lower/trim rule this used to implement (and the matching SQL in
+    0002_venues.sql) forked a venue on every punctuation difference: 85 of 439
+    rows were redundant, which then defeated the venue_id-keyed event merge.
+    The SQL in 0002 was a one-time backfill, not a live contract; address.py is
+    now the single source of truth, mirrored in web/src/lib/hash.ts for the
+    submission form.
     """
-    key = f"{(address or '').strip().lower()}|{(venue_name or '').strip().lower()}"
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return venue_identity(address, venue_name)
 
 
 def _venue_row(e: Event) -> dict[str, Any]:

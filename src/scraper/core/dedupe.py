@@ -157,6 +157,29 @@ def _merge_into(kept: Event, dup: Event) -> Event:
     richer, other = (kept, dup) if _fields_filled(kept) >= _fields_filled(dup) else (dup, kept)
     richer.ticket_links = merge_ticket_links(richer.ticket_links, other.ticket_links)
     richer.categories = _merge_categories(richer.categories, other.categories)
+
+    # Identity must NOT depend on which copy happened to be richer this run.
+    # It used to: the survivor kept its own hash, so the day a second source
+    # started carrying one extra field — or the day the first source simply
+    # failed and only one copy existed — the cluster changed hash, missed the
+    # upsert conflict, and INSERTed a second row for an event already stored.
+    # Three such pairs were live on 2026-09-17. min() is commutative and
+    # associative, so a cluster resolves to the same hash under any arrival
+    # order, any richness, and any subset of sources being reachable.
+    hashes = [h for h in (kept.content_hash, dup.content_hash) if h]
+    if hashes:
+        richer.content_hash = min(hashes)
+
+    # Two sources disagreeing on the start time is real and common (an
+    # aggregator listing 13:30 for a 19:30 show). Record it rather than
+    # resolving it: picking a winner here would be inventing a fact, and this
+    # repo omits rather than guesses times. _apply_merge never overwrites a
+    # stored start_time, so the disagreement stays visible instead of flipping.
+    if other.start_time and richer.start_time and other.start_time != richer.start_time:
+        alts = richer.raw.setdefault("_merged_alt_start_times", [])
+        if isinstance(alts, list):
+            alts.append({"source": other.source, "start_time": other.start_time.isoformat()})
+
     return richer
 
 

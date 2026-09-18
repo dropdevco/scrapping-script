@@ -26,6 +26,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 
+from ..core.eventtime import local_day
 from .imaging import SourcePhoto
 
 log = logging.getLogger("scraper.social.render")
@@ -340,6 +341,21 @@ def _greedy_wrap(draw, words: list[str], fnt, box_w: int) -> list[str]:
 # ellipsize, and a reserve that assumed one line each is how a long venue name
 # would push the chip off the bottom edge.
 _RESERVED_BELOW_TITLE = 265
+
+# A quiet date line pinned to the bottom of every event slide. Its own strip,
+# because the venue/address/chip stack above reflows and would otherwise run
+# straight into it on a long address.
+#
+# Deliberately small and low-contrast: the cover already announces the day, so
+# per-slide the date is a confirmation and the TIME stays the prominent fact.
+# Before this existed a slide carried no date at all, which made a season of
+# 24 identically-titled home games ("El Paso Rhinos") indistinguishable.
+#
+# Plain text on purpose. This sits beside the torn-paper and tape idiom, and a
+# perforated edge or ticket-stub treatment would imply a physical affordance a
+# static image cannot have — see invariants.md, "No fake affordances".
+_DATE_FOOTER_H = 52
+_RESERVED_WITH_FOOTER = _RESERVED_BELOW_TITLE + _DATE_FOOTER_H
 
 
 def _seam_for(draw, photo, title: str, box_w: int, *, size_hi: int, reserved: int,
@@ -707,6 +723,42 @@ def _draw_pin(draw, x: float, y: float, size: float, color) -> None:
     )
 
 
+def _date_footer_text(row: dict[str, Any], start_local: Optional[Any]) -> Optional[str]:
+    """"FRI · SEP 18", or "SEP 18 – SEP 20" for something that runs several days.
+
+    Unlike the time stamp this does NOT go through has_plausible_time. That
+    guard exists because a midnight-looking hour is usually a date-only listing
+    whose TIME we do not believe — but the DAY is still right, and it is the
+    one fact those events could previously not show at all.
+    """
+    if start_local is None:
+        return None
+
+    start_day = start_local.date()
+    end_day = None
+    end_raw = row.get("end_time")
+    if end_raw:
+        end_local = local_day(end_raw)
+        if end_local:
+            end_day = end_local.date()
+
+    def _short(d) -> str:
+        # The day number is formatted by hand: %-d is glibc-only and %d leaves
+        # a leading zero ("SEP 05").
+        return f"{d.strftime('%b').upper()} {d.day}"
+
+    if end_day and end_day > start_day:
+        return f"{_short(start_day)} – {_short(end_day)}"
+    return f"{start_local.strftime('%a').upper()} · {_short(start_day)}"
+
+
+def _draw_date_footer(draw, row: dict[str, Any], start_local: Optional[Any], fill) -> None:
+    text = _date_footer_text(row, start_local)
+    if not text:
+        return
+    draw.text((SAFE_X, CANVAS[1] - 44), text, font=font("condensed", 26), fill=fill)
+
+
 def _time_stamp(start_local: Optional[Any]) -> Optional[str]:
     # Only stamp a time we actually believe — see selection.has_plausible_time.
     # A wrong time on a public slide is worse than no time.
@@ -851,7 +903,7 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
     measure = ImageDraw.Draw(img)
     size_hi = title_size_hi(photo, 96)
     panel_y = _seam_for(measure, photo, title, box_w, size_hi=size_hi,
-                        reserved=_RESERVED_BELOW_TITLE)
+                        reserved=_RESERVED_WITH_FOOTER)
 
     if photo is not None:
         band = _fit_photo(photo.image, (CANVAS[0], panel_y), seed=seed)
@@ -880,7 +932,7 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
 
     y = panel_y + 100
     title_font, title_lines = fit_block(
-        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_BELOW_TITLE, size_hi, 44
+        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_WITH_FOOTER, size_hi, 44
     )
     line_h = int(title_font.size * 1.06)
     for line in title_lines:
@@ -904,7 +956,7 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
         y += max(14, int(title_font.size * 0.18))
 
     address = _address_label(row)
-    if address and y + 30 < CANVAS[1] - 60:
+    if address and y + 30 < CANVAS[1] - _DATE_FOOTER_H - 20:
         y += 8
         _draw_pin(draw, SAFE_X, y + 2, 18, accent)
         addr_font, addr_lines = fit_block(draw, address, "sans_semibold", box_w - 26, 68, 26, 18,
@@ -914,13 +966,15 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
             y += int(addr_font.size * 1.2)
 
     cats = [c for c in (row.get("categories") or []) if c][:1]
-    if cats and y + 56 < CANVAS[1] - 24:
+    if cats and y + 56 < CANVAS[1] - _DATE_FOOTER_H:
         y += 16
         chip_font = font("condensed", 24)
         label = str(cats[0]).upper()
         w = _text_width(draw, label, chip_font)
         draw.rectangle((SAFE_X, y, SAFE_X + w + 28, y + 44), fill=accent)
         draw.text((SAFE_X + 14, y + 9), label, font=chip_font, fill=on_accent)
+
+    _draw_date_footer(draw, row, start_local, INK_SOFT)
 
     # Left side, mirroring _slide_full_bleed — the time stamp owns the right
     # side of this row (anchor="ra" at CANVAS[0]-SAFE_X); a right-side tape
@@ -948,7 +1002,7 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
     measure = ImageDraw.Draw(img)
     size_hi = title_size_hi(photo, 86)
     card_top = _card_top_for(measure, title, box_w, size_hi=size_hi,
-                             reserved=_RESERVED_BELOW_TITLE)
+                             reserved=_RESERVED_WITH_FOOTER)
     if photo is None:
         card_top = min(card_top, PHOTO_H_NO_PHOTO)
     elif needs_mount(photo, CANVAS):
@@ -987,7 +1041,7 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
     y += int(time_font.size * 1.3)
 
     title_font, title_lines = fit_block(
-        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_BELOW_TITLE, size_hi, 42
+        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_WITH_FOOTER, size_hi, 42
     )
     line_h = int(title_font.size * 1.06)
     for line in title_lines:
@@ -1009,7 +1063,7 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
         y += max(12, int(title_font.size * 0.18))
 
     address = _address_label(row)
-    if address and y + 30 < CANVAS[1] - 24:
+    if address and y + 30 < CANVAS[1] - _DATE_FOOTER_H:
         y += 6
         _draw_pin(draw, SAFE_X, y + 2, 16, on_accent)
         addr_font, addr_lines = fit_block(draw, address, "sans_semibold", box_w - 26, 64, 24, 17,
@@ -1017,6 +1071,8 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
         for line in addr_lines:
             draw.text((SAFE_X + 24, y), line, font=addr_font, fill=on_accent)
             y += int(addr_font.size * 1.2)
+
+    _draw_date_footer(draw, row, start_local, on_accent)
 
     _draw_tape(img, cx=110, cy=card_top + slant / 2, w=140, h=54, angle=-8)
     return img
@@ -1036,7 +1092,7 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
     measure = ImageDraw.Draw(img)
     size_hi = title_size_hi(photo, 82)
     split_photo_h = _seam_for(
-        measure, photo, title, box_w, size_hi=size_hi, reserved=_RESERVED_BELOW_TITLE, top_pad=48
+        measure, photo, title, box_w, size_hi=size_hi, reserved=_RESERVED_WITH_FOOTER, top_pad=48
     )
 
     if photo is not None:
@@ -1060,7 +1116,7 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
     y += int(time_font.size * 1.3)
 
     title_font, title_lines = fit_block(
-        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_BELOW_TITLE, size_hi, 42,
+        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_WITH_FOOTER, size_hi, 42,
         line_ratio=1.08,
     )
     line_h = int(title_font.size * 1.08)
@@ -1083,7 +1139,7 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
         y += max(12, int(title_font.size * 0.18))
 
     address = _address_label(row)
-    if address and y + 30 < CANVAS[1] - 60:
+    if address and y + 30 < CANVAS[1] - _DATE_FOOTER_H - 20:
         y += 6
         _draw_pin(draw, SAFE_X, y + 2, 16, on_accent)
         addr_font, addr_lines = fit_block(draw, address, "sans_semibold", box_w - 26, 64, 24, 17,
@@ -1093,13 +1149,15 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
             y += int(addr_font.size * 1.2)
 
     cats = [c for c in (row.get("categories") or []) if c][:1]
-    if cats and y + 56 < CANVAS[1] - 24:
+    if cats and y + 56 < CANVAS[1] - _DATE_FOOTER_H:
         y += 12
         chip_font = font("condensed", 24)
         label = str(cats[0]).upper()
         w = _text_width(draw, label, chip_font)
         draw.rectangle((SAFE_X, y, SAFE_X + w + 28, y + 44), fill=PAPER)
         draw.text((SAFE_X + 14, y + 9), label, font=chip_font, fill=INK)
+
+    _draw_date_footer(draw, row, start_local, on_accent)
 
     # Left side — same fix as _slide_bold_block, same reason: the time stamp
     # owns the right side of this row.

@@ -153,6 +153,26 @@ def _emoji_for(row: dict[str, Any]) -> str:
     return _DEFAULT_EMOJI
 
 
+def _run_label(row: dict[str, Any], start_local: Optional[Any]) -> str:
+    """"through Sep 20" for an event that runs past the day it starts.
+
+    Reads end_time, which the social pipeline had never looked at once, despite
+    72% of stored rows carrying one. Only a genuinely later DAY counts — most
+    end_times are just a closing hour, and "through Sep 18" on a Sep 18 event
+    is noise.
+    """
+    from ..core.eventtime import local_day
+
+    if start_local is None or not row.get("end_time"):
+        return ""
+    end_local = local_day(row["end_time"])
+    if end_local is None or end_local.date() <= start_local.date():
+        return ""
+    end = end_local.date()
+    day_num = end.strftime("%-d") if _supports_dash() else str(end.day)
+    return f"through {end.strftime('%b')} {day_num}"
+
+
 def _date_label(day: date) -> str:
     if _supports_dash():
         return day.strftime("%a, %b %-d")
@@ -206,6 +226,12 @@ def build_caption(
             line = " ".join(parts)
             if venue:
                 line += f" — {venue}"
+            # An exhibit or a festival that runs for days reads as a one-night
+            # thing without this, which is the opposite of useful: the whole
+            # point of a multi-day listing is that you have not missed it.
+            run = _run_label(cand.row, cand.start_local)
+            if run:
+                line += f" ({run})"
             lines.append(line)
 
         tag_block = "\n\n" + " ".join(tags[:tag_count]) if tag_count else ""

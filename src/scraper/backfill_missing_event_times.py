@@ -1,4 +1,4 @@
-"""Recover start times for stored events a listing only gave a date for.
+"""Recover start AND end times for stored events a listing only gave a date for.
 
 Sibling of `backfill_event_timezones`, deliberately kept separate because it
 works differently: that one re-derives a time from the payload already saved on
@@ -7,14 +7,17 @@ and must go ask the event's own page.
 
 The rows this repairs come from listing pages that publish
 ``"startDate": "2026-08-28"`` with no hour — Eventbrite's search results are the
-main offender. Parsing that yields local midnight, which the carousel and the
-knowledge-base export both (correctly) refuse to show, so a real 8pm show
-reaches customers with no time at all. The event's own page carries the full
-``2026-08-28T20:00:00-05:00``.
+main offender, and ``endDate`` is routinely just as bare. Parsing a bare date
+yields local midnight, which the carousel and the knowledge-base export both
+(correctly) refuse to show, so a real 8pm show reaches customers with no time
+at all — and a real 12 PM-6 PM festival can end up stored as if it ran
+midnight to midnight. The event's own page carries the full
+``2026-08-28T20:00:00-05:00``, for both fields.
 
 Note these rows never self-heal: storage._apply_merge only backfills fields an
-existing row is MISSING, and start_time is not one of them, so re-scraping a
-known event leaves its midnight in place no matter how often it is seen.
+existing row is MISSING, and start_time/end_time are not among them, so
+re-scraping a known event leaves the midnight in place no matter how often it
+is seen.
 
     python -m scraper.backfill_missing_event_times --dry-run
     python -m scraper.backfill_missing_event_times --dry-run --all
@@ -61,36 +64,63 @@ def _needs_a_time(row: dict[str, Any]) -> bool:
     return isinstance(raw, dict) and _is_date_only(raw.get("startDate"))
 
 
-async def _lookup(row: dict[str, Any], http: HttpClient) -> Optional[datetime]:
-    """The event's real start time, from its own page. None if unavailable."""
+def _needs_an_end_time(row: dict[str, Any]) -> bool:
+    """Same placeholder problem, for end_time.
+
+    Deliberately no hour heuristic here the way _needs_a_time has one: a real
+    end time can legitimately BE midnight or later (a show ending at 11:59 PM,
+    or one that runs past midnight), so the stored hour proves nothing either
+    way. The ORIGINAL raw endDate having been date-only is what's authoritative
+    -- if the listing never gave a real end time, whatever is stored now is
+    _dt()'s midnight reading of a bare date, not something learned.
+    """
+    raw = row.get("raw")
+    return (
+        row.get("end_time") is not None
+        and isinstance(raw, dict)
+        and _is_date_only(raw.get("endDate"))
+    )
+
+
+async def _lookup(row: dict[str, Any], http: HttpClient) -> tuple[Optional[datetime], Optional[datetime]]:
+    """The event's real (start, end) from its own page. Either is None when
+    unavailable, or when the detail page is ITSELF still date-only for that
+    field -- no better than what is already stored, so not worth adopting."""
     url = row.get("url")
     if not url or not _is_detail_url(url):
-        return None
+        return None, None
     try:
         if not await http.can_fetch(url):
-            return None
+            return None, None
         html = await http.get_text(url, headers={"User-Agent": _BROWSER_UA})
     except Exception as exc:  # noqa: BLE001 - a failed lookup leaves the row as-is
         log.debug("lookup %s failed: %s", url, exc)
-        return None
+        return None, None
 
-    stored = local_day(row.get("start_time"))
+    stored_start = local_day(row.get("start_time"))
     for node in _iter_jsonld_events(html):
         if not isinstance(node, dict):
             continue
         raw_start = node.get("startDate")
         if _is_date_only(raw_start):
             continue  # no better than what we already have
-        parsed = _dt(raw_start)
-        if parsed is None:
+        parsed_start = _dt(raw_start)
+        if parsed_start is None:
             continue
-        found = to_event_local(parsed)
+        found_start = to_event_local(parsed_start)
         # A detail page also carries "related events" JSON-LD. Requiring the
         # same calendar day keeps us from adopting a neighbor's time.
-        if stored is not None and found.date() != stored.date():
+        if stored_start is not None and found_start.date() != stored_start.date():
             continue
-        return found
-    return None
+
+        found_end = None
+        raw_end = node.get("endDate")
+        if raw_end and not _is_date_only(raw_end):
+            parsed_end = _dt(raw_end)
+            if parsed_end is not None:
+                found_end = to_event_local(parsed_end)
+        return found_start, found_end
+    return None, None
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -106,7 +136,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     rows = (
         client.table("events")
-        .select("id,source,title,url,start_time,raw")
+        .select("id,source,title,url,start_time,end_time,raw")
         .gte("start_time", floor.isoformat())
         .order("start_time")
         .limit(2000)
@@ -114,7 +144,7 @@ async def _run(args: argparse.Namespace) -> int:
         .data
         or []
     )
-    targets = [r for r in rows if _needs_a_time(r)]
+    targets = [r for r in rows if _needs_a_time(r) or _needs_an_end_time(r)]
     log.info("%d event(s) in scope, %d missing a time", len(rows), len(targets))
     if not targets:
         return 0
@@ -122,29 +152,37 @@ async def _run(args: argparse.Namespace) -> int:
     async with HttpClient() as http:
         found = await asyncio.gather(*(_lookup(r, http) for r in targets))
 
-    fixed = 0
-    for row, start in zip(targets, found):
-        if start is None:
-            log.info("MISS %s  no time on the page  %r", row["id"], row["title"][:46])
-            continue
-        log.info(
-            "FIX  %s  %s -> %s  %r",
-            row["id"],
-            local_day(row["start_time"]).strftime("%Y-%m-%d %H:%M"),
-            start.strftime("%Y-%m-%d %H:%M"),
-            row["title"][:46],
-        )
-        if not args.dry_run:
-            client.table("events").update({"start_time": start.isoformat()}).eq(
-                "id", row["id"]
-            ).execute()
-        fixed += 1
+    fixed_start = fixed_end = misses = 0
+    for row, (start, end) in zip(targets, found):
+        patch: dict[str, Any] = {}
+        parts: list[str] = []
+
+        if _needs_a_time(row):
+            if start is not None:
+                patch["start_time"] = start.isoformat()
+                parts.append(f"start {local_day(row['start_time']).strftime('%Y-%m-%d %H:%M')} -> {start.strftime('%Y-%m-%d %H:%M')}")
+                fixed_start += 1
+
+        if _needs_an_end_time(row):
+            if end is not None:
+                patch["end_time"] = end.isoformat()
+                parts.append(f"end -> {end.strftime('%Y-%m-%d %H:%M')}")
+                fixed_end += 1
+
+        if patch:
+            log.info("FIX  %s  %s  %r", row["id"], "; ".join(parts), row["title"][:46])
+            if not args.dry_run:
+                client.table("events").update(patch).eq("id", row["id"]).execute()
+        else:
+            log.info("MISS %s  nothing better on the page  %r", row["id"], row["title"][:46])
+            misses += 1
 
     log.info(
-        "%s: %d row(s) recovered, %d still without a time",
+        "%s: %d start time(s) and %d end time(s) recovered, %d row(s) still unresolved",
         "dry run" if args.dry_run else "done",
-        fixed,
-        len(targets) - fixed,
+        fixed_start,
+        fixed_end,
+        misses,
     )
     return 0
 

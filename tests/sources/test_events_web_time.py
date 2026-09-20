@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from scraper.core.eventtime import to_event_local
-from scraper.sources.events_web import _dt, _is_date_only
+from scraper.sources.events_web import _dt, _is_date_only, _is_detail_url, _walk_for_events
 
 
 class TestDateOnly:
@@ -66,3 +66,79 @@ class TestOffsetPolicy:
     def test_garbage_is_none_not_an_exception(self):
         assert _dt("next Friday") is None
         assert _dt(None) is None
+
+
+class TestWalkForEventsTypeMatching:
+    """_walk_for_events decides which JSON-LD nodes are even LOOKED at for a
+    startDate/endDate. Real incident, 2026-09-20: an Eventbrite festival's
+    detail page carried a complete, correctly-offset JSON-LD block --
+    startDate "2026-09-26T12:00:00-06:00", endDate "...T18:00:00-06:00" --
+    typed "Festival". The substring check here (`"event" in x.lower()`) does
+    not match "festival", so the node was invisible and the event was stored
+    with start_time == end_time == local midnight: the date-only listing
+    value that _is_date_only's detail-page revisit exists specifically to
+    replace, defeated because the revisit's own walker found nothing to
+    revisit WITH.
+    """
+
+    def _festival_node(self):
+        return {
+            "@context": "https://schema.org",
+            "@type": "Festival",
+            "name": "Patron Tequila Presents the El Paso Margarita Festival",
+            "startDate": "2026-09-26T12:00:00-06:00",
+            "endDate": "2026-09-26T18:00:00-06:00",
+            "location": {"@type": "Place", "name": "The Yard Patio Beer Garden"},
+        }
+
+    def test_a_festival_typed_node_is_yielded(self):
+        assert list(_walk_for_events(self._festival_node())) != []
+
+    def test_a_hackathon_typed_node_is_yielded(self):
+        node = {"@type": "Hackathon", "name": "El Paso Hackathon", "startDate": "2026-09-26T09:00:00-06:00"}
+        assert list(_walk_for_events(node)) != []
+
+    def test_an_ordinary_event_suffixed_type_still_matches(self):
+        """The substring check itself is not being removed, only extended."""
+        node = {"@type": "MusicEvent", "name": "A Concert", "startDate": "2026-09-26T20:00:00-06:00"}
+        assert list(_walk_for_events(node)) != []
+
+    def test_a_non_event_type_is_still_correctly_ignored(self):
+        """The allowlist must not become a general amnesty -- an unrelated
+        page section (FAQPage, BreadcrumbList, WebPage) must stay invisible."""
+        for bad_type in ("FAQPage", "BreadcrumbList", "WebPage"):
+            assert list(_walk_for_events({"@type": bad_type, "name": "x"})) == []
+
+    def test_the_festival_node_survives_inside_a_graph(self):
+        """Real pages wrap the event in @graph alongside other, irrelevant
+        blocks -- the walker must still find it nested."""
+        page = {"@graph": [{"@type": "WebPage", "name": "x"}, self._festival_node()]}
+        found = list(_walk_for_events(page))
+        assert len(found) == 1
+        assert found[0]["startDate"] == "2026-09-26T12:00:00-06:00"
+
+
+class TestEventbriteDetailUrlShapes:
+    """A second, independent bug hit the SAME symptom (start_time == end_time
+    == local midnight) for a reason unrelated to _walk_for_events: "AIA El
+    Paso 2027 Architecture Gala...-registration-1996013710740" is a real,
+    live, free/RSVP Eventbrite listing -- correctly typed "SocialEvent" (which
+    the substring check already matches) and carrying a perfectly good
+    18:00-21:00 JSON-LD time on its own detail page. But _is_detail_url only
+    recognized "-tickets-<id>", Eventbrite's URL shape for PAID events, so the
+    date-only-time revisit never even attempted to re-fetch this page at all.
+    """
+
+    def test_a_paid_event_url_is_a_detail_page(self):
+        url = "https://www.eventbrite.com/e/patron-tequila-presents-the-el-paso-margarita-festival-tickets-1992011285378"
+        assert _is_detail_url(url)
+
+    def test_a_free_rsvp_event_url_is_also_a_detail_page(self):
+        url = (
+            "https://www.eventbrite.com/e/aia-el-paso-2027-architecture-gala-annual-"
+            "design-awards-celebration-registration-1996013710740"
+        )
+        assert _is_detail_url(url)
+
+    def test_an_eventbrite_listing_page_is_still_not_a_detail_page(self):
+        assert not _is_detail_url("https://www.eventbrite.com/d/tx--el-paso/all-events/")

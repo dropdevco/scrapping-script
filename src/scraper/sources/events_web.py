@@ -201,6 +201,19 @@ def _as_geo(loc: Any) -> tuple[Optional[float], Optional[float]]:
     return _coord(geo.get("latitude")), _coord(geo.get("longitude"))
 
 
+# schema.org names two real Event subtypes that do NOT contain the substring
+# "event": Festival and Hackathon. An Eventbrite listing typed "Festival" —
+# with a complete, correctly-offset startDate/endDate on its own detail page
+# — was silently invisible to the substring check below. That is not a
+# theoretical gap: it produced a stored event whose start_time AND end_time
+# were both local midnight, because _is_date_only's whole mechanism (fetch
+# the detail page, find its real JSON-LD, adopt the real time) depends on
+# _walk_for_events actually yielding that page's Event node -- it silently
+# yielded nothing, so _fill_one_time's loop never ran even once, and the
+# date-only listing value stood uncorrected.
+_NON_EVENT_SUFFIXED_TYPES = frozenset({"festival", "hackathon"})
+
+
 def _walk_for_events(node: Any):
     """Yield schema.org Event dicts, descending through @graph / ItemList / ListItem."""
     if isinstance(node, list):
@@ -215,7 +228,10 @@ def _walk_for_events(node: Any):
             yield from _walk_for_events(node["item"])
         t = node.get("@type", "")
         types = t if isinstance(t, list) else [t]
-        if any(isinstance(x, str) and "event" in x.lower() for x in types):
+        if any(
+            isinstance(x, str) and ("event" in x.lower() or x.lower() in _NON_EVENT_SUFFIXED_TYPES)
+            for x in types
+        ):
             yield node
 
 
@@ -321,7 +337,14 @@ def _next_data(html: str) -> Any:
         return None
 
 
-_EVENTBRITE_DETAIL_RE = re.compile(r"/e/[^/?#]+-tickets-\d+")
+# Eventbrite spells a detail-page URL two ways depending on the listing type:
+# "-tickets-<id>" for a paid event, "-registration-<id>" for a free/RSVP one
+# ("AIA El Paso 2027 Architecture Gala...-registration-1996013710740" is real,
+# live data). Only recognizing "-tickets-" meant every free Eventbrite event
+# was silently treated as a listing page rather than its own detail page —
+# missing both the date-only time-fill retry below AND the full-description
+# enrichment at _individual_page_full_description.
+_EVENTBRITE_DETAIL_RE = re.compile(r"/e/[^/?#]+-(?:tickets|registration)-\d+")
 _MEETUP_DETAIL_RE = re.compile(r"/events/\d+")
 
 

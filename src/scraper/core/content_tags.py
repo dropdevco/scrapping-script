@@ -69,9 +69,16 @@ _SPECTATOR = re.compile(
 # Things you turn up and DO. Note "run" is absent: it collides with "run of
 # show", "fun run" is caught by 5k/marathon anyway, and a false Fitness tag on
 # a theatre run would be visible on the slide.
+#
+# "barre" is deliberately qualified ("barre class"/"pure barre"/"barre
+# fitness"), not bare: a ballet barre is a piece of equipment, and "Raising
+# The Barre- UTEP Theatre & Dance" -- a dance-department stage production,
+# categorized by its own source as Theatre -- tagged Fitness & Activities
+# purely on that word appearing in its wordplay title.
 _PARTICIPATORY = re.compile(
     r"\b(5k|10k|marathon|half marathon|triathlon|run club|fun run|"
-    r"yoga|zumba|pilates|barre|spin class|aerobics|workout|bootcamp|"
+    r"yoga|zumba|pilates|barre class|pure barre|barre fitness|barre workout|"
+    r"spin class|aerobics|workout|bootcamp|"
     r"hike|hiking|cycling|bike ride|swim|martial arts|karate|"
     r"carrera|maraton|caminata|senderismo|ciclismo)\b"
 )

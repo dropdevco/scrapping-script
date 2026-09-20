@@ -62,6 +62,18 @@ def test_a_versus_marker_is_recognised_in_every_spelling(title):
     assert SPORTS in pillars_for(title)
 
 
+def test_a_ballet_barre_is_not_a_fitness_class():
+    """A bare "barre" is ambiguous between the ballet equipment and a fitness
+    class brand. "Raising The Barre- UTEP Theatre & Dance" -- a dance-
+    department stage production, categorized Theatre by its own source --
+    tagged Fitness & Activities purely on that word appearing in its title."""
+    assert FITNESS not in pillars_for(
+        "Raising The Barre- UTEP Theatre & Dance", ["Arts & Theatre"], "Studio Theatre"
+    )
+    assert pillars_for("Barre Class with Jane", [], "A Gym") == [FITNESS]
+    assert pillars_for("Pure Barre El Paso Grand Opening") == [FITNESS]
+
+
 def test_a_trailing_roman_numeral_is_not_a_versus_marker():
     """A bare "v" is also a Roman numeral, and a versus-marker always names an
     opponent AFTER it -- it is never the last word of a real title, while a

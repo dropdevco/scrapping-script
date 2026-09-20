@@ -38,6 +38,38 @@ def test_a_bare_team_name_is_still_sports():
     assert pillars_for("El Paso Rhinos", ["Hockey"], "Events Center") == [SPORTS]
 
 
+def test_bare_utep_is_not_a_team_name():
+    """"utep" used to be in the team list and tagged "Voice Area Alumni - UTEP
+    Department of Music" as Sports on a live carousel, alongside its correct
+    Live Music tag (from the source's own "Music" category) -- UTEP is the
+    whole university, not just its athletics program."""
+    assert SPORTS not in pillars_for(
+        "Voice Area Alumni- UTEP Department of Music", ["Music"], "Fox Fine Arts Recital Hall"
+    )
+    assert pillars_for("Rhinoceros- UTEP Theatre & Dance", [], "UTEP") == [ARTS]
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "UTEP FB vs Oregon State",
+        "UTEP FB v Hawaii",              # the abbreviated spelling, no period
+        "UTEP Volleyball v. Arizona",    # the abbreviated spelling, with period
+        "El Paso Chihuahuas vs. Oklahoma City Comets",
+    ],
+)
+def test_a_versus_marker_is_recognised_in_every_spelling(title):
+    assert SPORTS in pillars_for(title)
+
+
+def test_a_trailing_roman_numeral_is_not_a_versus_marker():
+    """A bare "v" is also a Roman numeral, and a versus-marker always names an
+    opponent AFTER it -- it is never the last word of a real title, while a
+    numeral usually is. Without that distinction this tagged a TV rerelease as
+    a sports event."""
+    assert pillars_for("Devious Maids Season V") == []
+
+
 @pytest.mark.parametrize("title", ["Run for the Roses 5K", "Free Yoga Thursdays", "Carrera 10K Juárez"])
 def test_things_you_turn_up_and_do_are_fitness_not_sports(title):
     assert pillars_for(title) == [FITNESS]

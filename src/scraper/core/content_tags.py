@@ -44,12 +44,27 @@ PILLARS: tuple[str, ...] = (ARTS, MUSIC, SPORTS, FITNESS, FAMILY, FOOD)
 # Local franchises. "El Paso Rhinos" carries no descriptive word at all, and
 # there are 24 of their games upcoming, so naming the teams is the single
 # highest-yield rule here.
+#
+# Deliberately NOT "utep" bare: it is the whole university, not just its
+# athletics program, and tagged "Voice Area Alumni - UTEP Department of Music"
+# as Sports on a live production carousel. "UTEP FB vs Oregon State" still
+# matches regardless, via the standalone "vs" in _SPECTATOR below; "miners"
+# alone catches a non-"vs" UTEP game title.
 _TEAMS = re.compile(
-    r"\b(chihuahuas|locomotive|rhinos|utep|miners|sun bowl|bravos|indios)\b"
+    r"\b(chihuahuas|locomotive|rhinos|miners|sun bowl|bravos|indios)\b"
 )
 _SPECTATOR = re.compile(
-    r"\b(vs|lucha libre|boxeo|boxing|wrestling|rodeo|playoff|"
-    r"baseball|basketball|hockey|soccer|futbol|football)\b"
+    # A bare "v" is the abbreviated form of "vs" ("UTEP Volleyball v. Arizona";
+    # the duplicate sweep separately paired "UTEP FB vs Hawaii" with "UTEP FB v
+    # Hawaii", so both spellings are live in this data) -- but on its own it is
+    # also a Roman numeral, and "Devious Maids Season V" is not a sports event.
+    # The lookahead is the disambiguator: a versus-marker always names an
+    # opponent AFTER it, so it is never the last word of a title, while a
+    # trailing numeral usually is. "v." is handled the same way, the period
+    # consumed before the lookahead checks what follows it.
+    r"\b(?:vs|v)\.?(?=\s+\S)"
+    r"|\b(?:lucha libre|boxeo|boxing|wrestling|rodeo|playoff|"
+    r"baseball|basketball|volleyball|hockey|soccer|futbol|football)\b"
 )
 # Things you turn up and DO. Note "run" is absent: it collides with "run of
 # show", "fun run" is caught by 5k/marathon anyway, and a false Fitness tag on

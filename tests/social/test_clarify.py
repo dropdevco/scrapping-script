@@ -17,6 +17,7 @@ from scraper.core.llm import LLMUnavailable
 from scraper.social import clarify
 from scraper.social.clarify import (
     has_mangled_phrasing,
+    is_obviously_clear,
     is_self_explanatory,
     needs_clarifier,
     title_repeats_venue,
@@ -37,22 +38,31 @@ def _row(title, venue="A Venue", description=_DESC):
     [
         "El Paso Rhinos vs. Odessa Jackalopes",
         "El Paso Chihuahuas vs. Oklahoma City Comets",
-        "El Paso Rhinos",                       # a known team, no descriptive noun
-        "El Paso Greek Festival",
-        "Mamma Mia! (Touring) - a musical",
+        "El Paso Rhinos",   # a named local team, no descriptive noun needed
     ],
 )
-def test_titles_that_already_say_what_they_are(title):
-    assert is_self_explanatory(_row(title))
+def test_a_matchup_or_a_named_team_never_costs_a_call(title):
+    """The only free skips. Everything else is the model's judgement."""
+    assert is_obviously_clear(_row(title))
     assert not needs_clarifier(_row(title))
 
 
-def test_a_borderline_title_errs_toward_asking():
-    """"Disney On Ice presents Jump In!" is clear to a human but carries no
-    word that says what KIND of thing it is. The gate asks anyway, which is the
-    deliberate bias: a wasted call costs cents and usually comes back
-    "self_explanatory", while a wrongly-skipped title ships the vague post."""
-    assert needs_clarifier(_row("Disney On Ice presents Jump In!"))
+@pytest.mark.parametrize(
+    "title",
+    [
+        "El Paso Greek Festival",
+        "Ristra de las Flores Workshop",
+        "Wraiths of the West Texas Wind : El Paso Ghost Tour",
+        "Disney On Ice presents Jump In!",
+    ],
+)
+def test_a_format_word_alone_does_not_count_as_self_explanatory(title):
+    """"festival", "workshop" and "tour" name a FORMAT, not a subject -- a
+    workshop making what? Treating them as clear suppressed a third of the
+    blurbs we could honestly write, so they go to the model, which answers
+    self_explanatory when it genuinely is."""
+    assert not is_obviously_clear(_row(title))
+    assert needs_clarifier(_row(title))
 
 
 @pytest.mark.parametrize(

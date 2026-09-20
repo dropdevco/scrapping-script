@@ -123,18 +123,39 @@ def title_repeats_venue(row: dict[str, Any]) -> bool:
     return title == venue or title in venue or venue in title
 
 
-def needs_clarifier(row: dict[str, Any]) -> bool:
-    """Should this event get a generated one-line summary?
+def is_obviously_clear(row: dict[str, Any]) -> bool:
+    """Only the cases where asking a model would be pure waste.
 
-    Two questions, both of which must be yes: is the title opaque, and do we
-    have enough source text to answer honestly? An opaque title with no
-    description gets nothing -- see _MIN_DESCRIPTION.
+    Narrower than is_self_explanatory ON PURPOSE. That function's vocabulary
+    recognises words like "workshop", "festival" and "tour", which name a
+    FORMAT without saying anything about the subject -- "Ristra de las Flores
+    Workshop" is a workshop making what, exactly? Treating those as clear was
+    suppressing a third of the blurbs we could honestly write.
+
+    A matchup and a named local team really are self-evident ("Rhinos vs.
+    Odessa Jackalopes" needs nothing), so those stay free.
+    """
+    title = fold(row.get("title"))
+    if not title or has_mangled_phrasing(row):
+        return False
+    return bool(_MATCHUP.search(title)) or any(team in title for team in _KNOWN_TEAMS)
+
+
+def needs_clarifier(row: dict[str, Any]) -> bool:
+    """Should this event be sent for a one-line summary?
+
+    Two gates. There must be real source text to summarise from -- see
+    _MIN_DESCRIPTION, the anti-invention rule -- and the title must not be
+    trivially self-evident. Everything else goes to the model, which returns
+    `self_explanatory: true` for what it judges needs no help. That judgement
+    is better made there than by a keyword list, for the same reason pillar
+    placement is.
     """
     if len(str(row.get("description") or "").strip()) < _MIN_DESCRIPTION:
         return False
     if title_repeats_venue(row):
         return True
-    return not is_self_explanatory(row)
+    return not is_obviously_clear(row)
 
 
 _SYSTEM = (

@@ -357,6 +357,13 @@ _RESERVED_BELOW_TITLE = 265
 _DATE_FOOTER_H = 52
 _RESERVED_WITH_FOOTER = _RESERVED_BELOW_TITLE + _DATE_FOOTER_H
 
+# Room for the generated one-liner that says what an opaque event actually is.
+# Sits directly under the title, the way a standfirst sits under a headline:
+# the title names the thing, this says what it is, and only then do the venue
+# and address answer where. Reserved ONLY when the event has one, so a slide
+# without a blurb keeps exactly the composition it had.
+_BLURB_H = 100
+
 
 def _seam_for(draw, photo, title: str, box_w: int, *, size_hi: int, reserved: int,
               size_lo: int = 44, top_pad: int = 100) -> int:
@@ -723,6 +730,30 @@ def _draw_pin(draw, x: float, y: float, size: float, color) -> None:
     )
 
 
+def _blurb_text(row: dict[str, Any]) -> str:
+    """The generated one-liner, if this event has one.
+
+    Only events whose titles do not explain themselves get one (see
+    social/clarify.py), so most slides have none and are laid out exactly as
+    before. Sentence case rather than the model's lowercase, because on a slide
+    it reads as a caption, not as body copy.
+    """
+    text = " ".join(str(row.get("blurb") or "").split())
+    return text[:1].upper() + text[1:] if text else ""
+
+
+def _draw_blurb(draw, blurb: str, y: int, box_w: int, fill) -> int:
+    """Draw the standfirst and return the new y. Two lines at most: this is a
+    clarification, and a third line starts competing with the title it is
+    meant to support."""
+    bfont, lines = fit_block(draw, blurb, "sans_semibold", box_w, _BLURB_H - 18, 27, 19,
+                             line_ratio=1.24)
+    for line in lines[:3]:
+        draw.text((SAFE_X, y), line, font=bfont, fill=fill)
+        y += int(bfont.size * 1.24)
+    return y
+
+
 def _chip_labels(row: dict[str, Any]) -> list[str]:
     """The one label printed in the slide's accent chip.
 
@@ -912,10 +943,12 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
     # whatever height shows this image whole, then gives ground if the title
     # needs more room than what is left. _RESERVED_BELOW_TITLE is the venue,
     # address and chip stack that always follows.
+    blurb = _blurb_text(row)
+    reserved = _RESERVED_WITH_FOOTER + (_BLURB_H if blurb else 0)
+
     measure = ImageDraw.Draw(img)
     size_hi = title_size_hi(photo, 96)
-    panel_y = _seam_for(measure, photo, title, box_w, size_hi=size_hi,
-                        reserved=_RESERVED_WITH_FOOTER)
+    panel_y = _seam_for(measure, photo, title, box_w, size_hi=size_hi, reserved=reserved)
 
     if photo is not None:
         band = _fit_photo(photo.image, (CANVAS[0], panel_y), seed=seed)
@@ -944,12 +977,16 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
 
     y = panel_y + 100
     title_font, title_lines = fit_block(
-        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_WITH_FOOTER, size_hi, 44
+        draw, title, "display", box_w, CANVAS[1] - y - reserved, size_hi, 44
     )
     line_h = int(title_font.size * 1.06)
     for line in title_lines:
         draw.text((SAFE_X, y), line, font=title_font, fill=INK)
         y += line_h
+
+    if blurb:
+        y += max(22, int(title_font.size * 0.34))
+        y = _draw_blurb(draw, blurb, y, box_w, INK_SOFT)
 
     # Venue, address and chip reflow upward when the title is short, so
     # there's never a mystery gap and never an overflow off the bottom.
@@ -1011,10 +1048,12 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
     # bottom — is the visible region. Composing the photo into the FULL canvas
     # centered whatever could not be cropped behind the card, which on a matted
     # source hid a third of the very image the mount existed to preserve.
+    blurb = _blurb_text(row)
+    reserved = _RESERVED_WITH_FOOTER + (_BLURB_H if blurb else 0)
+
     measure = ImageDraw.Draw(img)
     size_hi = title_size_hi(photo, 86)
-    card_top = _card_top_for(measure, title, box_w, size_hi=size_hi,
-                             reserved=_RESERVED_WITH_FOOTER)
+    card_top = _card_top_for(measure, title, box_w, size_hi=size_hi, reserved=reserved)
     if photo is None:
         card_top = min(card_top, PHOTO_H_NO_PHOTO)
     elif needs_mount(photo, CANVAS):
@@ -1053,12 +1092,16 @@ def _slide_full_bleed(row: dict[str, Any], photo, start_local, accent, seed: int
     y += int(time_font.size * 1.3)
 
     title_font, title_lines = fit_block(
-        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_WITH_FOOTER, size_hi, 42
+        draw, title, "display", box_w, CANVAS[1] - y - reserved, size_hi, 42
     )
     line_h = int(title_font.size * 1.06)
     for line in title_lines:
         draw.text((SAFE_X, y), line, font=title_font, fill=on_accent)
         y += line_h
+
+    if blurb:
+        y += max(22, int(title_font.size * 0.34))
+        y = _draw_blurb(draw, blurb, y, box_w, on_accent)
 
     venue = _venue_label(row)
     if venue:
@@ -1101,10 +1144,13 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
     box_w = CANVAS[0] - SAFE_X * 2
     title = str(row.get("title") or "Untitled event")
 
+    blurb = _blurb_text(row)
+    reserved = _RESERVED_WITH_FOOTER + (_BLURB_H if blurb else 0)
+
     measure = ImageDraw.Draw(img)
     size_hi = title_size_hi(photo, 82)
     split_photo_h = _seam_for(
-        measure, photo, title, box_w, size_hi=size_hi, reserved=_RESERVED_WITH_FOOTER, top_pad=48
+        measure, photo, title, box_w, size_hi=size_hi, reserved=reserved, top_pad=48
     )
 
     if photo is not None:
@@ -1128,13 +1174,17 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
     y += int(time_font.size * 1.3)
 
     title_font, title_lines = fit_block(
-        draw, title, "display", box_w, CANVAS[1] - y - _RESERVED_WITH_FOOTER, size_hi, 42,
+        draw, title, "display", box_w, CANVAS[1] - y - reserved, size_hi, 42,
         line_ratio=1.08,
     )
     line_h = int(title_font.size * 1.08)
     for line in title_lines:
         draw.text((SAFE_X, y), line, font=title_font, fill=on_accent)
         y += line_h
+
+    if blurb:
+        y += max(22, int(title_font.size * 0.34))
+        y = _draw_blurb(draw, blurb, y, box_w, on_accent)
 
     venue = _venue_label(row)
     if venue:

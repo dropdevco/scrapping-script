@@ -109,6 +109,65 @@ def test_recently_posted_is_penalised():
     assert repeat == fresh - 2.5
 
 
+def _row_at_chain(scope, categories=("Food & Drink",)):
+    row = _event(categories=list(categories))
+    row["venues"] = {"chain_scope": scope}
+    return row
+
+
+def test_chain_penalty_is_a_no_op_when_left_at_its_default():
+    """chain_venue_penalty defaults to 0.0 specifically so this is a
+    behavioural no-op until the localness auditor has run AND someone
+    deliberately raises it — never a side effect of merely being judged."""
+    with_penalty = selection.score_event(_row_at_chain("national"), start_local=_start(20))
+    without_scope = selection.score_event(_row_at_chain(None), start_local=_start(20))
+    assert with_penalty == without_scope
+
+
+def test_a_national_chain_is_penalised_for_food_and_drink():
+    profile = selection.ScoreProfile(chain_venue_penalty=1.5)
+    chain = selection.score_event(
+        _row_at_chain("national"), start_local=_start(20), profile=profile
+    )
+    independent = selection.score_event(
+        _row_at_chain("local"), start_local=_start(20), profile=profile
+    )
+    assert chain == independent - 1.5
+
+
+def test_a_national_chain_is_not_penalised_outside_food_and_fitness():
+    """A Ticketmaster arena show is at a venue nobody would call a local
+    independent business, and it must remain fully postable."""
+    profile = selection.ScoreProfile(chain_venue_penalty=1.5)
+    chain = selection.score_event(
+        _row_at_chain("national", categories=["Live Music"]), start_local=_start(20), profile=profile
+    )
+    independent = selection.score_event(
+        _row_at_chain("local", categories=["Live Music"]), start_local=_start(20), profile=profile
+    )
+    assert chain == independent
+
+
+def test_a_regional_chain_is_not_treated_as_national():
+    profile = selection.ScoreProfile(chain_venue_penalty=1.5)
+    regional = selection.score_event(
+        _row_at_chain("regional"), start_local=_start(20), profile=profile
+    )
+    independent = selection.score_event(
+        _row_at_chain("local"), start_local=_start(20), profile=profile
+    )
+    assert regional == independent
+
+
+def test_an_unjudged_venue_is_never_penalised():
+    profile = selection.ScoreProfile(chain_venue_penalty=1.5)
+    unjudged = selection.score_event(_row_at_chain(None), start_local=_start(20), profile=profile)
+    independent = selection.score_event(
+        _row_at_chain("local"), start_local=_start(20), profile=profile
+    )
+    assert unjudged == independent
+
+
 def test_choose_applies_caps_and_returns_chronological_order():
     rows = [
         _event(id="a", title="Late Concert", categories=["Music"], venue="Venue A",

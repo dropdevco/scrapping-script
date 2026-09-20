@@ -16,6 +16,7 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from ..core.address import normalize_address, normalize_venue_name
+from ..core.content_tags import FITNESS, FOOD
 from ..core.dedupe import _norm
 
 # Category buckets come from core/categorize.py::_RULES, plus whatever a source
@@ -118,6 +119,12 @@ class ScoreProfile:
     require_ticket_links: bool = False
     max_per_venue: int = 2
     max_per_category: int = 3
+    # The localness auditor's lever (social/localness.py), applied in
+    # score_event below. Default 0.0 — a behavioural no-op until the auditor
+    # has actually judged venues AND someone sets this above zero, which is
+    # the point: "drop chains once reach grows" is meant to be a config change,
+    # not a deploy.
+    chain_venue_penalty: float = 0.0
 
 
 PROFILES: dict[str, ScoreProfile] = {
@@ -296,6 +303,19 @@ def venue_key(row: dict[str, Any]) -> str:
     )
 
 
+def _venue_chain_scope(row: dict[str, Any]) -> Optional[str]:
+    """The joined venue's cached localness verdict, or None when unjudged.
+
+    Same dict-or-list-of-one PostgREST shape that render._venue_label and
+    caption._venue_label already unwrap — the events query selects
+    "*, venues(*)", so this rides along on every row for free.
+    """
+    venues = row.get("venues")
+    if isinstance(venues, list):
+        venues = venues[0] if venues else None
+    return venues.get("chain_scope") if isinstance(venues, dict) else None
+
+
 def dedupe_key(row: dict[str, Any]) -> str:
     """Stable identity for "the same recurring event", across occurrences.
 
@@ -392,6 +412,17 @@ def score_event(
     score -= p.recurrence_penalty * min(1.0, recurrence_count / 10.0)
     if recently_posted:
         score -= p.recently_posted_penalty
+
+    # Only a NATIONAL chain, and only for the two pillars where "is this place
+    # actually local" is the point of the account — Food & Drink and Fitness &
+    # Activities. A Ticketmaster arena show is at a venue nobody would call a
+    # local independent business, and it is absolutely postable; an
+    # unqualified localness filter would gut the feed. chain_venue_penalty
+    # defaults to 0.0, so this is inert until the auditor has judged venues
+    # AND someone deliberately raises it (see social/localness.py).
+    if p.chain_venue_penalty and _venue_chain_scope(row) == "national":
+        if any(c in (FOOD, FITNESS) for c in _categories(row)):
+            score -= p.chain_venue_penalty
     return score
 
 

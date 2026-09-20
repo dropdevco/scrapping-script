@@ -25,6 +25,9 @@ from ..core.storage import Storage
 from ..sources import auth_meta
 from . import caption as caption_mod
 from . import clarify as clarify_mod
+from . import critic as critic_mod
+from . import editor as editor_mod
+from . import localness as localness_mod
 from . import notify as notify_mod
 from . import publish as publish_mod
 from . import render, selection, slides_store
@@ -154,6 +157,13 @@ async def _build_one(
         (day - timedelta(days=lookback.get(kind, 14))).isoformat(), kinds=(kind,)
     )
 
+    # Must run BEFORE choose(): score_event's chain_venue_penalty reads
+    # venues.chain_scope while ranking, and a build only ever sees what is
+    # already cached — this is what fills that cache in. Best-effort and a
+    # no-op unless the council is on; see social/localness.py.
+    async with HttpClient() as http:
+        await localness_mod.fill_localness(storage, http, rows)
+
     # Rank first, then fetch photos in rank order — so we only pay for
     # downloads we're likely to use. A dead/missing photo no longer drops the
     # event: render_event_slide has a text-only layout for exactly this case,
@@ -162,6 +172,14 @@ async def _build_one(
     ranked = selection.choose(
         rows, tz_name=tz_name, recent_keys=recent_keys, max_slides=len(rows), profile=profile
     )
+
+    # The editor's one judgment call over the WHOLE diversity-capped pool —
+    # see social/editor.py for why that pool depth is what makes an exclusion
+    # here free. Runs before the photo-fetch loop so a dropped event never
+    # costs a download.
+    async with HttpClient() as http:
+        editor_report = await editor_mod.run_editor(http, ranked, tz_name=tz_name)
+    ranked = editor_report.ranked
 
     picked: list[selection.Candidate] = []
     photos: list[Any] = []
@@ -219,6 +237,15 @@ async def _build_one(
     )
     log.info("rendered %d slide(s), caption %d chars%s", len(jpegs), len(text), label)
 
+    # A last look at the FINISHED carousel, after rendering — best-effort and
+    # a no-op unless the council is on. Never blocks; see social/critic.py.
+    async with HttpClient() as http:
+        critic_report = await critic_mod.run_critic(http, picked, text)
+    council_verdicts = {
+        "editor": editor_mod.to_jsonable(editor_report),
+        "critic": critic_mod.to_jsonable(critic_report),
+    }
+
     if out_dir:
         target = Path(out_dir) / (slot_name or ".")
         target.mkdir(parents=True, exist_ok=True)
@@ -251,6 +278,7 @@ async def _build_one(
             "auto_approve_at": auto_approve_at,
             "window_start": start_iso,
             "window_end": end_iso,
+            "council_verdicts": council_verdicts,
         }
     )
     if draft is None:
@@ -285,6 +313,7 @@ async def _build_one(
                 scheduled_for=auto_approve_at if settings.ig_auto_approve else scheduled_for,
                 slot=slot_name,
                 kind=kind,
+                council_verdicts=council_verdicts,
             )
 
     # Phase 2: same code path, no separate flag plumbing.

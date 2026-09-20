@@ -597,6 +597,30 @@ class Storage:
 
         return await asyncio.to_thread(_q)
 
+    async def cache_venue_editorial(self, venue_id: str, patch: dict[str, Any]) -> bool:
+        """Write back a localness judgement (chain vs. independent) for one venue.
+
+        Same narrow-allowlist shape as cache_event_editorial. Judged once and
+        cached forever: a venue's chain-ness does not change build to build.
+        """
+        allowed = {
+            "chain_scope", "is_local", "localness_reason",
+            "localness_source", "localness_checked_at",
+        }
+        patch = {k: v for k, v in patch.items() if k in allowed}
+        if not self.enabled or not patch:
+            return False
+
+        def _q() -> bool:
+            try:
+                self._client.table("venues").update(patch).eq("id", venue_id).execute()
+                return True
+            except Exception as exc:  # noqa: BLE001 - a cache miss must never fail a build
+                log.warning("localness cache write failed for venue %s: %s", venue_id, exc)
+                return False
+
+        return await asyncio.to_thread(_q)
+
     async def apply_ig_post_edit_result(
         self, post_id: str, patch: dict[str, Any]
     ) -> bool:

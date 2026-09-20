@@ -93,6 +93,7 @@ async def notify_draft_ready(
     scheduled_for: Optional[str] = None,
     slot: Optional[str] = None,
     kind: str = "digest",
+    council_verdicts: Optional[dict[str, Any]] = None,
 ) -> None:
     review_url: Optional[str] = None
     token = make_review_token(post_id)
@@ -110,8 +111,33 @@ async def notify_draft_ready(
         scheduled_for,
         slot,
         kind,
+        council_verdicts,
     )
     await _notify_email(http, day, review_url, scheduled_for, slot)
+
+
+def _council_block(council_verdicts: Optional[dict[str, Any]]) -> str:
+    """A short, optional block surfacing what the council did — nothing here
+    is actionable on its own; the existing drop-event/edit-caption/swap-photo
+    buttons already cover every case a human would act on."""
+    if not council_verdicts:
+        return ""
+    lines: list[str] = []
+
+    editor = council_verdicts.get("editor") or {}
+    if editor.get("applied") and editor.get("notes"):
+        shown = editor["notes"][:3]
+        more = len(editor["notes"]) - len(shown)
+        suffix = f" (+{more} more)" if more > 0 else ""
+        lines.append("🧭 Editor: " + "; ".join(shown) + suffix)
+
+    critic = council_verdicts.get("critic") or {}
+    for issue in (critic.get("issues") or [])[:3]:
+        icon = "⛔" if issue.get("severity") == "block" else "⚠️"
+        where = f"Slide {issue['slide']}" if issue.get("slide") else "Caption"
+        lines.append(f"{icon} {where}: {issue.get('issue')}")
+
+    return ("\n" + "\n".join(lines)) if lines else ""
 
 
 async def _notify_telegram(
@@ -125,6 +151,7 @@ async def _notify_telegram(
     scheduled_for: Optional[str],
     slot: Optional[str],
     kind: str = "digest",
+    council_verdicts: Optional[dict[str, Any]] = None,
 ) -> None:
     if not (settings.telegram_bot_token and settings.telegram_chat_id):
         return
@@ -183,6 +210,7 @@ async def _notify_telegram(
         head = f"{day_word} in El Paso{slot_label} — {day.isoformat()}\n{lead}"
         if preview_failed:
             head += "\n⚠️ Slide preview failed to send; open the full preview to see them."
+        head += _council_block(council_verdicts)
         # Plain text, no parse_mode: event titles routinely contain _ * [ ] —
         # any of which breaks Telegram's Markdown parser and drops the message.
         await telegram.call(

@@ -159,18 +159,25 @@ def needs_clarifier(row: dict[str, Any]) -> bool:
 
 
 _SYSTEM = (
-    "You write one-line clarifications for a local events feed covering El Paso, "
-    "Texas and Ciudad Juarez, Mexico.\n"
-    "You are given an event whose TITLE may not say what the event actually is. "
-    "Decide whether a reader seeing only the title would already understand it.\n\n"
-    'Reply with STRICT JSON: {"self_explanatory": boolean, "blurb": string}\n'
-    "- self_explanatory=true when the title alone is clear. Then blurb must be \"\".\n"
-    f"- Otherwise blurb states what the thing IS, in at most {_ASK_BLURB} characters.\n"
-    "- Use ONLY facts present in the input. If the input does not say, leave it out. "
-    "Never invent prices, times, ages, sponsors or services.\n"
-    "- Do not repeat the title or the venue name. Do not use marketing voice or "
+    "You write one-line summaries for a local events feed covering El Paso, "
+    "Texas and Ciudad Juarez, Mexico.\n\n"
+    "You are given an event's TITLE and its DESCRIPTION. Your job is to tell a "
+    "reader the useful thing the TITLE DOES NOT ALREADY SAY, taken from the "
+    "description.\n\n"
+    'Reply with STRICT JSON: {"blurb": string}\n'
+    f"- blurb: at most {_ASK_BLURB} characters, stating the specifics a reader "
+    "would want — what actually happens, what is included, who it is for.\n"
+    "- Prefer concrete detail over restating the category. For a festival, the "
+    "useful line is what is ON at it, not that it is a festival.\n"
+    '- Return blurb "" ONLY when the description genuinely adds nothing beyond '
+    "the title — for instance when it merely repeats the title, or is just a URL "
+    "or a line of boilerplate. If there is ANY real detail in the description, "
+    "use it; do not withhold it because the title sounds self-explanatory.\n"
+    "- Use ONLY facts present in the input. If the input does not say, leave it "
+    "out. Never invent prices, times, ages, sponsors or services.\n"
+    "- Do not repeat the title or the venue name. No marketing voice, no "
     "exclamation marks. Plain, factual, lowercase-sentence style.\n"
-    "- Always write the blurb in English, even when the source text is Spanish."
+    "- Always write in English, even when the source text is Spanish."
 )
 
 
@@ -224,8 +231,11 @@ async def generate_blurb(http: HttpClient, row: dict[str, Any]) -> Optional[str]
         log.info("clarifier unavailable for %r: %s", row.get("title"), exc)
         return None
 
-    if data.get("self_explanatory") is True:
-        return None
+    # An empty blurb is the "nothing to add" answer; there is no separate flag
+    # to honour. There used to be, and it was the wrong question: the model was
+    # asked whether the TITLE was self-explanatory, so it withheld a margarita
+    # festival's "tasting contest, live DJ, beer garden, trip giveaway" on the
+    # grounds that you can guess what a margarita festival is.
     blurb = _clean_blurb(data.get("blurb"), row)
     if blurb is None:
         log.info("clarifier returned an unusable blurb for %r: %r", row.get("title"), data.get("blurb"))

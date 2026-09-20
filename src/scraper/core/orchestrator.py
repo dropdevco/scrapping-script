@@ -18,6 +18,7 @@ from .dedupe import (
     dedupe_events,
     dedupe_trends,
 )
+from .content_tags import pillars_for
 from .eventtime import to_event_local
 from .http import HttpClient
 from .models import Document, Event, Kind, SearchParams, SourceResult, Trend
@@ -57,6 +58,17 @@ def _localize_times(e: Event) -> Event:
     """
     e.start_time = to_event_local(e.start_time)
     e.end_time = to_event_local(e.end_time)
+    return e
+
+
+def _assign_pillars(e: Event) -> Event:
+    """Give every event its confident Instagram pillars, or none.
+
+    Centrally, for the same reason _localize_times is: a new source cannot skip
+    it. Events this cannot place plainly keep an empty list, which is the
+    signal the council's curator looks for.
+    """
+    e.content_tags = pillars_for(e.title, e.categories, e.venue)
     return e
 
 
@@ -123,7 +135,7 @@ async def run(params: SearchParams) -> dict[str, Any]:
         if params.kind is Kind.EVENTS:
             events: list[Event] = [i for i in raw_items if isinstance(i, Event)]
             events = [e for e in events if _is_showable(e)]
-            events = [_localize_times(e) for e in events]
+            events = [_assign_pillars(_localize_times(e)) for e in events]
             events = dedupe_events(assign_hashes_events(events), stats=pipeline)
             # Chronological, not by source registration order — otherwise a source
             # that returns lots of events crowds out other sources before storage.

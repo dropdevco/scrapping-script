@@ -34,19 +34,34 @@ from .http import HttpClient
 log = logging.getLogger("scraper.llm")
 
 _ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
-_FENCE_OPEN = re.compile(r"^```(?:json)?\s*")
-_FENCE_CLOSE = re.compile(r"\s*```$")
+_FENCED = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 
 
 class LLMUnavailable(Exception):
     """We did not get a usable answer, for any reason. Carry on without one."""
 
 
-def _unfence(text: str) -> str:
+def _json_candidates(text: str) -> list[str]:
+    """Every plausible JSON object inside a reply, best first.
+
+    Asking for JSON does not reliably get you only JSON. Observed from real
+    replies: a bare object; an object inside a ```json fence; and — the one
+    that actually broke the curator — a fenced object FOLLOWED BY several
+    sentences of prose explaining the choice. Stripping a fence only when the
+    reply both starts and ends with one misses that last shape entirely, so
+    match the fence wherever it appears and fall back to the widest brace span.
+    """
     t = text.strip()
-    if t.startswith("```"):
-        t = _FENCE_CLOSE.sub("", _FENCE_OPEN.sub("", t))
-    return t.strip()
+    out: list[str] = []
+    fenced = _FENCED.search(t)
+    if fenced:
+        out.append(fenced.group(1))
+    if t.startswith("{"):
+        out.append(t)
+    first, last = t.find("{"), t.rfind("}")
+    if first != -1 and last > first:
+        out.append(t[first : last + 1])
+    return out
 
 
 async def complete_json(
@@ -100,11 +115,11 @@ async def complete_json(
         # A reasoning model that burned its budget before emitting anything.
         raise LLMUnavailable(f"empty content (finish_reason={choice.get('finish_reason')!r})")
 
-    try:
-        parsed = json.loads(_unfence(content))
-    except (ValueError, TypeError) as exc:
-        raise LLMUnavailable(f"content was not JSON: {content[:200]!r}") from exc
-
-    if not isinstance(parsed, dict):
-        raise LLMUnavailable(f"expected a JSON object, got {type(parsed).__name__}")
-    return parsed
+    for candidate in _json_candidates(content):
+        try:
+            parsed = json.loads(candidate)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    raise LLMUnavailable(f"no JSON object in content: {content[:200]!r}")

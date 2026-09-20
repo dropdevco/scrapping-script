@@ -37,6 +37,23 @@ _CORE_HASHTAGS = [
 ]
 
 # Category -> extra tag. Only categories that actually read as a hashtag.
+_PILLAR_HASHTAGS = {
+    "Live Music": "#elpasomusic",
+    "Arts & Culture": "#elpasoarts",
+    "Sports": "#elpasosports",
+    "Fitness & Activities": "#elpasofitness",
+    "Family": "#elpasofamily",
+    "Food & Drink": "#elpasofood",
+}
+_PILLAR_EMOJI = {
+    "Live Music": "🎶",
+    "Arts & Culture": "🎨",
+    "Sports": "🏟️",
+    "Fitness & Activities": "🏃",
+    "Family": "👨‍👩‍👧",
+    "Food & Drink": "🍽️",
+}
+
 _CATEGORY_HASHTAGS = {
     "Music": "#elpasomusic",
     "Festivals": "#elpasofestivals",
@@ -126,11 +143,18 @@ def _time_label(start_local: Optional[Any]) -> str:
     return f"{hour}:{minute}{suffix}" if minute != "00" else f"{hour}{suffix}"
 
 
+def _labels(row: dict[str, Any]) -> list[str]:
+    """Pillars when the event has them, else its raw categories — the same
+    preference selection ranks by, so a slide's chip, its hashtag and its
+    weighting all describe the event the same way."""
+    return [c for c in (row.get("content_tags") or row.get("categories") or []) if c]
+
+
 def _hashtags(rows: list[dict[str, Any]], kind: str = "digest") -> list[str]:
     tags = list(_CORE_HASHTAGS) + _KIND_HASHTAGS.get(kind, [])
     for row in rows:
-        for cat in row.get("categories") or []:
-            tag = _CATEGORY_HASHTAGS.get(cat)
+        for label in _labels(row):
+            tag = _PILLAR_HASHTAGS.get(label) or _CATEGORY_HASHTAGS.get(label)
             if tag and tag not in tags:
                 tags.append(tag)
     return tags[:MAX_HASHTAGS]
@@ -146,8 +170,8 @@ def _venue_label(row: dict[str, Any]) -> str:
 
 
 def _emoji_for(row: dict[str, Any]) -> str:
-    for cat in row.get("categories") or []:
-        emoji = _CATEGORY_EMOJI.get(cat)
+    for label in _labels(row):
+        emoji = _PILLAR_EMOJI.get(label) or _CATEGORY_EMOJI.get(label)
         if emoji:
             return emoji
     return _DEFAULT_EMOJI

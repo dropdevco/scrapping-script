@@ -62,6 +62,9 @@ class Event(BaseModel):
     url: Optional[str] = None
     image_url: Optional[str] = None
     categories: list[str] = Field(default_factory=list)
+    # Instagram-only editorial pillars. Additional to `categories`, never a
+    # replacement — see core/content_tags.py.
+    content_tags: list[str] = Field(default_factory=list)
     ticket_links: list[TicketLink] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
     content_hash: Optional[str] = None     # filled in by the dedupe step

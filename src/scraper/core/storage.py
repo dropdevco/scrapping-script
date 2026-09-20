@@ -74,6 +74,8 @@ def _event_row(e: Event) -> dict[str, Any]:
         "url": e.url,
         "image_url": e.image_url,
         "categories": e.categories,
+        "content_tags": e.content_tags,
+        "content_tags_source": "rule" if e.content_tags else None,
         "ticket_links": [tl.model_dump() for tl in e.ticket_links],
         "raw": e.raw,
         "content_hash": e.content_hash,
@@ -800,7 +802,7 @@ class Storage:
                 self._client.table("events")
                 .select(
                     "id,title,venue,venue_id,location,start_time,description,image_url,"
-                    "end_time,categories,ticket_links"
+                    "end_time,categories,content_tags,content_tags_source,ticket_links"
                 )
                 .eq("status", "approved")
             )
@@ -943,6 +945,20 @@ class Storage:
         merged_categories = list(dict.fromkeys([*existing_categories, *(row.get("categories") or [])]))
         if merged_categories != existing_categories:
             patch["categories"] = merged_categories
+
+        # content_tags is REPLACED, not unioned like categories above — that
+        # difference is the whole reason it is a separate column. A pillar is a
+        # judgement about what an event IS, so a re-scrape must be able to
+        # correct it; categories can only ever grow, which is why a bad tag
+        # there is permanent.
+        #
+        # But a rule-derived guess must never overwrite the council's or a
+        # human's answer. Those are the cases the keyword pass could not place.
+        if (existing.get("content_tags_source") or "rule") == "rule":
+            incoming_tags = row.get("content_tags") or []
+            if incoming_tags and incoming_tags != (existing.get("content_tags") or []):
+                patch["content_tags"] = incoming_tags
+                patch["content_tags_source"] = "rule"
 
         for field in ("description", "image_url", "end_time"):
             if not existing.get(field) and row.get(field):

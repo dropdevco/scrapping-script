@@ -259,6 +259,10 @@ def _merge_into(kept: Event, dup: Event) -> Event:
     richer, other = (kept, dup) if _fields_filled(kept) >= _fields_filled(dup) else (dup, kept)
     richer.ticket_links = merge_ticket_links(richer.ticket_links, other.ticket_links)
     richer.categories = _merge_categories(richer.categories, other.categories)
+    # Both copies are the same event, so both were classified from the same
+    # facts; whichever actually placed it wins. Unioning would let a
+    # low-confidence guess from one source dilute the other's.
+    richer.content_tags = richer.content_tags or other.content_tags
 
     # Identity must NOT depend on which copy happened to be richer this run.
     # It used to: the survivor kept its own hash, so the day a second source

@@ -15,6 +15,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from ..core.address import normalize_address, normalize_venue_name
 from ..core.dedupe import _norm
 
 # Category buckets come from core/categorize.py::_RULES, plus whatever a source
@@ -26,13 +27,20 @@ from ..core.dedupe import _norm
 # so weighting it low also weights *unclassified* events low. That's deliberate:
 # an event whose title matched no rule at all is usually low-signal.
 _CATEGORY_WEIGHTS: dict[str, float] = {
+    # The six Instagram pillars (core/content_tags.py). These are what a row
+    # is weighted by when it has them.
+    "Live Music": 1.0,
+    "Food & Drink": 0.9,
+    "Arts & Culture": 0.85,
+    "Sports": 0.7,
+    "Fitness & Activities": 0.6,
+    "Family": 0.5,
+    # Legacy `categories` values, still used for rows the pillar classifier
+    # could not place. Kept so the fallback path scores exactly as it did.
     "Music": 1.0,
     "Festivals": 1.0,
-    "Food & Drink": 0.9,
     "Arts & Theatre": 0.85,
-    "Sports": 0.7,
     "Tech": 0.6,
-    "Family": 0.5,
     "Community": 0.25,
     "Libraries": 0.15,
 }
@@ -267,21 +275,24 @@ def _strip_occurrence(title: str) -> str:
 def venue_key(row: dict[str, Any]) -> str:
     """Which venue this row is at, by NAME rather than by venue_id.
 
-    venue_id looks like the authoritative answer and is not one: venues are
-    keyed on sha1(address | name), so the same building resolves to a different
-    id for every source that punctuates its address differently. The Abraham
-    Chavez Theatre currently holds three ids — "1 Civic Center Plaza, El Paso,
-    TX 79901, US", "One Civic Center Plaza, El Paso, TX 79901" and "1 Civic
-    Center Plaza, El Paso, TX 79901" — so keying on the id put the same concert
-    on the carousel three times and defeated the per-venue diversity cap at the
-    same time. The venue NAMES agree where the addresses do not.
+    venue_id used to be actively wrong here: venues were keyed on sha1 over the
+    RAW address, so the same building forked an id for every source that
+    punctuated its address differently — the Abraham Chavez Theatre held three,
+    which put one concert on the carousel three times and defeated the
+    per-venue diversity cap at the same time. core/address.py now normalizes
+    before hashing and the stored rows have been converged, so that specific
+    failure is fixed at the source.
 
-    (The duplicate venue rows themselves are a storage-side problem and want a
-    real address normalizer; this is the read-side defense so the carousel does
-    not repeat itself while that stands.)
+    This still keys on the NAME, because names and buildings are different
+    things and storage cannot fix the remaining case: an aggregator listing a
+    show under its own brand ("El Paso Live") while the building lists it under
+    its own ("Plaza Theatre") is two legitimate venue rows, and only the
+    read side can decline to show both.
     """
-    return _norm(row.get("venue") or "") or str(row.get("venue_id") or "") or _norm(
-        str(row.get("location") or "")
+    return (
+        normalize_venue_name(row.get("venue"))
+        or str(row.get("venue_id") or "")
+        or normalize_address(str(row.get("location") or ""))
     )
 
 
@@ -297,6 +308,17 @@ def dedupe_key(row: dict[str, Any]) -> str:
 
 
 def _categories(row: dict[str, Any]) -> list[str]:
+    """The labels this row is ranked and diversified by.
+
+    Prefers the Instagram pillars when the event has them: six clean buckets
+    are a far better diversity axis than the 95 distinct strings `categories`
+    has accumulated, most of which are scraping artifacts. Falls back to
+    `categories` when a row has no pillar, so behaviour is unchanged for
+    anything the classifier could not place.
+    """
+    pillars = [c for c in (row.get("content_tags") or []) if c]
+    if pillars:
+        return pillars
     return [c for c in (row.get("categories") or []) if c]
 
 

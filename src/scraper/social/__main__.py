@@ -177,7 +177,9 @@ async def _build_one(
     # are. Cached on the row, best-effort, and a complete no-op unless the
     # council is switched on with a key — see social/clarify.py.
     async with HttpClient() as http:
-        await clarify_mod.fill_blurbs(storage, http, [c.row for c in picked], dry_run=dry_run)
+        rows_picked = [c.row for c in picked]
+        await clarify_mod.fill_pillars(storage, http, rows_picked, dry_run=dry_run)
+        await clarify_mod.fill_blurbs(storage, http, rows_picked, dry_run=dry_run)
 
     with_photo = sum(1 for p in photos if p is not None)
     log.info("%d event(s) picked, %d with a photo%s", len(picked), with_photo, label)

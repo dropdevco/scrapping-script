@@ -250,6 +250,57 @@ async def test_an_already_judged_event_is_never_re_asked():
     assert calls == []
 
 
+# ── the curator (pillar placement for what keywords could not place) ──────────
+
+
+def test_only_the_six_pillars_survive():
+    """A model inventing a seventh bucket must not be able to create one
+    downstream, where selection weights and slide chips key off the name."""
+    assert clarify._clean_pillars(["Sports", "Nightlife", "Family"]) == ["Sports", "Family"]
+    assert clarify._clean_pillars(["sports"]) == []          # exact match only
+    assert clarify._clean_pillars("Sports") == []            # not a list
+    assert clarify._clean_pillars(None) == []
+
+
+def test_pillar_order_does_not_depend_on_what_the_model_returned_first():
+    assert clarify._clean_pillars(["Family", "Live Music"]) == clarify._clean_pillars(
+        ["Live Music", "Family"]
+    )
+
+
+async def test_a_curator_outage_leaves_an_event_unplaced_rather_than_misplaced():
+    async def boom(*_a, **_kw):
+        raise LLMUnavailable("network is down")
+
+    with mock.patch.object(clarify, "complete_json", boom):
+        assert await clarify.assign_pillars(None, _row("Ristra de las Flores Workshop")) == []
+
+
+async def test_the_curator_only_considers_events_the_keywords_left_empty():
+    """The keyword pass is confident by construction, so there is nothing for
+    the model to second-guess -- and re-asking would cost a call per build."""
+    calls = []
+
+    async def counting(*_a, **_kw):
+        calls.append(1)
+        return {"pillars": ["Family"]}
+
+    already_placed = _row("El Paso Chihuahuas vs. Comets")
+    already_placed.update(id="a", content_tags=["Sports"])
+    council_said_none = _row("Other Sunday Social on Zoom")
+    council_said_none.update(id="b", content_tags=[], content_tags_source="council")
+
+    class _Storage:
+        async def cache_event_editorial(self, *_a):
+            return True
+
+    with mock.patch.object(clarify, "complete_json", counting), \
+         mock.patch.object(clarify.settings, "council_available", True):
+        await clarify.fill_pillars(_Storage(), None, [already_placed, council_said_none])
+
+    assert calls == []
+
+
 async def test_a_usable_blurb_comes_back():
     async def good(*_a, **_kw):
         return {"self_explanatory": False, "blurb": "paint-and-sip class with cocktails in a studio"}

@@ -723,6 +723,18 @@ def _draw_pin(draw, x: float, y: float, size: float, color) -> None:
     )
 
 
+def _chip_labels(row: dict[str, Any]) -> list[str]:
+    """The one label printed in the slide's accent chip.
+
+    Prefers the Instagram pillar. The raw `categories` array it falls back to
+    has accumulated 95 distinct values including scraping artifacts — a slide
+    once had room to print "accessible_forward" — so a clean pillar is a better
+    chip whenever the event has one.
+    """
+    labels = [c for c in (row.get("content_tags") or row.get("categories") or []) if c]
+    return labels[:1]
+
+
 def _date_footer_text(row: dict[str, Any], start_local: Optional[Any]) -> Optional[str]:
     """"FRI · SEP 18", or "SEP 18 – SEP 20" for something that runs several days.
 
@@ -965,7 +977,7 @@ def _slide_bold_block(row: dict[str, Any], photo, start_local, accent, seed: int
             draw.text((SAFE_X + 26, y), line, font=addr_font, fill=INK_SOFT)
             y += int(addr_font.size * 1.2)
 
-    cats = [c for c in (row.get("categories") or []) if c][:1]
+    cats = _chip_labels(row)
     if cats and y + 56 < CANVAS[1] - _DATE_FOOTER_H:
         y += 16
         chip_font = font("condensed", 24)
@@ -1148,7 +1160,7 @@ def _slide_split_panel(row: dict[str, Any], photo, start_local, accent, seed: in
             draw.text((SAFE_X + 24, y), line, font=addr_font, fill=on_accent)
             y += int(addr_font.size * 1.2)
 
-    cats = [c for c in (row.get("categories") or []) if c][:1]
+    cats = _chip_labels(row)
     if cats and y + 56 < CANVAS[1] - _DATE_FOOTER_H:
         y += 12
         chip_font = font("condensed", 24)

@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..core.config import settings
+from ..core.content_tags import PILLARS
 from ..core.dedupe import fold
 from ..core.http import HttpClient
 from ..core.llm import LLMUnavailable, complete_json
@@ -202,6 +203,93 @@ async def generate_blurb(http: HttpClient, row: dict[str, Any]) -> Optional[str]
     if blurb is None:
         log.info("clarifier returned an unusable blurb for %r: %r", row.get("title"), data.get("blurb"))
     return blurb
+
+
+_CURATOR_SYSTEM = (
+    "You place local events into content pillars for an Instagram account "
+    "covering El Paso, Texas and Ciudad Juarez, Mexico.\n\n"
+    "Choose from EXACTLY these six, and only these:\n"
+    "- Arts & Culture: theatre, galleries, museums, film, dance, history, literature\n"
+    "- Live Music: concerts, DJs, orchestras, any performance where music is the point\n"
+    "- Sports: SPECTATOR sport only — games and matches you watch\n"
+    "- Fitness & Activities: things you turn up and DO — runs, yoga, hikes, classes\n"
+    "- Family: aimed at children or at families together, whatever the activity\n"
+    "- Food & Drink: where eating or drinking is the main event\n\n"
+    'Reply with STRICT JSON: {"pillars": [string, ...]}\n'
+    "- Usually one pillar. Two only when both are genuinely central.\n"
+    "- An activity aimed at small children is Family, not Fitness: a baby yoga "
+    "class is a family outing, not a workout.\n"
+    "- Use [] when none of the six honestly fits. An empty list is a valid, "
+    "useful answer — do not force a bad fit."
+)
+
+
+def _clean_pillars(raw: Any) -> list[str]:
+    """Only real pillars, deduped, order fixed. A model inventing a seventh
+    bucket must not be able to create one downstream."""
+    if not isinstance(raw, list):
+        return []
+    picked = {p for p in raw if isinstance(p, str) and p in PILLARS}
+    return [p for p in PILLARS if p in picked]
+
+
+async def assign_pillars(http: HttpClient, row: dict[str, Any]) -> list[str]:
+    """Pillars for an event the keyword pass could not place. [] on any failure."""
+    user = (
+        f"TITLE: {row.get('title')}\n"
+        f"VENUE: {row.get('venue') or '(unknown)'}\n"
+        f"SOURCE CATEGORIES: {', '.join(row.get('categories') or []) or '(none)'}\n"
+        f"DESCRIPTION: {str(row.get('description') or '(none)')[:600]}"
+    )
+    try:
+        data = await complete_json(http, system=_CURATOR_SYSTEM, user=user, max_tokens=300)
+    except LLMUnavailable as exc:
+        log.info("curator unavailable for %r: %s", row.get("title"), exc)
+        return []
+    return _clean_pillars(data.get("pillars"))
+
+
+async def fill_pillars(
+    storage: Any, http: HttpClient, rows: list[dict[str, Any]], *, dry_run: bool = False
+) -> int:
+    """Place the events the keyword pass left empty. Returns how many were placed.
+
+    Only rows with NO pillar are considered: the keyword pass is confident by
+    construction, so there is nothing for the model to second-guess. Cached on
+    the row like blurbs, and a row judged to fit none of the six records that
+    judgement so it is not re-asked every build.
+    """
+    if not settings.council_available:
+        return 0
+
+    placed = 0
+    budget = settings.council_max_calls
+    for row in rows:
+        if budget <= 0:
+            break
+        if row.get("content_tags") or row.get("content_tags_source") in ("council", "manual"):
+            continue
+
+        budget -= 1
+        pillars = await assign_pillars(http, row)
+        row["content_tags"] = pillars  # in-memory, so this build uses it immediately
+        if dry_run:
+            placed += bool(pillars)
+            continue
+        ok = await storage.cache_event_editorial(
+            str(row.get("id")),
+            {"content_tags": pillars, "content_tags_source": "council"},
+        )
+        if ok:
+            placed += bool(pillars)
+
+    used = settings.council_max_calls - budget
+    if used:
+        log.info(
+            "curator: placed %d of %d event(s)%s",
+            placed, used, " (dry run, not cached)" if dry_run else "",
+        )
+    return placed
 
 
 async def fill_blurbs(

@@ -195,11 +195,17 @@ def _clean_blurb(raw: Any, row: dict[str, Any]) -> Optional[str]:
         return None
     if len(text) > MAX_BLURB:
         clipped = text[: MAX_BLURB - 1]
-        # Back up to a word boundary so it does not end mid-word; if there is
-        # no space to back up to, the text is one long token and unusable.
-        if " " not in clipped:
-            return None
-        text = clipped[: clipped.rindex(" ")].rstrip(" ,;:-") + "…"
+        # Prefer a CLAUSE boundary over a word boundary. Cutting mid-phrase
+        # produced "...food trucks, and community booths on main…" on a live
+        # slide, which reads as though the sentence were interrupted; stopping
+        # at the last comma gives "...steam activities, food trucks…", which
+        # reads as a list that simply ends.
+        cut = max(clipped.rfind(","), clipped.rfind(";"), clipped.rfind(" - "))
+        if cut < len(clipped) * 0.6:  # too early — a clause cut would lose too much
+            cut = clipped.rfind(" ")
+        if cut <= 0:
+            return None  # one very long token; nothing usable to keep
+        text = clipped[:cut].rstrip(" ,;:-") + "…"
     return text
 
 

@@ -573,6 +573,28 @@ class Storage:
 
         return await asyncio.to_thread(_q)
 
+    async def cache_event_editorial(self, event_id: str, patch: dict[str, Any]) -> bool:
+        """Write back a judgement about one event (its blurb, its pillar).
+
+        Deliberately narrow: the editorial layer may only touch its own cache
+        columns. Everything else on an event row is scraped fact, and a model
+        has no business rewriting a title or a start time.
+        """
+        allowed = {"blurb", "blurb_source", "blurb_checked_at", "content_tags", "content_tags_source"}
+        patch = {k: v for k, v in patch.items() if k in allowed}
+        if not self.enabled or not patch:
+            return False
+
+        def _q() -> bool:
+            try:
+                self._client.table("events").update(patch).eq("id", event_id).execute()
+                return True
+            except Exception as exc:  # noqa: BLE001 - a cache miss must never fail a build
+                log.warning("editorial cache write failed for event %s: %s", event_id, exc)
+                return False
+
+        return await asyncio.to_thread(_q)
+
     async def apply_ig_post_edit_result(
         self, post_id: str, patch: dict[str, Any]
     ) -> bool:

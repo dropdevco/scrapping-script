@@ -211,7 +211,7 @@ def build_caption(
 
     # Progressive degradation, cheapest loss first: venue suffixes, then title
     # length, then whole lines, then optional hashtags.
-    for drop_venue, title_cap, tag_count in _degradations(len(tags)):
+    for drop_blurbs, drop_venue, title_cap, tag_count in _degradations(len(tags)):
         lines = []
         for cand in picked:
             title = str(cand.row.get("title") or "").strip()
@@ -232,6 +232,13 @@ def build_caption(
             run = _run_label(cand.row, cand.start_local)
             if run:
                 line += f" ({run})"
+            # The generated one-liner for a title that does not explain itself.
+            # Dropped first when the caption runs long: it is the most useful
+            # thing to have and the least damaging thing to lose.
+            if not drop_blurbs:
+                blurb = str(cand.row.get("blurb") or "").strip()
+                if blurb:
+                    line += f"\n   {blurb}"
             lines.append(line)
 
         tag_block = "\n\n" + " ".join(tags[:tag_count]) if tag_count else ""
@@ -248,14 +255,20 @@ def build_caption(
     return (header + footer)[:max_caption]
 
 
-def _degradations(tag_total: int) -> list[tuple[bool, int, int]]:
-    """(drop_venue, title_cap, tag_count) tried in order — least lossy first."""
+def _degradations(tag_total: int) -> list[tuple[bool, bool, int, int]]:
+    """(drop_blurbs, drop_venue, title_cap, tag_count), least lossy first.
+
+    Blurbs go first: nine of them can add ~900 characters, and losing them
+    returns the caption to what it said before they existed. Everything after
+    that starts removing facts.
+    """
     return [
-        (False, 0, tag_total),
-        (False, 0, min(tag_total, 12)),
-        (True, 0, min(tag_total, 12)),
-        (True, 48, min(tag_total, 10)),
-        (True, 32, len(_CORE_HASHTAGS)),
+        (False, False, 0, tag_total),
+        (False, False, 0, min(tag_total, 12)),
+        (True, False, 0, min(tag_total, 12)),
+        (True, True, 0, min(tag_total, 12)),
+        (True, True, 48, min(tag_total, 10)),
+        (True, True, 32, len(_CORE_HASHTAGS)),
     ]
 
 

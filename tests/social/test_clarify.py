@@ -9,8 +9,12 @@ ones and fill only that gap.
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
+from scraper.core.llm import LLMUnavailable
+from scraper.social import clarify
 from scraper.social.clarify import (
     has_mangled_phrasing,
     is_self_explanatory,
@@ -19,8 +23,13 @@ from scraper.social.clarify import (
 )
 
 
-def _row(title, venue="A Venue"):
-    return {"title": title, "venue": venue}
+# Long enough to clear the "is there anything to summarise from?" gate. Real
+# descriptions are far longer; this is just past the floor.
+_DESC = "A recurring community program held at the venue, open to all ages, with activities throughout."
+
+
+def _row(title, venue="A Venue", description=_DESC):
+    return {"title": title, "venue": venue, "description": description}
 
 
 @pytest.mark.parametrize(
@@ -84,6 +93,20 @@ def test_a_title_that_is_just_the_venue_name_again_is_opaque():
     assert needs_clarifier(row)
 
 
+def test_an_opaque_title_with_no_description_is_left_alone():
+    """The anti-invention guard, and the sharpest lesson from choosing a model.
+
+    Asked to explain an event with an opaque title and no description, a
+    candidate model produced "low-cost vaccinations and basic health checks for
+    dogs and cats" -- none of which appeared anywhere in the input. With no
+    source text there is nothing to summarise, so we say nothing.
+    """
+    assert needs_clarifier(_row("Canvas & Cantaritos"))          # has a description
+    assert not needs_clarifier(_row("Canvas & Cantaritos", description=""))
+    assert not needs_clarifier(_row("Canvas & Cantaritos", description=None))
+    assert not needs_clarifier(_row("Canvas & Cantaritos", description="Join us!"))
+
+
 def test_bilingual_descriptive_nouns_are_recognised():
     assert is_self_explanatory(_row("Concierto de Mariachi"))
     assert is_self_explanatory(_row("Taller de Comunicación No Violenta"))
@@ -93,3 +116,144 @@ def test_bilingual_descriptive_nouns_are_recognised():
 def test_an_empty_title_is_not_called_self_explanatory():
     assert not is_self_explanatory(_row(""))
     assert not is_self_explanatory({"title": None, "venue": None})
+
+
+# ── what we accept back from the model ────────────────────────────────────────
+
+
+def test_an_overlong_blurb_is_truncated_at_a_word_boundary_not_discarded():
+    """Models overrun a stated limit as a matter of course -- measured at 104,
+    114, 117, 128, 139 characters against a stated 90. The copy is otherwise
+    good, so trim it rather than fall back to the bare title."""
+    long = (
+        "exhibition exploring the histories of Chinese, Korean, Filipino, Japanese and "
+        "Vietnamese communities across the borderland from the 1880s to the 1980s"
+    )
+    assert len(long) > clarify.MAX_BLURB
+    out = clarify._clean_blurb(long, _row("Mountain of Gold"))
+    assert out is not None
+    assert len(out) <= clarify.MAX_BLURB
+    assert out.endswith("…")
+    assert not out[:-1].endswith(" ")  # trimmed at a boundary, not mid-word
+
+
+def test_a_blurb_that_only_echoes_the_title_is_rejected():
+    assert clarify._clean_blurb("Desert Bloomers", _row("Desert Bloomers")) is None
+
+
+def test_a_too_short_blurb_is_rejected():
+    assert clarify._clean_blurb("a program", _row("Desert Bloomers")) is None
+
+
+def test_a_non_string_blurb_is_rejected():
+    assert clarify._clean_blurb(None, _row("X")) is None
+    assert clarify._clean_blurb({"text": "hi"}, _row("X")) is None
+
+
+async def test_a_model_outage_yields_no_blurb_rather_than_an_error():
+    """The whole degradation contract in one test: if the model is unreachable
+    the caption renders exactly what it rendered before blurbs existed."""
+
+    async def boom(*_a, **_kw):
+        raise LLMUnavailable("network is down")
+
+    with mock.patch.object(clarify, "complete_json", boom):
+        assert await clarify.generate_blurb(None, _row("Canvas & Cantaritos")) is None
+
+
+async def test_the_model_judging_a_title_clear_yields_no_blurb():
+    async def clear(*_a, **_kw):
+        return {"self_explanatory": True, "blurb": ""}
+
+    with mock.patch.object(clarify, "complete_json", clear):
+        assert await clarify.generate_blurb(None, _row("Canvas & Cantaritos")) is None
+
+
+async def test_a_dry_run_calls_the_model_but_writes_nothing():
+    """`build --dry-run` promises to touch nothing. A preview that quietly
+    populated the cache would make the NEXT real build behave differently for
+    having been previewed."""
+
+    class _Storage:
+        def __init__(self):
+            self.writes = []
+
+        async def cache_event_editorial(self, event_id, patch):
+            self.writes.append((event_id, patch))
+            return True
+
+    async def good(*_a, **_kw):
+        return {"self_explanatory": False, "blurb": "paint-and-sip class with cocktails in a studio"}
+
+    row = _row("Canvas & Cantaritos")
+    row["id"] = "abc"
+    storage = _Storage()
+
+    with mock.patch.object(clarify, "complete_json", good), \
+         mock.patch.object(clarify.settings, "council_available", True):
+        await clarify.fill_blurbs(storage, None, [row], dry_run=True)
+
+    assert storage.writes == []
+    assert row["blurb"] == "paint-and-sip class with cocktails in a studio"  # preview still shows it
+
+
+async def test_a_real_run_caches_the_result():
+    class _Storage:
+        def __init__(self):
+            self.writes = []
+
+        async def cache_event_editorial(self, event_id, patch):
+            self.writes.append((event_id, patch))
+            return True
+
+    async def good(*_a, **_kw):
+        return {"self_explanatory": False, "blurb": "paint-and-sip class with cocktails in a studio"}
+
+    row = _row("Canvas & Cantaritos")
+    row["id"] = "abc"
+    storage = _Storage()
+
+    with mock.patch.object(clarify, "complete_json", good), \
+         mock.patch.object(clarify.settings, "council_available", True):
+        await clarify.fill_blurbs(storage, None, [row], dry_run=False)
+
+    assert len(storage.writes) == 1
+    event_id, patch = storage.writes[0]
+    assert event_id == "abc"
+    assert patch["blurb_source"] == "council"
+    assert patch["blurb_checked_at"]
+
+
+async def test_an_already_judged_event_is_never_re_asked():
+    """Including one judged to need no blurb -- blurb_checked_at is the record
+    that we looked, so a self-explanatory title costs one call ever, not one
+    per build."""
+    calls = []
+
+    async def counting(*_a, **_kw):
+        calls.append(1)
+        return {"self_explanatory": False, "blurb": "some perfectly fine explanation here"}
+
+    cached = _row("Canvas & Cantaritos")
+    cached.update(id="a", blurb="already have one")
+    checked_blank = _row("Museums on Us")
+    checked_blank.update(id="b", blurb=None, blurb_checked_at="2026-09-20T00:00:00Z")
+
+    class _Storage:
+        async def cache_event_editorial(self, *_a):
+            return True
+
+    with mock.patch.object(clarify, "complete_json", counting), \
+         mock.patch.object(clarify.settings, "council_available", True):
+        await clarify.fill_blurbs(_Storage(), None, [cached, checked_blank])
+
+    assert calls == []
+
+
+async def test_a_usable_blurb_comes_back():
+    async def good(*_a, **_kw):
+        return {"self_explanatory": False, "blurb": "paint-and-sip class with cocktails in a studio"}
+
+    with mock.patch.object(clarify, "complete_json", good):
+        out = await clarify.generate_blurb(None, _row("Canvas & Cantaritos"))
+    assert out == "paint-and-sip class with cocktails in a studio"

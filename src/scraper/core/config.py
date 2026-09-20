@@ -80,6 +80,27 @@ class Settings:
         self.geocode_venues = _bool("GEOCODE_VENUES", True)
         self.geocode_max_per_run = _int("GEOCODE_MAX_PER_RUN", 25)
 
+        # ── Editorial council (scraper.social.council) ───────────────────────
+        # Ships inert: with no key, or with COUNCIL_ENABLED unset, every
+        # council call is skipped and the pipeline behaves exactly as before.
+        # OpenRouter rather than a vendor SDK: it is a plain JSON POST, so it
+        # reuses core/http.py's retries, backoff and error surfacing (the same
+        # shape as the existing Resend call) and adds no dependency at all.
+        self.openrouter_api_key = _clean(os.getenv("OPENROUTER_API_KEY"))
+        self.council_enabled = _bool("COUNCIL_ENABLED", False)
+        # Measured on real rows 2026-09-20: haiku-4.5 was the most disciplined
+        # about NOT inventing detail, which is the failure that matters on a
+        # public feed. google/gemini-2.5-flash-lite is ~20x cheaper and nearly
+        # as good if this ever becomes a cost question (it is currently cents).
+        self.council_model = _clean(os.getenv("COUNCIL_MODEL")) or "anthropic/claude-haiku-4.5"
+        self.council_max_calls = _int("COUNCIL_MAX_CALLS", 40)
+        self.council_timeout_seconds = _int("COUNCIL_TIMEOUT_SECONDS", 60)
+
+        # Both halves required: a key with the switch off is off, and the
+        # switch on with no key is off. Checked in one place so no caller has
+        # to remember the pair.
+        self.council_available = bool(self.council_enabled and self.openrouter_api_key)
+
         # Cross-venue duplicate merging (storage._merge_with_existing, lane 2).
         # Catches the same show listed by an aggregator under its own brand and
         # by the building itself — invisible to the venue_id-keyed lane. On by

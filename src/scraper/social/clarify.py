@@ -19,10 +19,35 @@ vague post we are trying to fix. So this leans toward asking.
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Optional
 
+from ..core.config import settings
 from ..core.dedupe import fold
+from ..core.http import HttpClient
+from ..core.llm import LLMUnavailable, complete_json
+
+log = logging.getLogger("scraper.social.clarify")
+
+# A blurb has to earn its place in the caption. Models overrun an explicit
+# limit in the prompt as a matter of course — measured against a stated 90:
+# 88, 91, 94, 94, 100, 131, 137, 145 — so length is enforced here and never
+# trusted from the response. The prompt asks for less than this ceiling on
+# purpose, to leave the usual overshoot somewhere to land.
+#
+# Overlong blurbs are TRUNCATED at a word boundary rather than dropped. They
+# are otherwise good copy, and half a useful sentence beats the bare title we
+# would fall back to.
+_ASK_BLURB = 100
+MAX_BLURB = 120
+
+# Below this there is nothing to summarise FROM, and a model asked to explain
+# an event it knows nothing about will invent. Measured on a real row with no
+# description, one candidate model produced "low-cost vaccinations and basic
+# health checks for dogs and cats" -- entirely fabricated. Silence is correct.
+_MIN_DESCRIPTION = 60
 
 # A matchup reads itself: "<someone> vs <someone>".
 _MATCHUP = re.compile(r"\bvs\b")
@@ -98,7 +123,135 @@ def title_repeats_venue(row: dict[str, Any]) -> bool:
 
 
 def needs_clarifier(row: dict[str, Any]) -> bool:
-    """Should this event get a generated one-line summary?"""
+    """Should this event get a generated one-line summary?
+
+    Two questions, both of which must be yes: is the title opaque, and do we
+    have enough source text to answer honestly? An opaque title with no
+    description gets nothing -- see _MIN_DESCRIPTION.
+    """
+    if len(str(row.get("description") or "").strip()) < _MIN_DESCRIPTION:
+        return False
     if title_repeats_venue(row):
         return True
     return not is_self_explanatory(row)
+
+
+_SYSTEM = (
+    "You write one-line clarifications for a local events feed covering El Paso, "
+    "Texas and Ciudad Juarez, Mexico.\n"
+    "You are given an event whose TITLE may not say what the event actually is. "
+    "Decide whether a reader seeing only the title would already understand it.\n\n"
+    'Reply with STRICT JSON: {"self_explanatory": boolean, "blurb": string}\n'
+    "- self_explanatory=true when the title alone is clear. Then blurb must be \"\".\n"
+    f"- Otherwise blurb states what the thing IS, in at most {_ASK_BLURB} characters.\n"
+    "- Use ONLY facts present in the input. If the input does not say, leave it out. "
+    "Never invent prices, times, ages, sponsors or services.\n"
+    "- Do not repeat the title or the venue name. Do not use marketing voice or "
+    "exclamation marks. Plain, factual, lowercase-sentence style.\n"
+    "- Always write the blurb in English, even when the source text is Spanish."
+)
+
+
+def _prompt_for(row: dict[str, Any]) -> str:
+    return (
+        f"TITLE: {row.get('title')}\n"
+        f"VENUE: {row.get('venue') or '(unknown)'}\n"
+        f"DESCRIPTION: {str(row.get('description') or '')[:900]}"
+    )
+
+
+def _clean_blurb(raw: Any, row: dict[str, Any]) -> Optional[str]:
+    """Accept a blurb only if it is usable. Enforced, not trusted."""
+    if not isinstance(raw, str):
+        return None
+    text = " ".join(raw.split()).strip().strip('"')
+    if not text:
+        return None
+    # A blurb that just echoes the title has added nothing, and a two-word
+    # fragment is noise rather than an explanation.
+    if fold(text) == fold(row.get("title")) or len(text.split()) < 4:
+        return None
+    if len(text) > MAX_BLURB:
+        clipped = text[: MAX_BLURB - 1]
+        # Back up to a word boundary so it does not end mid-word; if there is
+        # no space to back up to, the text is one long token and unusable.
+        if " " not in clipped:
+            return None
+        text = clipped[: clipped.rindex(" ")].rstrip(" ,;:-") + "…"
+    return text
+
+
+async def generate_blurb(http: HttpClient, row: dict[str, Any]) -> Optional[str]:
+    """A one-line explanation of an opaque event, or None.
+
+    None on every failure path — no key, model down, malformed reply, a blurb
+    that broke the rules, or the model judging the title already clear. The
+    caller renders what it had before, so the worst case is today's output.
+    """
+    if not needs_clarifier(row):
+        return None
+    try:
+        data = await complete_json(http, system=_SYSTEM, user=_prompt_for(row), max_tokens=400)
+    except LLMUnavailable as exc:
+        log.info("clarifier unavailable for %r: %s", row.get("title"), exc)
+        return None
+
+    if data.get("self_explanatory") is True:
+        return None
+    blurb = _clean_blurb(data.get("blurb"), row)
+    if blurb is None:
+        log.info("clarifier returned an unusable blurb for %r: %r", row.get("title"), data.get("blurb"))
+    return blurb
+
+
+async def fill_blurbs(
+    storage: Any, http: HttpClient, rows: list[dict[str, Any]], *, dry_run: bool = False
+) -> int:
+    """Give each opaque event a cached one-liner. Returns how many were written.
+
+    Cached on the row, so a recurring series is paid for once and reused by
+    every later occurrence and every rebuild — the cost tracks NEW events, not
+    builds. `blurb_checked_at` records that we looked even when the answer was
+    "no blurb needed", so a self-explanatory title is never re-asked.
+
+    `dry_run` still calls the model, because seeing the real caption is the
+    whole point of a preview, but writes nothing back — `build --dry-run`
+    promises to touch nothing, and a preview quietly populating a cache would
+    make the next real build behave differently for having been previewed.
+
+    Never raises. The caption renders whatever it had, which is today's output.
+    """
+    if not settings.council_available:
+        return 0
+
+    written = 0
+    budget = settings.council_max_calls
+    for row in rows:
+        if budget <= 0:
+            break
+        if row.get("blurb") or row.get("blurb_checked_at"):
+            continue  # already judged, including "judged and left blank"
+        if not needs_clarifier(row):
+            continue
+
+        budget -= 1
+        blurb = await generate_blurb(http, row)
+        row["blurb"] = blurb  # in-memory, so this build uses it immediately
+        if dry_run:
+            written += bool(blurb)
+            continue
+        patch = {
+            "blurb": blurb,
+            "blurb_source": "council",
+            "blurb_checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if await storage.cache_event_editorial(str(row.get("id")), patch):
+            written += bool(blurb)
+
+    used = settings.council_max_calls - budget
+    if used:
+        log.info(
+            "clarifier: %d blurb(s) from %d call(s)%s",
+            written, used, " (dry run, not cached)" if dry_run else "",
+        )
+    return written

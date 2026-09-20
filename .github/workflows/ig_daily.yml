@@ -88,6 +88,13 @@ env:
   NOTIFY_EMAIL_FROM: ${{ vars.NOTIFY_EMAIL_FROM }}
   IG_NOTIFY_TTL_HOURS: ${{ vars.IG_NOTIFY_TTL_HOURS }}
   SITE_BASE_URL: ${{ vars.SITE_BASE_URL }}
+  # Editorial council. Inert until BOTH the secret exists and COUNCIL_ENABLED
+  # is set to true — an unset repo var arrives here as an empty string, which
+  # config's _bool/_clean helpers turn back into the code default (off).
+  OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+  COUNCIL_ENABLED: ${{ vars.COUNCIL_ENABLED }}
+  COUNCIL_MODEL: ${{ vars.COUNCIL_MODEL }}
+  COUNCIL_MAX_CALLS: ${{ vars.COUNCIL_MAX_CALLS }}
 
 jobs:
   # Deliberately NOT a dependency of `build`: a broken notification channel

@@ -24,6 +24,7 @@ from ..core.http import HttpClient, redact_secrets
 from ..core.storage import Storage
 from ..sources import auth_meta
 from . import caption as caption_mod
+from . import clarify as clarify_mod
 from . import notify as notify_mod
 from . import publish as publish_mod
 from . import render, selection, slides_store
@@ -171,6 +172,12 @@ async def _build_one(
             photo = await fetch_photo(http, cand.row.get("image_url"))
             picked.append(cand)
             photos.append(photo)
+
+    # A one-line explanation for the events whose titles do not say what they
+    # are. Cached on the row, best-effort, and a complete no-op unless the
+    # council is switched on with a key — see social/clarify.py.
+    async with HttpClient() as http:
+        await clarify_mod.fill_blurbs(storage, http, [c.row for c in picked], dry_run=dry_run)
 
     with_photo = sum(1 for p in photos if p is not None)
     log.info("%d event(s) picked, %d with a photo%s", len(picked), with_photo, label)

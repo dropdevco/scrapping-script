@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,12 +24,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from border.core import cbp, text  # noqa: E402
-from border.core.storage import Storage  # noqa: E402
-from border.crossings import CrossingError  # noqa: E402
-from border.service import BorderFeed  # noqa: E402
+from scraper.border import cbp, text
+from scraper.border.storage import Storage
+from scraper.border.crossings import CrossingError
+from scraper.border.service import BorderFeed
 
 GRAPH = "https://graph.facebook.com/v21.0"
 

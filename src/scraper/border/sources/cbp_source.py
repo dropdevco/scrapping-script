@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from ..core import cbp
+from .. import cbp
 from .base import Reading, Source
 
 

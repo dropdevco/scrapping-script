@@ -8,7 +8,6 @@ import contextlib
 import io
 import json
 import logging
-import sys
 import unittest
 import urllib.error
 from collections import Counter
@@ -16,24 +15,22 @@ from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "tools"))
+ROOT = Path(__file__).resolve().parents[2]
 
-from border import api, consensus  # noqa: E402
-from border.sources.base import Reading, Source  # noqa: E402
-from border.sources.pasosfronterizos import PasosFronterizosSource, parse as parse_pasos  # noqa: E402
-from border.sources.borderswaittime import EXPECTED_PORTS, parse as parse_mirror  # noqa: E402
-from border import poll, selfcheck  # noqa: E402
-from border.core import cbp, text  # noqa: E402
-from border.core.storage import Storage  # noqa: E402
-from border import service as service_mod  # noqa: E402
-from border.crossings import CrossingError  # noqa: E402
-from border.service import BorderFeed, FeedError  # noqa: E402
+from scraper.border import api, consensus
+from scraper.border.sources.base import Reading, Source
+from scraper.border.sources.pasosfronterizos import PasosFronterizosSource, parse as parse_pasos
+from scraper.border.sources.borderswaittime import EXPECTED_PORTS, parse as parse_mirror
+from scraper.border import poll, selfcheck
+from scraper.border import cbp, text
+from scraper.border.storage import Storage
+from scraper.border import service as service_mod
+from scraper.border.crossings import CrossingError
+from scraper.border.service import BorderFeed, FeedError
 
-import fake_instagram  # noqa: E402
+from scraper.border.devtools import fake_instagram
 
-FIXTURES = ROOT / "tests" / "fixtures"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 NOW = datetime(2026, 9, 22, 3, 40, tzinfo=timezone.utc)   # 9:40 pm MDT — Santa Teresa shuts at 10
 MIDDAY = datetime(2026, 9, 22, 19, 40, tzinfo=timezone.utc)  # 1:40 pm MDT — every bridge open for hours
 
@@ -626,7 +623,7 @@ class StorageOff(unittest.TestCase):
     def test_rows_match_the_migration_columns(self):
         snap = cbp.build(load("cbp_feed.json"), NOW)
         row = next(iter(snap.ports[0].lanes.values())).to_row()
-        sql = (ROOT / "supabase" / "migrations" / "0001_border_waits.sql").read_text()
+        sql = (ROOT / "supabase" / "migrations" / "0013_border_waits.sql").read_text()
         for column in row:
             self.assertIn(column, sql, f"{column} is written but not in the migration")
 
@@ -1539,7 +1536,7 @@ class ReviewRegressions(unittest.TestCase):
     def test_an_unexpected_error_is_a_500(self):
         feed = feed_for("cbp_feed.json")
         with mock.patch.object(BorderFeed, "health", side_effect=ZeroDivisionError("x")):
-            with self.assertLogs("border.api", "ERROR"):
+            with self.assertLogs("scraper.border.api", "ERROR"):
                 status, _ = api.route(feed, "/health", {})
         self.assertEqual(status, 500)
 
@@ -1741,7 +1738,7 @@ class Retention(unittest.TestCase):
         self.assertEqual(store.calls["prune"], 0)
 
     def test_the_migration_keeps_enough_history_for_typical_waits(self):
-        sql = (ROOT / "supabase" / "migrations" / "0003_border_alerts_crossings_typical.sql").read_text()
+        sql = (ROOT / "supabase" / "migrations" / "0015_border_alerts_crossings_typical.sql").read_text()
         self.assertIn("keep_readings_days int default 60", sql)
         self.assertIn("weeks int default 8", sql)
         self.assertGreaterEqual(poll.KEEP_READINGS_DAYS, 8 * 7)

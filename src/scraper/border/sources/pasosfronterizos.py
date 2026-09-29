@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
-from ..core import http
+from .. import http
 from .base import Reading, Source
 
 URL = "https://pasosfronterizos.com/puentes-el-paso-juarez.php"

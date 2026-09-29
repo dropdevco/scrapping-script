@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from .core.cbp import DAY_MINUTES, UNKNOWN_AGE, Port
+from .cbp import DAY_MINUTES, UNKNOWN_AGE, Port
 from .history import MEANINGFUL_DELTA
 
 WORTH_SWITCHING = 10     # minutes saved before suggesting another bridge

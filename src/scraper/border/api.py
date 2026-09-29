@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .core.cbp import LANE_LABELS
+from .cbp import LANE_LABELS
 from .crossings import CrossingError
 from .service import BorderFeed, FeedError
 

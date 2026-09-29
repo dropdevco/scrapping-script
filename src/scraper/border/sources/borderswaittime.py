@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from ..core import http
+from .. import http
 from .base import Reading, Source
 
 URL = "https://borderswaittime.com/united-states-mexico/el-paso/"

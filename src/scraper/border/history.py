@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from .core.cbp import Snapshot
+from .cbp import Snapshot
 
 MEANINGFUL_DELTA = 5        # CBP moves in 5-minute steps; smaller is noise, not news
 FROZEN_HOURS = 6            # identical numbers for this long means the feed is stuck

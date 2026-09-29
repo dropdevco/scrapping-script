@@ -25,7 +25,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from .core.storage import Storage
+from .storage import Storage
 from .service import BorderFeed, FeedError
 
 log = logging.getLogger("border.poll")

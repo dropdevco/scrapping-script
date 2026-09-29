@@ -18,14 +18,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "tools"))
 
-from border.core import cbp, text  # noqa: E402
-from border.core.storage import Storage  # noqa: E402
-from border.service import BorderFeed, FeedError  # noqa: E402
-from fake_instagram import FakeGraph, FakePipeline  # noqa: E402
+from scraper.border import cbp, text
+from scraper.border.storage import Storage
+from scraper.border.service import BorderFeed, FeedError
+from scraper.border.devtools.fake_instagram import FakeGraph, FakePipeline
 
 COLOR = {"you": "\033[0;36m", "bot": "\033[0;33m", "note": "\033[2m",
          "warn": "\033[0;31m", "off": "\033[0m"}

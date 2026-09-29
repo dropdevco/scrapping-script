@@ -15,8 +15,8 @@ import json
 import sys
 from datetime import datetime, timezone
 
-from .core import cbp, text
-from .core.storage import Storage
+from . import cbp, text
+from .storage import Storage
 from .service import BorderFeed
 
 # Fields we actually read. A rename here is the failure this catches.

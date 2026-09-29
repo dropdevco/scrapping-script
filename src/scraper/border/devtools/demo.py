@@ -14,19 +14,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "tools"))
 
-from border.core.storage import Storage  # noqa: E402
-from border.service import BorderFeed  # noqa: E402
-from fake_instagram import FakeGraph, FakePipeline  # noqa: E402
+from scraper.border.storage import Storage
+from scraper.border.service import BorderFeed
+from scraper.border.devtools.fake_instagram import FakeGraph, FakePipeline
 
-FIXTURES = ROOT / "tests" / "fixtures"
+# The saved CBP responses the tests use: identical every run, whatever the border is doing.
+FIXTURES = Path(__file__).resolve().parents[4] / "tests" / "border" / "fixtures"
 MIDDAY = datetime(2026, 9, 22, 19, 40, tzinfo=timezone.utc)   # 1:40 pm MDT
 NIGHT = datetime(2026, 9, 22, 3, 40, tzinfo=timezone.utc)     # 9:40 pm MDT
 

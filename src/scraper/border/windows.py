@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from datetime import datetime
 
-from .core.cbp import LOCAL_TZ
+from .cbp import LOCAL_TZ
 
 SOURCE_WINDOWS = {"cbp": (300, 1200), "pasosfronterizos": (240, 600),
                   "borderswaittime": (600, 1800)}   # a mirror; read it rarely

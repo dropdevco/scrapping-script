@@ -416,3 +416,119 @@ def alert_which_bridge(below: int, lang: str = "es") -> str:
         return f"¿Para qué puente? Escribe por ejemplo: avísame cuando zaragoza baje de {below}"
     return f"Which bridge? For example: alert me when zaragoza is under {below}"
 
+
+def alerts_confirmed(rows: list[dict], lane_id: str, below: int, lang: str = "es") -> str:
+    """One confirmation for "avísame cuando zaragoza o lerdo baje de 15"."""
+    if len(rows) == 1:
+        return alert_confirmed(rows[0], lane_id, below, lang)
+    names = _joined([_row_name(r, lang) for r in rows], lang)
+    label = _label(lane_id, lang)
+    if lang == "es":
+        return f"Listo. Te aviso cuando {names} ({label}) bajen de {below} min."
+    return f"Done. I'll tell you when {names} ({label}) drop under {below} min."
+
+
+def alerts_cancelled(rows: list[dict] | None, lang: str = "es") -> str:
+    """rows None means every alert they had."""
+    if not rows:
+        return "Listo, cancelé tus avisos." if lang == "es" else "Done, your alerts are cancelled."
+    names = _joined([_row_name(r, lang) for r in rows], lang)
+    return f"Listo, ya no te aviso de {names}." if lang == "es" else f"Done, no more alerts for {names}."
+
+
+def no_alerts(lang: str = "es") -> str:
+    return ("No tenías avisos activos." if lang == "es" else "You had no alerts set.")
+
+
+# ------------------------------------------------------------------- saving
+def saved(rows: list[dict], lane_id: str, lang: str = "es") -> str:
+    names = _joined([_row_name(r, lang) for r in rows], lang)
+    label = _label(lane_id, lang)
+    if lang == "es":
+        return f"Guardado: {names} · {label}. Escribe \"puentes\" para verlo primero."
+    return f"Saved: {names} · {label}. Send \"bridges\" to see it first."
+
+
+def which_bridge(action: str, lang: str = "es") -> str:
+    """Asked instead of guessed, for saving or crossing with no bridge named."""
+    examples = {"save": ("guardar zaragoza", "save zaragoza"),
+                "cross": ("voy a cruzar zaragoza", "crossing zaragoza")}[action]
+    return (f"¿Qué puente? Escribe por ejemplo: {examples[0]}" if lang == "es"
+            else f"Which bridge? For example: {examples[1]}")
+
+
+def crossing_not_started(lang: str = "es") -> str:
+    return ('Primero escribe "voy a cruzar" y el puente.' if lang == "es"
+            else 'Send "crossing" and the bridge first.')
+
+
+# ----------------------------------------------------------- best / compare
+def best_intro(lane_id: str, lang: str = "es") -> str:
+    label = _label(lane_id, lang)
+    return f"Más rápido ahora ({label}):" if lang == "es" else f"Fastest right now ({label}):"
+
+
+def no_open_bridge(lane_id: str, lang: str = "es") -> str:
+    label = _label(lane_id, lang)
+    return (f"Ahora ningún puente tiene abierto el carril {label}." if lang == "es"
+            else f"No bridge has its {label} lane open right now.")
+
+
+def comparison(rows: list[dict], lane_id: str, lang: str = "es") -> str:
+    """"es mejor zaragoza o lerdo": the bridges asked about, best bet first, and a verdict.
+
+    Ordered by the expected wait (effective_minutes), not the raw number, for the same
+    reason the ranking is: a fresher reading is the better bet at equal minutes.
+    """
+    es = lang == "es"
+    def order(r):
+        is_open = r["state"] == "open" and r.get("effective_minutes") is not None
+        return (not is_open, r.get("effective_minutes") or 0)
+    rows = sorted(rows, key=order)
+    lines = [f"{_label(lane_id, lang)}:"]
+    for row in rows:
+        name = _short(row["port_number"], _row_name(row, lang), lang)
+        if row["state"] == "open":
+            lines.append(f"{name}: {duration(row['minutes'])}{_arrow(row.get('delta'))}"
+                         + _crosses(row.get("crosses_at"), lang))
+        elif row["state"] == "closed":
+            lines.append(f"{name}: " + ("cerrado" if es else "closed"))
+        else:
+            lines.append(f"{name}: " + ("sin datos" if es else "no data"))
+    top = rows[0]
+    if top["state"] == "open":
+        name = _short(top["port_number"], _row_name(top, lang), lang)
+        lines.append(f"Mejor ahora: {name}." if es else f"Best right now: {name}.")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------- small talk
+def help_text(lang: str = "es") -> str:
+    if lang == "es":
+        return ("Puedo decirte cómo están los puentes. Prueba:\n"
+                "• puentes — todos los tiempos\n"
+                "• zaragoza (o libre, pdn, lerdo…) — un puente; agrega sentri, ready o a pie\n"
+                "• ¿cuál puente está más rápido?\n"
+                "• avísame cuando zaragoza baje de 20\n"
+                "• guardar zaragoza sentri — tus puentes primero\n"
+                "• alto — cancela tus avisos")
+    return ("I can tell you how the bridges are doing. Try:\n"
+            "• bridges — every wait time\n"
+            "• zaragoza (or libre, pdn, lerdo…) — one bridge; add sentri, ready or walking\n"
+            "• which bridge is fastest?\n"
+            "• alert me when zaragoza is under 20\n"
+            "• save zaragoza sentri — your bridges first\n"
+            "• stop — cancel your alerts")
+
+
+def thanks_text(lang: str = "es") -> str:
+    return ("¡De nada! Escribe el nombre de un puente cuando quieras." if lang == "es"
+            else "You're welcome! Send a bridge name any time.")
+
+
+def _joined(names: list[str], lang: str) -> str:
+    if len(names) < 2:
+        return "".join(names)
+    last = " y " if lang == "es" else " and "
+    return ", ".join(names[:-1]) + last + names[-1]
+

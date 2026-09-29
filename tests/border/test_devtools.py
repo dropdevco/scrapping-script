@@ -11,6 +11,7 @@ import urllib.error
 from unittest import mock
 
 from border_support import (  # noqa: F401 - setUpModule/tearDownModule are hooks
+    MIDDAY,
     feed_for,
     setUpModule,
     tearDownModule,
@@ -103,3 +104,87 @@ class InstagramSimulation(unittest.IsolatedAsyncioTestCase):
             graph = await fake_instagram.run(feed_for("cbp_feed.json", "cbp_feed_after_drop.json"))
         self.assertTrue(graph.calls)
         self.assertTrue(all(c["endpoint"].startswith("https://graph.facebook.com") for c in graph.calls))
+
+
+class EveryKindOfMessage(unittest.IsolatedAsyncioTestCase):
+    """The whole conversation, reply by reply. Midday feed: Santa Teresa is the fastest
+    car lane at 40, Paso del Norte 48, Zaragoza's car lane is closed, walking is quick."""
+
+    async def asyncSetUp(self):
+        self.feed = feed_for("cbp_feed_midday.json", now=MIDDAY)
+        self.graph = fake_instagram.FakeGraph()
+        self.pipeline = fake_instagram.FakePipeline(self.feed, self.graph)
+
+    async def say(self, message: str, user: str = "u") -> str:
+        await self.pipeline.on_message(user, message)
+        return self.graph.calls[-1]["params"]["message"]["text"]
+
+    async def test_a_greeting_with_a_question_answers_the_question(self):
+        reply = await self.say("hola, como esta pdn?")
+        self.assertTrue(reply.startswith("Paso del Norte (Santa Fe) · Autos: 48 min"))
+
+    async def test_the_lane_in_a_question_is_the_lane_answered(self):
+        self.assertIn("· Peatones:", await self.say("cuanto esta el libre a pie"))
+        self.assertIn("· SENTRI:", await self.say("zaragoza sentri"))
+
+    async def test_an_english_question_gets_an_english_answer(self):
+        reply = await self.say("how long is the wait at bota")
+        self.assertTrue(reply.startswith("Bridge of the Americas · Cars:"))
+
+    async def test_which_bridge_is_fastest(self):
+        reply = await self.say("cual puente esta mas rapido?")
+        self.assertTrue(reply.startswith("Más rápido ahora (Autos):\nJerónimo–Santa Teresa"))
+        walking = await self.say("which bridge is fastest walking")
+        self.assertTrue(walking.startswith("Fastest right now (Walking):"))
+
+    async def test_two_bridges_are_compared_with_a_verdict(self):
+        reply = await self.say("es mejor santa teresa o pdn")
+        self.assertEqual(reply.splitlines()[0], "Autos:")
+        self.assertIn("Mejor ahora: Santa Teresa.", reply)
+
+    async def test_a_multi_bridge_alert_in_half_an_hour(self):
+        reply = await self.say("avisame cuando pdn o santa teresa baje de media hora")
+        self.assertIn("Paso del Norte (Santa Fe) y Jerónimo–Santa Teresa (Autos) bajen de 30 min", reply)
+        self.assertEqual({s["port"] for s in self.pipeline.subscriptions}, {"240202", "240801"})
+
+    async def test_asking_twice_does_not_file_twice(self):
+        await self.say("avisame cuando pdn baje de 30")
+        await self.say("avísame cuando PDN baje de 30!!")
+        self.assertEqual(len(self.pipeline.subscriptions), 1)
+
+    async def test_cancelling_one_bridge_keeps_the_others(self):
+        await self.say("avisame cuando pdn o santa teresa baje de 30")
+        reply = await self.say("ya no me avises de pdn")
+        self.assertEqual(reply, "Listo, ya no te aviso de Paso del Norte (Santa Fe).")
+        self.assertEqual([s["port"] for s in self.pipeline.subscriptions], ["240801"])
+
+    async def test_cancelling_everything_and_cancelling_nothing(self):
+        await self.say("avisame cuando pdn baje de 30")
+        self.assertEqual(await self.say("alto"), "Listo, cancelé tus avisos.")
+        self.assertEqual(await self.say("stop"), "You had no alerts set.")
+
+    async def test_saving_two_bridges_then_the_menu_shows_just_those(self):
+        self.assertIn("Guardado: Paso del Norte (Santa Fe) y Jerónimo–Santa Teresa",
+                      await self.say("guardar pdn y santa teresa"))
+        menu = await self.say("puentes")
+        self.assertIn("Tus puentes", menu)
+        self.assertNotIn("Zaragoza", menu)
+
+    async def test_saving_or_crossing_with_no_bridge_asks_which(self):
+        self.assertIn("¿Qué puente?", await self.say("guardar"))
+        self.assertIn("¿Qué puente?", await self.say("voy a cruzar"))
+
+    async def test_crossed_before_starting_explains(self):
+        self.assertIn('Primero escribe "voy a cruzar"', await self.say("ya crucé"))
+
+    async def test_thanks_help_and_emoji(self):
+        self.assertTrue((await self.say("gracias!!")).startswith("¡De nada!"))
+        self.assertTrue((await self.say("thanks")).startswith("You're welcome!"))
+        self.assertTrue((await self.say("👍")).startswith("¡De nada!"))
+        self.assertIn("avísame cuando zaragoza baje de 20", await self.say("ayuda"))
+        self.assertIn("alert me when zaragoza is under 20", await self.say("help"))
+
+    async def test_gibberish_gets_the_bridge_list_not_a_guess(self):
+        reply = await self.say("asdfgh")
+        self.assertIn("No encuentro ese puente", reply)
+        self.assertTrue(self.graph.calls[-1]["params"]["message"]["quick_replies"])

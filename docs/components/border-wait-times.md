@@ -21,7 +21,7 @@ the repo was edited. The four small hooks it still needs are in
 | **Writes**               | `border_ports`, `border_readings`, `border_runs`, `border_alerts`, `border_crossings` (migrations `0013`–`0015`)                                                                                               |
 | **Requires**             | Nothing for live answers. `SUPABASE_URL` + `SUPABASE_KEY` for history, deltas that survive a restart, alerts and "normal for this hour"                                                                        |
 | **Uses from the engine** | `core.http.HttpClient` (retries, robots.txt, gzip, `USER_AGENT`), `core.config.settings`, `core.eventtime.event_tz()`, the Supabase client from `core.storage.Storage`, `ENABLED_SOURCES` / `DISABLED_SOURCES` |
-| **Tests** | `tests/border/` — 254 tests, one file per module (`pytest tests/border -q`) |
+| **Tests** | `tests/border/` — 348 tests, one file per module (`pytest tests/border -q`) |
 
 ---
 
@@ -352,38 +352,51 @@ do phone typos — `sarragoza`, `tornilo`, `stantn`, `pasodelnorte`, `santa fee`
 that fits every bridge (`puente`) and anything too far from a real name (`pizza`)
 return nothing, so the pipeline asks instead of sending someone to the wrong bridge.
 
-### Alert requests name their bridge
+### Every kind of message
 
-`scraper/border/requests.py` reads an alert request the way a follower types it, and is
-meant to be reused by whatever answers the DMs:
+`scraper/border/requests.py` reads a DM the way it is typed — accents or none, capitals,
+"!!", emoji, Spanish or English, the key words anywhere in the line — and is meant to
+be reused by whatever answers the DMs. `classify(message)` returns what they want,
+which bridges, which lane, what limit and which language:
 
-| Message | Bridge | Lane | Limit | Reply in |
+| Message | Kind | Bridges | Lane | Limit |
 |---|---|---|---|---|
-| `avísame cuando zaragoza baje de 20` | Zaragoza–Ysleta | car | 20 | es |
-| `alert me when santa teresa is under 10` | Santa Teresa | car | 10 | en |
-| `avísame cuando sentri en pdn baje de 10` | Paso del Norte | SENTRI | 10 | es |
-| `avisame cuando ready a pie en paso del norte este en 15` | Paso del Norte | walking Ready | 15 | es |
-| `alerta cuando lerdo baje de 25` | Stanton–Lerdo | car | 25 | es |
+| `avísame cuando zaragoza baje de 20` | alert | Zaragoza | — | 20 |
+| `AVISAME cuando el LIBRE baje de media hora!!` | alert | Puente Libre | — | 30 |
+| `avisame cuando zaragoza o lerdo baje de 15` | alert | Zaragoza, Lerdo | — | 15 |
+| `alert me when santa teresa is under 10` | alert (en) | Santa Teresa | — | 10 |
+| `ya no me avises de zaragoza` / `alto` | cancel | Zaragoza / all | | |
+| `¿cuál es el puente más rápido a pie?` | best | | walking | |
+| `cuanto esta el libre a pie` / `zaragoza sentri` | bridge | one | walking / SENTRI | |
+| `es mejor zaragoza o lerdo` / `pdn vs bota` | bridge (compare) | two | | |
+| `guardar zaragoza y lerdo` | save | two | | |
+| `voy a cruzar zaragoza` / `ya crucé` | crossing start / done | | | |
+| `hola` · `puentes` · `ayuda` · `gracias` · `👍` | menu · menu · help · thanks · thanks | | | |
 
-It takes out the trigger ("avísame", "alert me", "let me know"…), the numbers, the lane
-words and the filler ("cuando", "baje", "under"…), and hands what is left to the same
-lookup as every other bridge question. The first number from 1 to 300 is the limit, so a
-port number is never mistaken for one. The trigger sets the reply language: "alerta" is
-Spanish although it starts with "alert".
+How it reads them:
 
-The fake pipeline shows the rules around it: with no bridge named it uses the person's
-first saved bridge (and saved lane, unless they named one), and with nothing saved it
-asks; an unknown bridge, or a lane that bridge lacks (SENTRI at Bridge of the Americas),
-gets the feed's own reply and files nothing. `drops()` reports every bridge under a
-limit, so each subscription keeps only its own bridge's drops.
+- **Kind** — phrases checked in a fixed order, first match wins: cancel before alert
+  ("no me avises" contains "avises"), crossing-done before crossing-start, and a named
+  bridge before "which is fastest" ("¿es más rápido zaragoza?" is about Zaragoza).
+- **Bridges** — intent words, lane words, numbers and filler ("cuando", "baje", "how",
+  "puente") are removed, the rest is split on "o" / "y" / "or" / "and" / "vs", and each
+  part goes through the same lookup as every other bridge question. Gibberish is offered
+  to that lookup and finds nothing, so it gets "no encuentro ese puente" and the list.
+- **Limit** — "20", "20min", "<20", "veinte", "media hora", "un cuarto de hora", "1h30",
+  "hora y media", "an hour", "half an hour". A figure above 300 is a port number, not a
+  limit. Default 30.
+- **Language** — words only one language uses are counted; a tie keeps the account's
+  language, so a bare "zaragoza" is answered in Spanish.
 
-Before this, every request was filed as Paso del Norte, car lane, and answered in
-Spanish, and the sweep ignored the stored bridge — so "avísame cuando zaragoza baje de
-20" would have alerted about any bridge that dropped under 20.
+The fake pipeline shows the rules around it: with no bridge named, an alert uses the
+person's first saved bridge (and saved lane unless they named one) and otherwise asks;
+saving or crossing with no bridge asks; an unknown bridge, or a lane that bridge lacks
+(SENTRI at the Puente Libre), gets the feed's own reply and files nothing; the same
+alert asked twice is filed once; each subscription only hears about its own bridge.
 
-Deltas and drop alerts read the previous value from memory first, then from
-`border_readings`. That database fallback is what makes them survive a restart —
-without it, the first sweep after a deploy silently reports nothing.
+Before this, alerts were filed as Paso del Norte whatever was named, "gracias" got "no
+encuentro ese puente", "¿cuál puente está más rápido?" was not understood, and a
+question about a bridge ignored the lane it named.
 
 ## Reading the answers
 
@@ -489,8 +502,8 @@ would type, and the reply comes from the same code the pipeline calls.
 ```
 
 Try: `puentes`, a bridge name (misspelled is fine), `guardar zaragoza sentri` then
-`puentes` again, `avísame cuando zaragoza baje de 30`, `alert me when bota is under 20`,
-`alto`. Commands: `/post`, `/idioma`,
+`puentes` again, `avísame cuando zaragoza baje de 30`, `¿cuál puente está más rápido?`,
+`es mejor zaragoza o lerdo`, `alert me when bota is under 20`, `gracias`, `alto`. Commands: `/post`, `/idioma`,
 `/estado`, `/ayuda`, `/salir`.
 
 It reads live CBP by default. For a rehearsal that cannot surprise you, replay saved

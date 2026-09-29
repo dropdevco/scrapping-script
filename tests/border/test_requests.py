@@ -84,3 +84,105 @@ def test_only_alert_requests_are_taken_for_alerts():
     assert requests.is_alert_request("Avísame cuando zaragoza baje de 20")
     assert not requests.is_alert_request("zaragoza")
     assert not requests.is_alert_request("guardar zaragoza sentri")
+
+
+# ── every kind of message ────────────────────────────────────────────────────────
+# (message, kind, lane, limit, bridges). Written the way people type them: accents or
+# none, capitals, "!!", emoji, Spanish and English, the trigger anywhere in the line.
+MESSAGES = [
+    # alerts
+    ("avísame cuando zaragoza baje de 20", "alert", None, 20, ("zaragoza",)),
+    ("AVISAME cuando el LIBRE baje de media hora!!", "alert", None, 30, ("libre",)),
+    ("me avisas si lerdo baja de veinte?", "alert", None, 20, ("lerdo",)),
+    ("cuando zaragoza baje de 20", "alert", None, 20, ("zaragoza",)),
+    ("avisame cuando zaragoza o lerdo baje de 15", "alert", None, 15, ("zaragoza", "lerdo")),
+    ("porfa avisame cuando sentri en pdn este en menos de 10", "alert", "car_sentri", 10, ("pdn",)),
+    ("avisame cuando baje de 1h30", "alert", None, 90, ()),
+    ("alert me when santa teresa is under 10", "alert", None, 10, ("santa teresa",)),
+    ("let me know when pdn drops below an hour", "alert", None, 60, ("pdn",)),
+    ("notify me when walking at bota is under 15 min", "alert", "walk", 15, ("bota",)),
+    # cancelling
+    ("ya no me avises de zaragoza", "cancel", None, None, ("zaragoza",)),
+    ("alto", "cancel", None, None, ()),
+    ("Stop", "cancel", None, None, ()),
+    ("cancelar alertas", "cancel", None, None, ()),
+    ("deja de avisarme", "cancel", None, None, ()),
+    # which bridge is fastest
+    ("cual puente esta mas rapido?", "best", None, None, ()),
+    ("¿Cuál es el puente más rápido a pie?", "best", "walk", None, ()),
+    ("por donde cruzo con sentri", "best", "car_sentri", None, ()),
+    ("which bridge is fastest right now", "best", None, None, ()),
+    # one bridge, or several to compare
+    ("zaragoza", "bridge", None, None, ("zaragoza",)),
+    ("cuanto esta el libre a pie", "bridge", "walk", None, ("libre",)),
+    ("hola, como esta pdn?", "bridge", None, None, ("pdn",)),
+    ("zaragoza sentri", "bridge", "car_sentri", None, ("zaragoza",)),
+    ("es mejor zaragoza o lerdo", "bridge", None, None, ("zaragoza", "lerdo")),
+    ("pdn vs bota", "bridge", None, None, ("pdn", "bota")),
+    ("how long is the wait at bota", "bridge", None, None, ("bota",)),
+    ("el cruce de zaragoza como esta", "bridge", None, None, ("zaragoza",)),
+    # saving
+    ("guardar zaragoza sentri", "save", "car_sentri", None, ("zaragoza",)),
+    ("guardar zaragoza y lerdo", "save", None, None, ("zaragoza", "lerdo")),
+    ("mi puente es santa teresa", "save", None, None, ("santa teresa",)),
+    # crossings
+    ("voy a cruzar zaragoza", "crossing_start", None, None, ("zaragoza",)),
+    ("estoy en la fila de pdn", "crossing_start", None, None, ("pdn",)),
+    ("ya crucé!", "crossing_done", None, None, ()),
+    ("crossed", "crossing_done", None, None, ()),
+    # small talk
+    ("hola", "menu", None, None, ()),
+    ("Buenos días", "menu", None, None, ()),
+    ("puentes", "menu", None, None, ()),
+    ("ayuda", "help", None, None, ()),
+    ("?", "help", None, None, ()),
+    ("gracias!!", "thanks", None, None, ()),
+    ("👍", "thanks", None, None, ()),
+]
+
+
+@pytest.mark.parametrize(("message", "kind", "lane", "limit", "bridges"), MESSAGES)
+def test_every_kind_of_message_is_read(message, kind, lane, limit, bridges):
+    intent = requests.classify(message)
+    assert (intent.kind, intent.lane, intent.limit, intent.bridges) == (kind, lane, limit, bridges)
+
+
+@pytest.mark.parametrize(("message", "kind", "lane", "limit", "bridges"),
+                         [m for m in MESSAGES if m[4]])
+def test_every_bridge_named_resolves(message, kind, lane, limit, bridges):
+    """Each name classify hands back must be one Snapshot.port can actually find."""
+    assert all(SNAPSHOT.port(name) is not None for name in bridges)
+
+
+@pytest.mark.parametrize(("message", "lang"), [
+    ("cual puente esta mas rapido", "es"),
+    ("which bridge is fastest", "en"),
+    ("hola", "es"),
+    ("hello", "en"),
+    ("gracias", "es"),
+    ("thanks", "en"),
+    ("zaragoza", "es"),                       # names alone keep the account's language
+])
+def test_the_language_is_read_from_any_message(message, lang):
+    assert requests.classify(message, default_lang="es").lang == lang
+
+
+@pytest.mark.parametrize(("message", "limit"), [
+    ("avisame cuando baje de media hora", 30),
+    ("avisame cuando baje de un cuarto de hora", 15),
+    ("avisame cuando baje de hora y media", 90),
+    ("avisame cuando baje de 2 horas", 120),
+    ("avisame cuando baje de <20", 20),
+    ("avisame cuando baje de 20min", 20),
+    ("alert me when it is under half an hour", 30),
+    ("alert me when it is under twenty", 20),
+])
+def test_limits_are_read_the_way_people_write_them(message, limit):
+    assert requests.limit_in(message) == limit
+
+
+def test_gibberish_is_offered_to_the_bridge_lookup_which_finds_nothing():
+    """Answered with "no encuentro ese puente" and the list, never a guessed bridge."""
+    intent = requests.classify("asdfgh")
+    assert intent.kind == "bridge"
+    assert SNAPSHOT.port(intent.bridges[0]) is None

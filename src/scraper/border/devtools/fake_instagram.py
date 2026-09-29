@@ -97,6 +97,10 @@ class HttpFeed:
         # People type "el puente libre"; a raw space is not a legal request target.
         return await self._get(f"/waits/{urllib.parse.quote(key, safe='')}", lane=lane, lang=lang)
 
+    async def best(self, lane="car"):
+        answer = await self._get("/best", lane=lane)
+        return None if "error" in answer else answer     # 503: nothing open in that lane
+
     async def drops(self, below, lane="car", lang="es", since=None):
         params = {"below": below, "lane": lane, "lang": lang}
         if since is not None:
@@ -134,106 +138,170 @@ class FakePipeline:
         return caption
 
     async def on_message(self, user_id: str, message: str) -> None:
-        """The small part of the conversation that needs our data."""
-        msg = message.strip().lower()
+        """Every DM is read by requests.classify, then answered by one handler per kind.
 
-        if msg in ("puentes", "bridges", "hola", "hi"):
-            saved = self.saved.get(user_id)
-            if saved:
-                # A regular crosser gets their two bridges in their lane, not all thirty lines.
-                digest = await self.feed.my_digest(saved["ports"], saved["lane"], self.lang)
-                self.graph.send_message(user_id, digest["message"],
-                                        quick_replies=["Todos", "Cambiar carril", "Alto"])
-                return
-            data = await self.feed.waits(self.lang)
-            names = [p["name_es"] if self.lang == "es" else p["name"] for p in data["ports"]]
-            head = data["caption_es"] if self.lang == "es" else data["caption_en"]
-            self.graph.send_message(user_id, head, quick_replies=names[:4])
+        The reply language follows the message itself (a follower who writes in English
+        is answered in English), falling back to the account's language on a tie.
+        """
+        intent = requests.classify(message, self.lang)
+        handlers = {
+            "menu": self._menu, "best": self._best, "bridge": self._bridge,
+            "alert": self._subscribe, "cancel": self._cancel, "save": self._save,
+            "crossing_start": self._crossing_start, "crossing_done": self._crossing_done,
+            "help": self._help, "thanks": self._thanks, "unknown": self._help,
+        }
+        await handlers[intent.kind](user_id, intent)
+
+    # -- helpers ------------------------------------------------------------
+    def _lane(self, user_id: str, intent: requests.Intent) -> str:
+        """The lane they named, else the one they saved, else cars."""
+        saved = self.saved.get(user_id)
+        return intent.lane or (saved["lane"] if saved else "car")
+
+    async def _resolve(self, names, lane: str, lang: str) -> tuple[list[dict], dict | None]:
+        """Look up each bridge named. Returns the ones found (once each) and the first
+        refusal — an unknown bridge, or a lane that bridge does not have (SENTRI at the
+        Puente Libre) — whose reply already says which and lists the bridges."""
+        found, refusal, seen = [], None, set()
+        for name in names:
+            answer = await self.feed.bridge(name, lane, lang)
+            if answer.get("found") and answer.get("state") != "absent":
+                if answer["port_number"] not in seen:
+                    seen.add(answer["port_number"])
+                    found.append(answer)
+            elif refusal is None:
+                refusal = answer
+        return found, refusal
+
+    def _refuse(self, user_id: str, answer: dict) -> None:
+        self.graph.send_message(user_id, answer["reply"], quick_replies=answer.get("options"))
+
+    # -- one handler per kind of message -------------------------------------
+    async def _menu(self, user_id: str, intent: requests.Intent) -> None:
+        saved = self.saved.get(user_id)
+        if saved:
+            # A regular crosser gets their two bridges in their lane, not all thirty lines.
+            lane = intent.lane or saved["lane"]
+            digest = await self.feed.my_digest(saved["ports"], lane, intent.lang)
+            self.graph.send_message(user_id, digest["message"],
+                                    quick_replies=["Todos", "Cambiar carril", "Alto"])
             return
+        data = await self.feed.waits(intent.lang)
+        names = [p["name_es"] if intent.lang == "es" else p["name"] for p in data["ports"]]
+        head = data["caption_es"] if intent.lang == "es" else data["caption_en"]
+        self.graph.send_message(user_id, head, quick_replies=names[:4])
 
-        if msg.startswith(("guardar", "save", "mi puente")):
-            target = msg.split(maxsplit=1)[1] if " " in msg else ""
-            lane = requests.lane_in(msg) or "car"
-            answer = await self.feed.bridge(requests.bridge_text(target) or target, lane, self.lang)
-            if not answer.get("found"):
-                self.graph.send_message(user_id, answer["reply"], quick_replies=answer.get("options"))
-                return
-            entry = self.saved.setdefault(user_id, {"ports": [], "lane": lane})
-            entry["lane"] = lane
-            if answer["port_number"] not in entry["ports"]:
-                entry["ports"].append(answer["port_number"])
-            name = answer["name_es"] if self.lang == "es" else answer["name"]
-            self.graph.send_message(user_id, f"Guardado: {name}. Escribe \"puentes\" para verlo primero."
-                                    if self.lang == "es" else
-                                    f"Saved: {name}. Send \"bridges\" to see it first.")
+    async def _best(self, user_id: str, intent: requests.Intent) -> None:
+        lane = self._lane(user_id, intent)
+        best = await self.feed.best(lane)
+        if not best:
+            self.graph.send_message(user_id, text.no_open_bridge(lane, intent.lang))
             return
+        answer = await self.feed.bridge(best["port_number"], lane, intent.lang)
+        self.graph.send_message(user_id, text.best_intro(lane, intent.lang) + "\n" + answer["reply"])
 
-        if requests.is_alert_request(msg):
-            await self._subscribe(user_id, msg)
-            return
+    async def _bridge(self, user_id: str, intent: requests.Intent) -> None:
+        lane = self._lane(user_id, intent)
+        found, refusal = await self._resolve(intent.bridges, lane, intent.lang)
+        if not found:
+            self._refuse(user_id, refusal)
+        elif len(found) == 1:
+            self.graph.send_message(user_id, found[0]["reply"])
+        else:
+            self.graph.send_message(user_id, text.comparison(found, lane, intent.lang))
 
-        if msg.startswith(("voy a cruzar", "cruzando", "crossing")):
-            target = msg.split("cruzar", 1)[-1] if "cruzar" in msg else msg.split(maxsplit=1)[-1]
-            saved = self.saved.get(user_id)
-            lane = saved["lane"] if saved else "car"
-            port = target.strip() or (saved["ports"][0] if saved else "")
-            try:
-                crossing = await self.feed.start_crossing(port, lane, self.lang, reporter=user_id)
-            except CrossingError as exc:
-                self.graph.send_message(user_id, text.crossing_error(exc.code, self.lang))
-                return
-            self.crossing[user_id] = crossing["id"]
-            self.graph.send_message(user_id, crossing["reply"])
-            return
+    async def _subscribe(self, user_id: str, intent: requests.Intent) -> None:
+        """File an alert for each bridge and lane actually named, in their language.
 
-        if msg in ("ya crucé", "ya cruce", "crucé", "cruce", "crossed"):
-            crossing_id = self.crossing.pop(user_id, None)
-            if not crossing_id:
-                self.graph.send_message(user_id, "Primero escribe \"voy a cruzar\" y el puente."
-                                        if self.lang == "es" else "Send \"crossing\" and the bridge first.")
-                return
-            try:
-                reply = (await self.feed.finish_crossing(crossing_id, self.lang))["reply"]
-            except CrossingError as exc:
-                reply = text.crossing_error(exc.code, self.lang)
-            self.graph.send_message(user_id, reply)
-            return
-
-        if msg in ("alto", "stop"):
-            self.subscriptions = [s for s in self.subscriptions if s["user_id"] != user_id]
-            self.graph.send_message(user_id, "Listo, cancelé tus avisos." if self.lang == "es"
-                                    else "Done, your alerts are cancelled.")
-            return
-
-        # anything else is read as a bridge name
-        answer = await self.feed.bridge(msg, "car", self.lang)
-        self.graph.send_message(user_id, answer["reply"],
-                                quick_replies=None if answer.get("found") else answer.get("options"))
-
-    async def _subscribe(self, user_id: str, msg: str) -> None:
-        """File an alert for the bridge and lane actually named, in their language.
-
-        A bridge not named falls back to their first saved bridge (and their saved lane
+        No bridge named falls back to their first saved bridge (and their saved lane
         unless they named one); with nothing saved either, we ask rather than guess.
         """
-        lang = requests.language_of(msg, self.lang)
-        below = requests.limit_in(msg)
+        lane = self._lane(user_id, intent)
+        below = intent.limit or requests.DEFAULT_LIMIT
         saved = self.saved.get(user_id)
-        lane = requests.lane_in(msg) or (saved["lane"] if saved else "car")
-        target = requests.bridge_text(msg) or (saved["ports"][0] if saved else "")
-        if not target:
-            options = (await self.feed.bridge("", lane, lang)).get("options")
-            self.graph.send_message(user_id, text.alert_which_bridge(below, lang), quick_replies=options)
+        names = intent.bridges or ((saved["ports"][0],) if saved else ())
+        if not names:
+            options = (await self.feed.bridge("", lane, intent.lang)).get("options")
+            self.graph.send_message(user_id, text.alert_which_bridge(below, intent.lang),
+                                    quick_replies=options)
             return
-        answer = await self.feed.bridge(target, lane, lang)
-        if not answer.get("found") or answer.get("state") == "absent":
-            # Unknown bridge, or a lane this bridge does not have (SENTRI at Tornillo):
-            # the feed's own reply already says which, and lists the bridges.
-            self.graph.send_message(user_id, answer["reply"], quick_replies=answer.get("options"))
+        found, refusal = await self._resolve(names, lane, intent.lang)
+        if not found:
+            self._refuse(user_id, refusal)
             return
-        self.subscriptions.append({"user_id": user_id, "port": answer["port_number"],
-                                   "lane": lane, "below": below, "lang": lang})
-        self.graph.send_message(user_id, text.alert_confirmed(answer, lane, below, lang))
+        for answer in found:
+            sub = {"user_id": user_id, "port": answer["port_number"], "lane": lane,
+                   "below": below, "lang": intent.lang}
+            if not any(all(s.get(k) == v for k, v in sub.items() if k != "lang")
+                       for s in self.subscriptions):
+                self.subscriptions.append(sub)
+        self.graph.send_message(user_id, text.alerts_confirmed(found, lane, below, intent.lang))
+
+    async def _cancel(self, user_id: str, intent: requests.Intent) -> None:
+        """"alto" cancels everything; "ya no me avises de zaragoza" only Zaragoza."""
+        mine = [s for s in self.subscriptions if s["user_id"] == user_id]
+        if intent.bridges:
+            found, refusal = await self._resolve(intent.bridges, intent.lane or "car", intent.lang)
+            if not found:
+                self._refuse(user_id, refusal)
+                return
+            ports = {a["port_number"] for a in found}
+            drop = [s for s in mine if s["port"] in ports and (not intent.lane or s["lane"] == intent.lane)]
+        else:
+            found, drop = None, mine
+        if not drop:
+            self.graph.send_message(user_id, text.no_alerts(intent.lang))
+            return
+        self.subscriptions = [s for s in self.subscriptions if s not in drop]
+        self.graph.send_message(user_id, text.alerts_cancelled(found, intent.lang))
+
+    async def _save(self, user_id: str, intent: requests.Intent) -> None:
+        if not intent.bridges:
+            self.graph.send_message(user_id, text.which_bridge("save", intent.lang))
+            return
+        lane = intent.lane or "car"
+        found, refusal = await self._resolve(intent.bridges, lane, intent.lang)
+        if not found:
+            self._refuse(user_id, refusal)
+            return
+        entry = self.saved.setdefault(user_id, {"ports": [], "lane": lane})
+        entry["lane"] = lane
+        for answer in found:
+            if answer["port_number"] not in entry["ports"]:
+                entry["ports"].append(answer["port_number"])
+        self.graph.send_message(user_id, text.saved(found, lane, intent.lang))
+
+    async def _crossing_start(self, user_id: str, intent: requests.Intent) -> None:
+        saved = self.saved.get(user_id)
+        port = intent.bridges[0] if intent.bridges else (saved["ports"][0] if saved else "")
+        if not port:
+            self.graph.send_message(user_id, text.which_bridge("cross", intent.lang))
+            return
+        try:
+            crossing = await self.feed.start_crossing(port, self._lane(user_id, intent),
+                                                      intent.lang, reporter=user_id)
+        except CrossingError as exc:
+            self.graph.send_message(user_id, text.crossing_error(exc.code, intent.lang))
+            return
+        self.crossing[user_id] = crossing["id"]
+        self.graph.send_message(user_id, crossing["reply"])
+
+    async def _crossing_done(self, user_id: str, intent: requests.Intent) -> None:
+        crossing_id = self.crossing.pop(user_id, None)
+        if not crossing_id:
+            self.graph.send_message(user_id, text.crossing_not_started(intent.lang))
+            return
+        try:
+            reply = (await self.feed.finish_crossing(crossing_id, intent.lang))["reply"]
+        except CrossingError as exc:
+            reply = text.crossing_error(exc.code, intent.lang)
+        self.graph.send_message(user_id, reply)
+
+    async def _help(self, user_id: str, intent: requests.Intent) -> None:
+        self.graph.send_message(user_id, text.help_text(intent.lang))
+
+    async def _thanks(self, user_id: str, intent: requests.Intent) -> None:
+        self.graph.send_message(user_id, text.thanks_text(intent.lang))
 
     async def scheduled_message(self, user_id: str, port_key: str | None = None, lane: str = "car") -> None:
         """Their saved bridges when they have some, otherwise the one asked for."""

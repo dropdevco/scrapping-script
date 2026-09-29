@@ -31,7 +31,7 @@ SUGGESTIONS = [
     ("puentes", "every bridge right now"),
     ("zaragoza", "one bridge — try a typo, it still works"),
     ("guardar zaragoza sentri", "save it, then send \"puentes\" again"),
-    ("avísame cuando baje de 30", "set an alert"),
+    ("avísame cuando zaragoza baje de 30", "set an alert on any bridge, in any lane"),
     ("alto", "cancel alerts"),
     ("voy a cruzar paso del norte", "log a real crossing, then \"ya crucé\""),
 ]

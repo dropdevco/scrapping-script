@@ -124,8 +124,8 @@ class Demo:
         feed = self.feed("cbp_feed_midday.json", "cbp_feed_midday_after_drop.json")
         pipeline = FakePipeline(feed, self.graph)
 
-        self.dm("Ana", "avísame cuando baje de 30 min")
-        await pipeline.on_message("ana", "avísame cuando baje de 30 min")
+        self.dm("Ana", "avísame cuando paso del norte baje de 30 min")
+        await pipeline.on_message("ana", "avísame cuando paso del norte baje de 30 min")
         self.bot(self.graph.calls[-1]["params"]["message"]["text"])
 
         await feed.snapshot()                      # first reading: 48 min

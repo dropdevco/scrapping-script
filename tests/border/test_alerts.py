@@ -13,6 +13,7 @@ import unittest
 from datetime import UTC, datetime, timedelta
 
 from border_support import (  # noqa: F401 - setUpModule/tearDownModule are hooks
+    MIDDAY,
     NOW,
     MemoryStore,
     feed_for,
@@ -124,10 +125,65 @@ class AlertsAreEvents(unittest.IsolatedAsyncioTestCase):
         feed = feed_for("cbp_feed.json", "cbp_feed_after_drop.json")
         await feed.snapshot()
         pipeline = fake_instagram.FakePipeline(feed, fake_instagram.FakeGraph())
-        await pipeline.on_message("a", "avísame cuando baje de 30")
-        await pipeline.on_message("b", "avísame cuando baje de 30")
+        await pipeline.on_message("a", "avísame cuando paso del norte baje de 30")
+        await pipeline.on_message("b", "avísame cuando pdn baje de 30")
         self.assertEqual((await pipeline.alert_sweep()), 2)
         self.assertEqual((await pipeline.alert_sweep()), 0)      # cursors: nothing new
+
+
+
+class AlertRequestsNameTheirBridge(unittest.IsolatedAsyncioTestCase):
+    """Paso del Norte's car lane drops 48 -> 20 between the two readings; nothing else does."""
+
+    async def asyncSetUp(self):
+        self.feed = feed_for("cbp_feed_midday.json", "cbp_feed_midday_after_drop.json", now=MIDDAY)
+        self.graph = fake_instagram.FakeGraph()
+        self.pipeline = fake_instagram.FakePipeline(self.feed, self.graph)
+
+    def last(self) -> str:
+        return self.graph.calls[-1]["params"]["message"]["text"]
+
+    async def test_the_confirmation_names_the_bridge_and_lane_asked_for(self):
+        await self.pipeline.on_message("u", "avísame cuando zaragoza baje de 20")
+        self.assertEqual(self.last(), "Listo. Te aviso cuando Zaragoza–Ysleta · Autos baje de 20 min.")
+        await self.pipeline.on_message("u", "avísame cuando sentri en pdn baje de 10")
+        self.assertIn("Paso del Norte (Santa Fe) · SENTRI baje de 10 min", self.last())
+
+    async def test_a_subscriber_hears_only_about_their_bridge(self):
+        await self.pipeline.on_message("teresa-fan", "avísame cuando santa teresa baje de 30")
+        await self.pipeline.on_message("pdn-fan", "avísame cuando paso del norte baje de 30")
+        await self.feed.snapshot()                                 # first reading: PDN 48
+        self.assertEqual(await self.pipeline.alert_sweep(), 1)     # PDN 48 -> 20
+        self.assertEqual(self.graph.calls[-1]["params"]["recipient"]["id"], "pdn-fan")
+
+    async def test_an_english_request_is_confirmed_and_alerted_in_english(self):
+        await self.pipeline.on_message("u", "alert me when paso del norte is under 30")
+        self.assertEqual(self.last(), "Done. I'll tell you when Paso del Norte · Cars drops under 30 min.")
+        await self.feed.snapshot()
+        self.assertEqual(await self.pipeline.alert_sweep(), 1)
+        self.assertTrue(self.last().startswith("The line dropped: Paso del Norte"))
+
+    async def test_no_bridge_named_asks_instead_of_guessing(self):
+        await self.pipeline.on_message("u", "avísame cuando baje de 30")
+        self.assertIn("¿Para qué puente?", self.last())
+        self.assertTrue(self.graph.calls[-1]["params"]["message"]["quick_replies"])
+        self.assertEqual(self.pipeline.subscriptions, [])
+
+    async def test_no_bridge_named_uses_their_saved_bridge_and_lane(self):
+        await self.pipeline.on_message("u", "guardar paso del norte sentri")
+        await self.pipeline.on_message("u", "avísame cuando baje de 5")
+        self.assertEqual(self.pipeline.subscriptions[0]["port"], "240202")
+        self.assertEqual(self.pipeline.subscriptions[0]["lane"], "car_sentri")
+
+    async def test_an_unknown_bridge_is_not_filed(self):
+        await self.pipeline.on_message("u", "avísame cuando pizza baje de 20")
+        self.assertIn("No encuentro ese puente", self.last())
+        self.assertEqual(self.pipeline.subscriptions, [])
+
+    async def test_a_lane_the_bridge_does_not_have_is_said_not_filed(self):
+        await self.pipeline.on_message("u", "avísame cuando sentri en bota baje de 10")
+        self.assertIn("no tiene carril SENTRI", self.last())
+        self.assertEqual(self.pipeline.subscriptions, [])
 
     async def test_drops_rejects_a_bad_cursor(self):
         status, _ = await api.route(feed_for("cbp_feed.json"), "/drops", {"below": ["30"], "since": ["soon"]})

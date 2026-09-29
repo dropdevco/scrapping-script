@@ -399,3 +399,20 @@ CROSSING_ERRORS = {
 def crossing_error(code: str, lang: str = "es") -> str:
     es, en = CROSSING_ERRORS.get(code, ("No pude anotar ese cruce.", "I could not log that crossing."))
     return _pick(en, es, lang)
+
+
+# ----------------------------------------------------------------- alerts
+def alert_confirmed(row: dict, lane_id: str, below: int, lang: str = "es") -> str:
+    """Name the bridge and lane back, so a misread request is caught at once."""
+    name, label = _row_name(row, lang), _label(lane_id, lang)
+    if lang == "es":
+        return f"Listo. Te aviso cuando {name} · {label} baje de {below} min."
+    return f"Done. I'll tell you when {name} · {label} drops under {below} min."
+
+
+def alert_which_bridge(below: int, lang: str = "es") -> str:
+    """Asked instead of guessed: an alert on the wrong bridge is worse than a question."""
+    if lang == "es":
+        return f"¿Para qué puente? Escribe por ejemplo: avísame cuando zaragoza baje de {below}"
+    return f"Which bridge? For example: alert me when zaragoza is under {below}"
+

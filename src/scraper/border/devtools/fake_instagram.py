@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from scraper.border import cbp, text
+from scraper.border import cbp, requests, text
 from scraper.border.crossings import CrossingError
 from scraper.border.service import BorderFeed
 from scraper.border.storage import BorderStore
@@ -153,8 +153,8 @@ class FakePipeline:
 
         if msg.startswith(("guardar", "save", "mi puente")):
             target = msg.split(maxsplit=1)[1] if " " in msg else ""
-            lane = "car_sentri" if "sentri" in msg else "car_ready" if "ready" in msg else "car"
-            answer = await self.feed.bridge(target.replace("sentri", "").strip() or target, lane, self.lang)
+            lane = requests.lane_in(msg) or "car"
+            answer = await self.feed.bridge(requests.bridge_text(target) or target, lane, self.lang)
             if not answer.get("found"):
                 self.graph.send_message(user_id, answer["reply"], quick_replies=answer.get("options"))
                 return
@@ -168,15 +168,8 @@ class FakePipeline:
                                     f"Saved: {name}. Send \"bridges\" to see it first.")
             return
 
-        if msg.startswith(("avísame", "avisame", "alert")):
-            digits = [int(t) for t in msg.replace("min", " ").split() if t.isdigit()]
-            below = digits[0] if digits else 30
-            self.subscriptions.append({"user_id": user_id, "port": "paso-del-norte", "lane": "car", "below": below})
-            self.graph.send_message(
-                user_id,
-                f"Listo. Te aviso cuando Paso del Norte baje de {below} min."
-                if self.lang == "es" else
-                f"Done. I'll tell you when Paso del Norte drops under {below} min.")
+        if requests.is_alert_request(msg):
+            await self._subscribe(user_id, msg)
             return
 
         if msg.startswith(("voy a cruzar", "cruzando", "crossing")):
@@ -217,6 +210,31 @@ class FakePipeline:
         self.graph.send_message(user_id, answer["reply"],
                                 quick_replies=None if answer.get("found") else answer.get("options"))
 
+    async def _subscribe(self, user_id: str, msg: str) -> None:
+        """File an alert for the bridge and lane actually named, in their language.
+
+        A bridge not named falls back to their first saved bridge (and their saved lane
+        unless they named one); with nothing saved either, we ask rather than guess.
+        """
+        lang = requests.language_of(msg, self.lang)
+        below = requests.limit_in(msg)
+        saved = self.saved.get(user_id)
+        lane = requests.lane_in(msg) or (saved["lane"] if saved else "car")
+        target = requests.bridge_text(msg) or (saved["ports"][0] if saved else "")
+        if not target:
+            options = (await self.feed.bridge("", lane, lang)).get("options")
+            self.graph.send_message(user_id, text.alert_which_bridge(below, lang), quick_replies=options)
+            return
+        answer = await self.feed.bridge(target, lane, lang)
+        if not answer.get("found") or answer.get("state") == "absent":
+            # Unknown bridge, or a lane this bridge does not have (SENTRI at Tornillo):
+            # the feed's own reply already says which, and lists the bridges.
+            self.graph.send_message(user_id, answer["reply"], quick_replies=answer.get("options"))
+            return
+        self.subscriptions.append({"user_id": user_id, "port": answer["port_number"],
+                                   "lane": lane, "below": below, "lang": lang})
+        self.graph.send_message(user_id, text.alert_confirmed(answer, lane, below, lang))
+
     async def scheduled_message(self, user_id: str, port_key: str | None = None, lane: str = "car") -> None:
         """Their saved bridges when they have some, otherwise the one asked for."""
         saved = self.saved.get(user_id)
@@ -230,8 +248,11 @@ class FakePipeline:
         another asking for the same limit first."""
         sent = 0
         for sub in self.subscriptions:
-            answer = await self.feed.drops(sub["below"], sub["lane"], self.lang, since=sub.get("cursor"))
+            answer = await self.feed.drops(sub["below"], sub["lane"], sub["lang"], since=sub.get("cursor"))
+            # drops() reports every bridge under the limit; a subscriber asked about one.
             for drop in answer["drops"]:
+                if drop["port_number"] != sub["port"]:
+                    continue
                 self.graph.send_message(sub["user_id"], drop["message"])
                 sent += 1
             if answer.get("cursor"):
@@ -250,7 +271,7 @@ async def run(feed, lang: str = "es") -> FakeGraph:
     print("== messages ==")
     for user, msg in [("user-1", "puentes"), ("user-1", "el puente libre"),
                       ("user-1", "guardar paso del norte sentri"), ("user-1", "puentes"),
-                      ("user-2", "zaragoza"), ("user-2", "avísame cuando baje de 30 min"),
+                      ("user-2", "zaragoza"), ("user-2", "avísame cuando paso del norte baje de 30 min"),
                       ("user-3", "puente que no existe")]:
         await pipeline.on_message(user, msg)
         print(f"  {user} sent {msg!r}")

@@ -75,7 +75,7 @@ class InstagramSimulation(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.graph.calls[-1]["params"]["message"]["quick_replies"])
 
     async def test_alert_subscription_then_drop_sends_one_message(self):
-        await self.pipeline.on_message("user-2", "avísame cuando baje de 30 min")
+        await self.pipeline.on_message("user-2", "avísame cuando paso del norte baje de 30 min")
         (await self.feed.snapshot())                       # first reading: 48 min
         self.assertEqual((await self.pipeline.alert_sweep()), 1)
         self.assertIn("20 min", self.graph.calls[-1]["params"]["message"]["text"])
@@ -94,7 +94,7 @@ class InstagramSimulation(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Tus puentes", self.graph.calls[-1]["params"]["message"]["text"])
 
     async def test_stop_cancels_subscriptions(self):
-        await self.pipeline.on_message("user-2", "avísame cuando baje de 30")
+        await self.pipeline.on_message("user-2", "avísame cuando zaragoza baje de 30")
         await self.pipeline.on_message("user-2", "alto")
         self.assertEqual(self.pipeline.subscriptions, [])
 

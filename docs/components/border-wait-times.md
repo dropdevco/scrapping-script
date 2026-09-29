@@ -13,28 +13,28 @@ the repo was edited. The four small hooks it still needs are in
 
 ## At a glance
 
-| | |
-|---|---|
-| **Entry point** | `python -m scraper.border <poll\|selfcheck\|serve\|chat\|demo\|simulate>` |
-| **Runs on** | GitHub Actions (`border-poll`): a reading every 15 min; retention + live selfcheck daily at 10:20 UTC |
-| **Reads** | CBP's public feed (`bwt.cbp.gov/api/waittimes`), `pasosfronterizos.com`, `borderswaittime.com` (a CBP mirror, used only to check our parser) |
-| **Writes** | `border_ports`, `border_readings`, `border_runs`, `border_alerts`, `border_crossings` (migrations `0013`–`0015`) |
-| **Requires** | Nothing for live answers. `SUPABASE_URL` + `SUPABASE_KEY` for history, deltas that survive a restart, alerts and "normal for this hour" |
+|                          |                                                                                                                                                                                                                |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Entry point**          | `python -m scraper.border <poll\|selfcheck\|serve\|chat\|demo\|simulate>`                                                                                                                                      |
+| **Runs on**              | GitHub Actions (`border-poll`): a reading every 15 min; retention + live selfcheck daily at 10:20 UTC                                                                                                          |
+| **Reads**                | CBP's public feed (`bwt.cbp.gov/api/waittimes`), `pasosfronterizos.com`, `borderswaittime.com` (a CBP mirror, used only to check our parser)                                                                   |
+| **Writes**               | `border_ports`, `border_readings`, `border_runs`, `border_alerts`, `border_crossings` (migrations `0013`–`0015`)                                                                                               |
+| **Requires**             | Nothing for live answers. `SUPABASE_URL` + `SUPABASE_KEY` for history, deltas that survive a restart, alerts and "normal for this hour"                                                                        |
 | **Uses from the engine** | `core.http.HttpClient` (retries, robots.txt, gzip, `USER_AGENT`), `core.config.settings`, `core.eventtime.event_tz()`, the Supabase client from `core.storage.Storage`, `ENABLED_SOURCES` / `DISABLED_SOURCES` |
-| **Tests** | `tests/border/` — 218 tests, one file per module (`pytest tests/border -q`) |
+| **Tests** | `tests/border/` — 254 tests, one file per module (`pytest tests/border -q`) |
 
 ---
 
 ## CLI reference
 
-| Command | What it does | Where it runs |
-|---|---|---|
-| `poll [--prune] [--keep-days N] [--dry-run]` | Takes one reading and exits. Exit 1: CBP unreadable; 2: Supabase unset; **3: a database write failed** | `border-poll`, every 15 min (`--prune` daily) |
-| `selfcheck [--json]` | Asks the live feed whether it still parses: fields, ports, status words, scraped pages, and the mirror check. Exits 1 on any problem | `border-poll`, daily |
-| `serve [--port 8088]` | The local HTTP pull surface (below) | Local only, like `mcp_server.py` |
-| `chat [--from-file F --at 21:40]` | The DM experience in a terminal | Local |
-| `demo [--live] [--no-color]` | Five scripted scenes, identical every run | Local |
-| `simulate [--from-file F \| --url U]` | A fake Instagram that records every Graph call it would make | Local |
+| Command                                      | What it does                                                                                                                         | Where it runs                                 |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------- |
+| `poll [--prune] [--keep-days N] [--dry-run]` | Takes one reading and exits. Exit 1: CBP unreadable; 2: Supabase unset; **3: a database write failed**                               | `border-poll`, every 15 min (`--prune` daily) |
+| `selfcheck [--json]`                         | Asks the live feed whether it still parses: fields, ports, status words, scraped pages, and the mirror check. Exits 1 on any problem | `border-poll`, daily                          |
+| `serve [--port 8088]`                        | The local HTTP pull surface (below)                                                                                                  | Local only, like `mcp_server.py`              |
+| `chat [--from-file F --at 21:40]`            | The DM experience in a terminal                                                                                                      | Local                                         |
+| `demo [--live] [--no-color]`                 | Five scripted scenes, identical every run                                                                                            | Local                                         |
+| `simulate [--from-file F \| --url U]`        | A fake Instagram that records every Graph call it would make                                                                         | Local                                         |
 
 Each command is also its own module (`python -m scraper.border.poll`, …).
 
@@ -80,7 +80,6 @@ contract is the database — but it is how the fake Instagram tests the pull end
 `{port}` accepts a port number (`240202`), a slug (`paso-del-norte`), or a loose name
 (`zaragoza`). Lanes: `car`, `car_sentri`, `car_ready`, `walk`, `walk_ready`, `truck`,
 `truck_fast`. `lang` is `es` (default) or `en`.
-
 
 ## Built for someone who crosses daily
 
@@ -128,13 +127,13 @@ the work is spent on doing that rarely and cheaply.
 
 Measured 2026-09-29 against the live feed, on the engine's async `HttpClient`:
 
-| | |
-|---|---|
-| Cold read (CBP + both scraped sites, concurrently; median of 3) | ~985 ms |
-| `waits()` from cache | ~0.6 ms |
-| One `bridge_in()` over a snapshot | ~0.007 ms |
-| CBP payload | 93 KB raw → **9 KB gzipped** |
-| Scraped page | 86 KB raw → **15 KB gzipped** |
+|                                                                 |                               |
+| --------------------------------------------------------------- | ----------------------------- |
+| Cold read (CBP + both scraped sites, concurrently; median of 3) | ~985 ms                       |
+| `waits()` from cache                                            | ~0.6 ms                       |
+| One `bridge_in()` over a snapshot                               | ~0.007 ms                     |
+| CBP payload                                                     | 93 KB raw → **9 KB gzipped**  |
+| Scraped page                                                    | 86 KB raw → **15 KB gzipped** |
 
 The cold read includes a fresh `HttpClient` and pasosfronterizos' one robots.txt check
 per process; a feed that shares a caller's client skips both.
@@ -353,6 +352,35 @@ do phone typos — `sarragoza`, `tornilo`, `stantn`, `pasodelnorte`, `santa fee`
 that fits every bridge (`puente`) and anything too far from a real name (`pizza`)
 return nothing, so the pipeline asks instead of sending someone to the wrong bridge.
 
+### Alert requests name their bridge
+
+`scraper/border/requests.py` reads an alert request the way a follower types it, and is
+meant to be reused by whatever answers the DMs:
+
+| Message | Bridge | Lane | Limit | Reply in |
+|---|---|---|---|---|
+| `avísame cuando zaragoza baje de 20` | Zaragoza–Ysleta | car | 20 | es |
+| `alert me when santa teresa is under 10` | Santa Teresa | car | 10 | en |
+| `avísame cuando sentri en pdn baje de 10` | Paso del Norte | SENTRI | 10 | es |
+| `avisame cuando ready a pie en paso del norte este en 15` | Paso del Norte | walking Ready | 15 | es |
+| `alerta cuando lerdo baje de 25` | Stanton–Lerdo | car | 25 | es |
+
+It takes out the trigger ("avísame", "alert me", "let me know"…), the numbers, the lane
+words and the filler ("cuando", "baje", "under"…), and hands what is left to the same
+lookup as every other bridge question. The first number from 1 to 300 is the limit, so a
+port number is never mistaken for one. The trigger sets the reply language: "alerta" is
+Spanish although it starts with "alert".
+
+The fake pipeline shows the rules around it: with no bridge named it uses the person's
+first saved bridge (and saved lane, unless they named one), and with nothing saved it
+asks; an unknown bridge, or a lane that bridge lacks (SENTRI at Bridge of the Americas),
+gets the feed's own reply and files nothing. `drops()` reports every bridge under a
+limit, so each subscription keeps only its own bridge's drops.
+
+Before this, every request was filed as Paso del Norte, car lane, and answered in
+Spanish, and the sweep ignored the stored bridge — so "avísame cuando zaragoza baje de
+20" would have alerted about any bridge that dropped under 20.
+
 Deltas and drop alerts read the previous value from memory first, then from
 `border_readings`. That database fallback is what makes them survive a restart —
 without it, the first sweep after a deploy silently reports nothing.
@@ -395,10 +423,10 @@ posting rather than keep publishing stale numbers as fresh.
 
 ## Keeping it honest in production
 
-| Command                       | What it is for                                                                                                                                                                                                                                                                                                                                    |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `python -m scraper.border selfcheck` | Asks the live feed and fails loudly if a field, a port, a lane group or a status word changed. Unit tests run on saved responses, so they stay green through exactly that kind of drift. Exits 1 on any problem, `--json` for a monitor                                                                                                           |
-| `python -m scraper.border poll` | Records one reading and exits. No `--loop`: GitHub Actions is the only scheduler here, so a missed run shows in the Actions UI. `--prune` applies retention after the reading (run it daily); `--keep-days` sets how many days of readings stay (60); `--dry-run` writes nothing. A last-good reading served after a failure counts as a failure here |
+| Command                              | What it is for                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `python -m scraper.border selfcheck` | Asks the live feed and fails loudly if a field, a port, a lane group or a status word changed. Unit tests run on saved responses, so they stay green through exactly that kind of drift. Exits 1 on any problem, `--json` for a monitor                                                                                                               |
+| `python -m scraper.border poll`      | Records one reading and exits. No `--loop`: GitHub Actions is the only scheduler here, so a missed run shows in the Actions UI. `--prune` applies retention after the reading (run it daily); `--keep-days` sets how many days of readings stay (60); `--dry-run` writes nothing. A last-good reading served after a failure counts as a failure here |
 
 `selfcheck` also fails when a scraped site parses to nothing, loses a bridge, or a CBP
 mirror disagrees with our parsing of the same update. A site that is simply down is
@@ -461,7 +489,8 @@ would type, and the reply comes from the same code the pipeline calls.
 ```
 
 Try: `puentes`, a bridge name (misspelled is fine), `guardar zaragoza sentri` then
-`puentes` again, `avísame cuando baje de 30`, `alto`. Commands: `/post`, `/idioma`,
+`puentes` again, `avísame cuando zaragoza baje de 30`, `alert me when bota is under 20`,
+`alto`. Commands: `/post`, `/idioma`,
 `/estado`, `/ayuda`, `/salir`.
 
 It reads live CBP by default. For a rehearsal that cannot surprise you, replay saved
@@ -548,7 +577,9 @@ below has been done.
    under Instagram's limit, replies, alerts with cursors — but not the choice of
    format: a new `ig_posts.kind` (which means widening `ig_posts_kind_check`, verified
    against the live constraint name as `0010` did), or a line in the existing digest.
-   Drop alerts only fire when something calls `drops()`; the poller does not.
+   Drop alerts only fire when something calls `drops()`; the poller does not. Parse
+   alert DMs with `scraper.border.requests` and keep only each subscriber's bridge, as
+   `FakePipeline._subscribe` and `alert_sweep` do.
 
 ## Known gaps
 
@@ -558,7 +589,7 @@ below has been done.
   stored here; that belongs with whatever answers the DMs.
 - **Holiday and payday effects.** Real, and guessing dates without data would be worse
   than saying nothing.
-- **TTI BCIS sensor data.** The only independent *measurement* rather than another copy
+- **TTI BCIS sensor data.** The only independent _measurement_ rather than another copy
   of CBP. No public endpoint; it needs a conversation.
 - **`save_readings` asks for the inserted rows back** to count them. A `count=exact`
   with `return=minimal` would be lighter, but how PostgREST counts ignored duplicates
@@ -574,4 +605,4 @@ Crossings under a minute or over six hours are refused as mistakes.
 
 ---
 
-*Verified against commit `8f3107c` (2026-09-29). Last updated 2026-09-29.*
+_Verified against commit `8f3107c` (2026-09-29). Last updated 2026-09-29._

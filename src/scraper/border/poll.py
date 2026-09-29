@@ -12,7 +12,10 @@ missed run is visible in the Actions UI rather than inside a process nobody watc
 Readings are kept 60 days by default: border_typical_waits looks back 8 weeks, so a
 shorter window quietly starves it.
 
-Exit codes: 0 read (and stored), 1 the read failed, 2 stored nothing (storage off).
+Exit codes: 0 read (and stored), 1 the read failed, 2 stored nothing (storage off),
+3 read but a database call failed. Code 3 is the one that matters in production: every
+write swallows its own failure, so without it a missing migration or a revoked key
+would leave the workflow green while nothing was being recorded (ADR-0011).
 """
 
 from __future__ import annotations
@@ -72,6 +75,10 @@ async def run(dry_run: bool = False, prune: bool = False, keep_days: int = KEEP_
             log.info("retention: removed %s", removed)
     if not quiet:
         print(json.dumps(result, ensure_ascii=False))
+    if storage.failures:
+        log.error("%d database call(s) failed; this reading may not have been recorded",
+                  storage.failures)
+        return 3
     return 0 if (storage.enabled or dry_run) else 2
 
 

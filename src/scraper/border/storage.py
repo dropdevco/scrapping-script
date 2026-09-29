@@ -32,6 +32,10 @@ class BorderStore:
         # leaves it None when they are unset. client=None asks for no storage at all
         # (a dry run, the selfcheck); any other value is used as the client.
         self._client = Storage().client if client is _FROM_SETTINGS else client
+        # Every call swallows its own failure so an answer is never lost to the database,
+        # which also makes a broken database look exactly like a quiet one. The count is
+        # what lets the poller fail its run instead (ADR-0011).
+        self.failures = 0
 
     @property
     def enabled(self) -> bool:
@@ -45,6 +49,7 @@ class BorderStore:
         try:
             return await asyncio.to_thread(lambda: query(self._client).execute().data)
         except Exception as exc:  # noqa: BLE001 - never let storage break an answer
+            self.failures += 1
             log.error("%s failed: %s: %s", what, type(exc).__name__, exc)
             return None
 

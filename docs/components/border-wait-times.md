@@ -1,31 +1,69 @@
-# chisme-border
+# Component: Border Wait Times
 
-> **Built, not yet wired in.** All of it is new files — `src/scraper/border/`,
-> `tests/border/`, migrations `0013`–`0015` and this page — and nothing existing was
-> edited. The hooks it still needs (a workflow, an MCP tool, a caption in the social
-> pipeline) are listed at the end.
+Live CBP wait times for the six El Paso–Juárez ports of entry, reconciled with a faster
+scraped source, ranked for someone deciding "leave now or wait", and written to Supabase
+so everything downstream can read the same numbers. Owns `src/scraper/border/`, the
+`border_*` tables, and `.github/workflows/border_poll.yml`.
 
-Live CBP border wait times for the six El Paso–Juárez ports, shaped for the Chisme
-Instagram pipeline to **pull** from. No app, no UI, no scheduler of our own.
+**Status: built, not yet wired in.** Everything here is new files; nothing existing in
+the repo was edited. The four small hooks it still needs are in
+[Wiring it in](#wiring-it-in).
 
-Part of the `scraper` package: it uses the engine's `HttpClient`, `settings` and Supabase
-client, and needs nothing beyond `pip install -e ".[dev]"`.
+---
 
-## Run
+## At a glance
 
-```bash
-pytest tests/border -q                        # 207 tests
-python -m scraper.border.devtools.chat        # type messages, get replies
-python -m scraper.border.devtools.demo        # five-scene demo, safe to run in a meeting
-python -m scraper.border.devtools.fake_instagram   # simulate Instagram against live CBP
-python -m scraper.border.api --port 8088      # the pull surface (run next to the pipeline)
-python -m scraper.border.selfcheck            # does the live feed still look like the feed we parse?
-python -m scraper.border.poll --prune         # record one reading (GitHub Actions schedules it)
+| | |
+|---|---|
+| **Entry point** | `python -m scraper.border <poll\|selfcheck\|serve\|chat\|demo\|simulate>` |
+| **Runs on** | GitHub Actions (`border-poll`): a reading every 15 min; retention + live selfcheck daily at 10:20 UTC |
+| **Reads** | CBP's public feed (`bwt.cbp.gov/api/waittimes`), `pasosfronterizos.com`, `borderswaittime.com` (a CBP mirror, used only to check our parser) |
+| **Writes** | `border_ports`, `border_readings`, `border_runs`, `border_alerts`, `border_crossings` (migrations `0013`–`0015`) |
+| **Requires** | Nothing for live answers. `SUPABASE_URL` + `SUPABASE_KEY` for history, deltas that survive a restart, alerts and "normal for this hour" |
+| **Uses from the engine** | `core.http.HttpClient` (retries, robots.txt, gzip, `USER_AGENT`), `core.config.settings`, `core.eventtime.event_tz()`, the Supabase client from `core.storage.Storage`, `ENABLED_SOURCES` / `DISABLED_SOURCES` |
+| **Tests** | `tests/border/` — 218 tests, one file per module (`pytest tests/border -q`) |
+
+---
+
+## CLI reference
+
+| Command | What it does | Where it runs |
+|---|---|---|
+| `poll [--prune] [--keep-days N] [--dry-run]` | Takes one reading and exits. Exit 1: CBP unreadable; 2: Supabase unset; **3: a database write failed** | `border-poll`, every 15 min (`--prune` daily) |
+| `selfcheck [--json]` | Asks the live feed whether it still parses: fields, ports, status words, scraped pages, and the mirror check. Exits 1 on any problem | `border-poll`, daily |
+| `serve [--port 8088]` | The local HTTP pull surface (below) | Local only, like `mcp_server.py` |
+| `chat [--from-file F --at 21:40]` | The DM experience in a terminal | Local |
+| `demo [--live] [--no-color]` | Five scripted scenes, identical every run | Local |
+| `simulate [--from-file F \| --url U]` | A fake Instagram that records every Graph call it would make | Local |
+
+Each command is also its own module (`python -m scraper.border.poll`, …).
+
+---
+
+## Using it from Python
+
+The primary integration path. Every answer is a coroutine, like the rest of the engine,
+and the feed can share a caller's `HttpClient`:
+
+```python
+from scraper.core.http import HttpClient
+from scraper.border.service import BorderFeed
+
+async with HttpClient() as http:
+    feed = BorderFeed(http=http)
+    caption = (await feed.waits())["caption_es"]
+    reply = (await feed.bridge("paso-del-norte", "car"))["reply"]
+    alerts = (await feed.drops(below=30, since=last_cursor))["drops"]
 ```
 
-Uses the repo's editable install (`pip install -e ".[dev]"`); no extra setup.
+One CBP reading is reused for 5 minutes, so a post, a reply and an alert sweep share it.
+`ranked_in`, `best_in` and `bridge_in` answer over a snapshot you already hold, with no I/O.
 
-## What the pipeline pulls
+## The local HTTP surface
+
+`python -m scraper.border serve` answers the same questions over HTTP. It is a
+development affordance, not production infrastructure — this system's integration
+contract is the database — but it is how the fake Instagram tests the pull end to end.
 
 | Request                                          | Answers with                                                                                  | Used for                            |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------- | ----------------------------------- |
@@ -43,19 +81,6 @@ Uses the repo's editable install (`pip install -e ".[dev]"`); no extra setup.
 (`zaragoza`). Lanes: `car`, `car_sentri`, `car_ready`, `walk`, `walk_ready`, `truck`,
 `truck_fast`. `lang` is `es` (default) or `en`.
 
-One CBP read is reused for 5 minutes, so the pipeline can ask as often as it likes.
-
-To import it directly instead of over HTTP — every answer is a coroutine, like the rest
-of the engine, and it can share a caller's `HttpClient`:
-
-```python
-from scraper.border.service import BorderFeed
-async with HttpClient() as http:
-    feed = BorderFeed(http=http)
-    (await feed.waits())["caption_es"]
-    (await feed.bridge("paso-del-norte", "car"))["reply"]
-    (await feed.drops(below=30))["drops"]
-```
 
 ## Built for someone who crosses daily
 
@@ -101,13 +126,18 @@ Paso del Norte: 5 min · cruzas 1:35 p. m.
 There is no local database of wait times: every answer traces back to a live read, so
 the work is spent on doing that rarely and cheaply.
 
-|                                                 |                               |
-| ----------------------------------------------- | ----------------------------- |
-| Cold read (CBP + the scraped site, in parallel) | ~700 ms                       |
-| `/waits` from cache                             | ~2 ms                         |
-| One bridge lookup from cache                    | ~0.02 ms                      |
-| CBP payload                                     | 93 KB raw → **9 KB gzipped**  |
-| Scraped page                                    | 86 KB raw → **15 KB gzipped** |
+Measured 2026-09-29 against the live feed, on the engine's async `HttpClient`:
+
+| | |
+|---|---|
+| Cold read (CBP + both scraped sites, concurrently; median of 3) | ~985 ms |
+| `waits()` from cache | ~0.6 ms |
+| One `bridge_in()` over a snapshot | ~0.007 ms |
+| CBP payload | 93 KB raw → **9 KB gzipped** |
+| Scraped page | 86 KB raw → **15 KB gzipped** |
+
+The cold read includes a fresh `HttpClient` and pasosfronterizos' one robots.txt check
+per process; a feed that shares a caller's client skips both.
 
 What makes that hold:
 
@@ -116,10 +146,10 @@ What makes that hold:
   `no-cache, no-store`, so caching has to be ours.
 - **One reading serves everything.** A post, a reply, a scheduled message and an alert
   sweep inside the same 5 minutes share a single upstream read.
-- **Sources are read at the same time.** Total latency is the slowest source, not the
-  sum of them.
-- **Single-flight.** Several pipeline requests arriving together wait on one fetch
-  rather than starting their own.
+- **Sources are read at the same time.** CBP and both scraped sites go out together
+  (`asyncio.gather`), so total latency is the slowest of them, not the sum.
+- **Single-flight.** Several callers arriving together wait on one refresh (an
+  `asyncio.Lock`) rather than starting their own.
 - **Derived rows are computed once per reading.** One `/waits` asked for the same lane
   92 times before this; with storage enabled each of those could have been a database
   round trip for the previous value.
@@ -367,8 +397,8 @@ posting rather than keep publishing stale numbers as fresh.
 
 | Command                       | What it is for                                                                                                                                                                                                                                                                                                                                    |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `python -m scraper.border.selfcheck` | Asks the live feed and fails loudly if a field, a port, a lane group or a status word changed. Unit tests run on saved responses, so they stay green through exactly that kind of drift. Exits 1 on any problem, `--json` for a monitor                                                                                                           |
-| `python -m scraper.border.poll` | Records one reading and exits. No `--loop`: GitHub Actions is the only scheduler here, so a missed run shows in the Actions UI. `--prune` applies retention after the reading (run it daily); `--keep-days` sets how many days of readings stay (60); `--dry-run` writes nothing. A last-good reading served after a failure counts as a failure here |
+| `python -m scraper.border selfcheck` | Asks the live feed and fails loudly if a field, a port, a lane group or a status word changed. Unit tests run on saved responses, so they stay green through exactly that kind of drift. Exits 1 on any problem, `--json` for a monitor                                                                                                           |
+| `python -m scraper.border poll` | Records one reading and exits. No `--loop`: GitHub Actions is the only scheduler here, so a missed run shows in the Actions UI. `--prune` applies retention after the reading (run it daily); `--keep-days` sets how many days of readings stay (60); `--dry-run` writes nothing. A last-good reading served after a failure counts as a failure here |
 
 `selfcheck` also fails when a scraped site parses to nothing, loses a bridge, or a CBP
 mirror disagrees with our parsing of the same update. A site that is simply down is
@@ -421,7 +451,7 @@ settings), `BorderStore` disables itself and the feed still answers, the same wa
 
 ## Chat with it
 
-`python -m scraper.border.devtools.chat` is the DM experience in a terminal: you type what a follower
+`python -m scraper.border chat` is the DM experience in a terminal: you type what a follower
 would type, and the reply comes from the same code the pipeline calls.
 
 ```
@@ -438,14 +468,14 @@ It reads live CBP by default. For a rehearsal that cannot surprise you, replay s
 data and pick the hour:
 
 ```bash
-python -m scraper.border.devtools.chat --from-file tests/border/fixtures/cbp_feed.json --at 21:40
+python -m scraper.border chat --from-file tests/border/fixtures/cbp_feed.json --at 21:40
 ```
 
 That is the 9:40 PM case, where the fastest bridge closes before you would reach it.
 
 ## Demo
 
-`python -m scraper.border.devtools.demo` walks five scenes in about twenty seconds: the daily post, a
+`python -m scraper.border demo` walks five scenes in about twenty seconds: the daily post, a
 conversation (misspelled, in Spanish), a bridge that shuts before you would reach it,
 a drop alert, and the two ways CBP fails.
 
@@ -455,13 +485,13 @@ for the first two scenes; `--no-color` is for slides and screenshots.
 
 ## Simulating Instagram
 
-`scraper.border.devtools.fake_instagram` plays both sides with no Meta credentials and no network to
+`python -m scraper.border simulate` plays both sides with no Meta credentials and no network to
 Meta: `FakeGraph` records the calls it _would_ make, `FakePipeline` drives a daily post,
 a conversation, a scheduled message and an alert sweep.
 
 ```bash
-python -m scraper.border.devtools.fake_instagram --from-file tests/border/fixtures/cbp_feed.json --out calls.json
-python -m scraper.border.devtools.fake_instagram --url http://127.0.0.1:8088     # test the HTTP surface
+python -m scraper.border simulate --from-file tests/border/fixtures/cbp_feed.json --out calls.json
+python -m scraper.border simulate --url http://127.0.0.1:8088     # test the HTTP surface
 ```
 
 It prints every recorded call (`POST …/media`, `…/media_publish`, `…/messages`) so the
@@ -469,11 +499,11 @@ payloads can be reviewed before anything real is wired up.
 
 ### The closest thing to production
 
-Two processes, the pull going over HTTP exactly as Carlos' pipeline will do it:
+Two processes, the pull going over real HTTP:
 
 ```bash
-python -m scraper.border.api --port 8088                           # terminal 1
-python -m scraper.border.devtools.fake_instagram --url http://127.0.0.1:8088   # terminal 2
+python -m scraper.border serve --port 8088                           # terminal 1
+python -m scraper.border simulate --url http://127.0.0.1:8088          # terminal 2
 ```
 
 Everything is real here except Meta: live CBP, real HTTP, a separate client process.
@@ -493,17 +523,46 @@ Found by running against it, not by reading docs:
 - **`crossing_name` is empty for port 240221**, which is why the registry exists.
 - **Ports close**: Stanton runs 6 AM–midnight, Santa Teresa 6 AM–10 PM.
 
-## What is deliberately not here
+## Wiring it in
+
+Each is a small change to an existing file, deliberately left for review. Nothing
+below has been done.
+
+1. **Apply the migrations**, in order:
+   ```bash
+   python -m scraper.apply_migration supabase/migrations/0013_border_waits.sql
+   python -m scraper.apply_migration supabase/migrations/0014_border_retention.sql
+   python -m scraper.apply_migration supabase/migrations/0015_border_alerts_crossings_typical.sql
+   ```
+   Do this **before** merging: `border-poll` starts on its schedule once the workflow
+   is on `main`, and until the tables exist every run exits 3 and goes red.
+2. **Nothing to add for scheduling.** `.github/workflows/border_poll.yml` is new and
+   reads the existing `SUPABASE_URL` / `SUPABASE_KEY` secrets.
+3. **Expose it to the local agent** — two lines in `mcp_server.py` add `border_waits`,
+   `border_bridge` and `border_health`:
+   ```python
+   from .border.mcp_tools import register as register_border_tools
+   register_border_tools(mcp)
+   ```
+4. **Decide how wait times reach Instagram.** Every piece exists — a caption capped
+   under Instagram's limit, replies, alerts with cursors — but not the choice of
+   format: a new `ig_posts.kind` (which means widening `ig_posts_kind_check`, verified
+   against the live constraint name as `0010` did), or a line in the existing digest.
+   Drop alerts only fire when something calls `drops()`; the poller does not.
+
+## Known gaps
 
 - **Southbound waits.** CBP publishes northbound only, and no public feed covers the
-  other direction. Half of a daily crosser's trips are invisible to us. This is a
-  research question — the Chihuahua bridge trust has cameras but no numbers.
-- **`border_subscriptions`.** Whether we store each person's bridge, lane, time and
-  limit depends on whether Carlos' pipeline already does.
+  other direction. Half of a daily crosser's trips are invisible to us.
+- **`border_subscriptions`.** Who wants which bridge, lane and alert limit is not
+  stored here; that belongs with whatever answers the DMs.
 - **Holiday and payday effects.** Real, and guessing dates without data would be worse
   than saying nothing.
-- **TTI BCIS sensor data.** The only independent _measurement_ rather than another copy
-  of CBP. No public endpoint; needs a conversation.
+- **TTI BCIS sensor data.** The only independent *measurement* rather than another copy
+  of CBP. No public endpoint; it needs a conversation.
+- **`save_readings` asks for the inserted rows back** to count them. A `count=exact`
+  with `return=minimal` would be lighter, but how PostgREST counts ignored duplicates
+  has not been observed against the live database, so it was not changed blind.
 
 We can tell which source is fresher, never which is right. Settling the 20-vs-58
 disagreements needs ground truth, and it now has somewhere to go: a follower sends
@@ -513,18 +572,6 @@ source's mean error, bias (positive = overstates the wait) and share within 10 m
 A source is marked `enough_data` after 10 crossings; before that, treat it as anecdote.
 Crossings under a minute or over six hours are refused as mistakes.
 
-## Open questions for Carlos
+---
 
-- HTTP or a direct Python import?
-- Does the pipeline store each person's bridge, lane, time and limit, or should we?
-- What exact fields does a post need beyond the caption?
-- Where does the pipeline run, so this can run next to it?
-
-## Wiring it in
-
-Nothing below is done yet; each is a small change to an existing file, left for review.
-
-- Apply `0013`–`0015` with `python -m scraper.apply_migration`.
-- Schedule the poller from `.github/workflows/` — GitHub Actions is the only scheduler here.
-- Expose the feed to the local agent as an MCP tool in `mcp_server.py`.
-- Decide how a wait-time caption reaches Instagram (a new `ig_posts.kind`, or a line in the digest).
+*Verified against commit `8f3107c` (2026-09-29). Last updated 2026-09-29.*

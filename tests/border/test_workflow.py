@@ -1,0 +1,61 @@
+"""The border-poll workflow and the CLI it calls.
+
+The schedule lives in YAML, so that is where these reach — the same move as
+tests/social/test_scheduling.py. Two things are easy to break without noticing: the
+daily job is selected by comparing github.event.schedule against a cron string, so
+editing the cron without the comparison silently stops retention and the live
+selfcheck; and a workflow that reads a secret under the wrong name runs green while
+storing nothing.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+from scraper.border.__main__ import COMMANDS, main
+
+WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/border_poll.yml"
+
+
+def _crons() -> list[str]:
+    return re.findall(r'- cron: "([^"]+)"', WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_the_daily_cron_is_the_one_the_jobs_test_for():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    daily = [c for c in _crons() if not c.startswith("*/")]
+    assert len(daily) == 1, f"expected exactly one daily cron, got {daily}"
+    assert f"github.event.schedule == '{daily[0]}'" in text      # the selfcheck job
+    assert f'[ "$SCHEDULE" = "{daily[0]}" ]' in text             # the --prune branch
+
+
+def test_polling_is_no_faster_than_cbp_can_change():
+    """One row per CBP update, and CBP updates about hourly: every 15 minutes is enough."""
+    frequent = [c for c in _crons() if c.startswith("*/")]
+    assert frequent == ["*/15 * * * *"]
+
+
+def test_the_workflow_reads_the_engines_secret_names():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}" in text
+    assert "SUPABASE_SERVICE_KEY" not in text
+
+
+def test_every_workflow_command_exists():
+    commands = re.findall(r"python -m scraper\.border (\w+)", WORKFLOW.read_text(encoding="utf-8"))
+    assert commands and set(commands) <= set(COMMANDS)
+
+
+def test_an_unknown_command_prints_usage_and_fails(capsys):
+    assert main(["nonsense"]) == 2
+    assert "python -m scraper.border poll" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", sorted(COMMANDS))
+def test_every_command_resolves_to_a_module_with_main(command):
+    import importlib
+
+    assert callable(importlib.import_module(COMMANDS[command]).main)

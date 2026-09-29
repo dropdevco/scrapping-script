@@ -11,13 +11,15 @@ Run it after deploying, and on a schedule if anything depends on this feed.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
+from ..core.http import HttpClient
 from . import cbp, text
-from .storage import Storage
 from .service import BorderFeed
+from .storage import BorderStore
 
 # Fields we actually read. A rename here is the failure this catches.
 PORT_FIELDS = ("port_number", "port_status", "hours", "crossing_name")
@@ -73,14 +75,16 @@ def check_feed(payload: list[dict], check: Check) -> None:
                     check.fail(f"{where}: unknown status '{status}' in {group}.{lane}")
 
 
-def check_parsing(check: Check, payload: list[dict] | None = None) -> dict:
+async def check_parsing(check: Check, http: HttpClient, payload: list[dict]) -> dict:
     """Parse for real and confirm the result is usable, not just well-shaped."""
-    # Reuse the payload check_feed just inspected: one CBP read, and both checks judge
-    # the same response.
-    fetcher = (lambda: payload) if payload is not None else cbp.fetch
-    feed = BorderFeed(storage=Storage(url="", key=""), fetcher=fetcher)
-    snapshot = feed.snapshot()
-    health = feed.health()
+    async def same_payload(_http: HttpClient) -> list[dict]:
+        # Reuse the payload check_feed just inspected: one CBP read, and both checks
+        # judge the same response.
+        return payload
+
+    feed = BorderFeed(storage=BorderStore(client=None), fetcher=same_payload, http=http)
+    snapshot = await feed.snapshot()
+    health = await feed.health()
     summary: dict = {"ports": len(snapshot.ports), "sources": health["sources"]}
 
     if len(snapshot.ports) != len(cbp.PORTS):
@@ -103,7 +107,7 @@ def check_parsing(check: Check, payload: list[dict] | None = None) -> dict:
                           for l in p.lanes.values() if l.state == "open"):
         check.fail("no update time could be parsed — the stamp format may have changed")
 
-    best = feed.best("car", snapshot)
+    best = feed.best_in(snapshot, "car")
     summary["best_car"] = f"{best['name']} {best['minutes']} min" if best else None
     if best is None:
         check.note("no car lane is open anywhere right now")
@@ -127,21 +131,22 @@ def check_parsing(check: Check, payload: list[dict] | None = None) -> dict:
     return summary
 
 
-def run() -> tuple[Check, dict]:
+async def run() -> tuple[Check, dict]:
     check = Check()
-    summary: dict = {"checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    try:
-        payload = cbp.fetch()
-        summary["ports_in_feed"] = len(payload)
-        check_feed(payload, check)
-    except Exception as exc:
-        check.fail(f"could not read the CBP feed: {type(exc).__name__}: {exc}")
-        return check, summary
+    summary: dict = {"checked_at": datetime.now(UTC).isoformat(timespec="seconds")}
+    async with HttpClient() as http:
+        try:
+            payload = await cbp.fetch(http)
+            summary["ports_in_feed"] = len(payload)
+            check_feed(payload, check)
+        except Exception as exc:  # noqa: BLE001 - every failure is the finding
+            check.fail(f"could not read the CBP feed: {type(exc).__name__}: {exc}")
+            return check, summary
 
-    try:
-        summary.update(check_parsing(check, payload))
-    except Exception as exc:
-        check.fail(f"parsing the feed raised: {type(exc).__name__}: {exc}")
+        try:
+            summary.update(await check_parsing(check, http, payload))
+        except Exception as exc:  # noqa: BLE001
+            check.fail(f"parsing the feed raised: {type(exc).__name__}: {exc}")
     return check, summary
 
 
@@ -150,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
 
-    check, summary = run()
+    check, summary = asyncio.run(run())
     if args.json:
         print(json.dumps({"ok": check.ok, "problems": check.problems,
                           "notes": check.notes, **summary}, indent=2, ensure_ascii=False))

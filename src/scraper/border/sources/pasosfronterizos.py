@@ -11,10 +11,8 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
-from urllib.parse import urljoin, urlparse
-from urllib.robotparser import RobotFileParser
 
-from .. import http
+from ...core.http import HttpClient
 from .base import Reading, Source
 
 URL = "https://pasosfronterizos.com/puentes-el-paso-juarez.php"
@@ -29,10 +27,10 @@ PORTS = {
 }
 LANES = {"estandar": "car", "sentri": "car_sentri", "ready": "car_ready"}
 
-CARD_RE = re.compile(r'<li class="header">(.*?)</li>(.*?)(?=<li class="header">|$)', re.S)
-NUMBER_RE = re.compile(r"<span class='linenumber'>(\d+)</span>\s*([a-záé ]+)", re.I)
-CLOSED_RE = re.compile(r"cerrad", re.I)
-AGE_RE = re.compile(r"Actualizado hace (\d+)\s*(minuto|hora)", re.I)
+CARD_RE = re.compile(r'<li class="header">(.*?)</li>(.*?)(?=<li class="header">|$)', re.DOTALL)
+NUMBER_RE = re.compile(r"<span class='linenumber'>(\d+)</span>\s*([a-záé ]+)", re.IGNORECASE)
+CLOSED_RE = re.compile(r"cerrad", re.IGNORECASE)
+AGE_RE = re.compile(r"Actualizado hace (\d+)\s*(minuto|hora)", re.IGNORECASE)
 
 
 def _port_of(title: str) -> str | None:
@@ -94,31 +92,21 @@ class PasosFronterizosSource(Source):
     independent = True
     expected_ports = frozenset(PORTS.values())
 
-    def __init__(self, url: str = URL, timeout: int = 20, opener=None, obey_robots: bool = True):
-        self.url, self.timeout, self._opener = url, timeout, opener
-        self.obey_robots = obey_robots
+    def __init__(self, url: str = URL, opener=None, obey_robots: bool = True):
+        self.url, self._opener, self.obey_robots = url, opener, obey_robots
+        # robots.txt is asked once per process, through the engine's own gate (which
+        # fails open when robots.txt is unreachable, as crawlers conventionally do).
+        # A refusal then sticks: is_configured() reports it rather than re-asking.
         self._allowed: bool | None = None
 
     def is_configured(self) -> bool:
-        """Ask robots.txt once. Unreachable robots.txt means allowed, as crawlers do."""
-        if self._opener or not self.obey_robots:
-            return True
-        if self._allowed is None:
-            self._allowed = self._robots_allows()
-        return self._allowed
+        return super().is_configured() and self._allowed is not False
 
-    def _robots_allows(self) -> bool:
-        base = "{0.scheme}://{0.netloc}".format(urlparse(self.url))
-        parser = RobotFileParser()
-        try:
-            robots = http.get(urljoin(base, "/robots.txt"), timeout=10)
-            parser.parse(robots.decode(errors="replace").splitlines())
-        except Exception:
-            return True
-        try:
-            return parser.can_fetch(http.BROWSER_USER_AGENT, self.url)
-        except Exception:
-            return True
-
-    def fetch(self, now: datetime) -> list[Reading]:
-        return parse(http.get_text(self.url, self.timeout, self._opener), now)
+    async def fetch(self, http: HttpClient, now: datetime) -> list[Reading]:
+        if self._opener:
+            return parse(self._opener(), now)
+        if self.obey_robots and self._allowed is None:
+            self._allowed = await http.can_fetch(self.url)
+        if self._allowed is False:
+            raise PermissionError(f"robots.txt disallows {self.url}")
+        return parse(await http.get_text(self.url), now)

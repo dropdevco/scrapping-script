@@ -19,23 +19,24 @@ The pieces live next door: windows.py (how long each read is trusted), opinions.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
-import threading
 import time
+from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from functools import partial
+from datetime import UTC, datetime, timedelta
 
-from . import consensus, history, opinions, scoring, windows
+from ..core.http import HttpClient
+from . import cbp, consensus, history, opinions, scoring, text, windows
 from .alerts import AlertBook
-from . import cbp, text
 from .cbp import LOCAL_TZ, Port, Snapshot
-from .storage import Storage
 from .crossings import CrossingError, CrossingLog
 from .opinions import SourceStatus
 from .sources import SOURCES, Reading, readings_from
+from .storage import BorderStore
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("scraper.border.service")
 CACHE_SECONDS = 300
 # How long a last-good reading may still be served after a refresh fails. Sending a
 # 10-minute-old number marked as such beats sending nothing.
@@ -62,10 +63,16 @@ class _View:
 
 
 class BorderFeed:
-    def __init__(self, storage: Storage | None = None, cache_seconds: int = CACHE_SECONDS,
-                 fetcher=cbp.fetch, clock=lambda: datetime.now(timezone.utc),
-                 extra_sources: list | None = None, enrich: bool = True):
-        self.storage = storage if storage is not None else Storage()
+    """Every public answer is a coroutine: it may need a fresh reading first. Pass `http`
+    to share a caller's HttpClient (the social pipeline's, say); without it the feed
+    opens one per refresh, the way the engine's own jobs do."""
+
+    def __init__(self, storage: BorderStore | None = None, cache_seconds: int = CACHE_SECONDS,
+                 fetcher: Callable[[HttpClient], Awaitable[list[dict]]] = cbp.fetch,
+                 clock=lambda: datetime.now(UTC),
+                 extra_sources: list | None = None, enrich: bool = True,
+                 http: HttpClient | None = None):
+        self.storage = storage if storage is not None else BorderStore()
         # CBP gives the skeleton (all six ports, hours, closures). Extra sources only
         # ever refine the minutes; none of them can add or remove a bridge.
         self.extra_sources = list(SOURCES if extra_sources is None else extra_sources)
@@ -75,9 +82,10 @@ class BorderFeed:
         self.enrich = enrich
         self._fetch = fetcher
         self._clock = clock
+        self._http = http
         # One upstream read at a time. Without this, several pipeline requests arriving
         # together each trigger their own fetch of CBP and the scraped site.
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._view: _View | None = None
         self._old_view: _View | None = None
         self._fetched_monotonic: float | None = None
@@ -152,18 +160,19 @@ class BorderFeed:
         age = self._age()
         return self._view is not None and age is not None and age < self.cache_seconds
 
-    def snapshot(self, force: bool = False, allow_stale: bool = True) -> Snapshot:
+    async def snapshot(self, force: bool = False, allow_stale: bool = True) -> Snapshot:
         """The current reading. After a failed refresh the last good one is served for
         STALE_GRACE_SECONDS, flagged; allow_stale=False is for callers that need a
         genuinely new reading or an error, such as the poller."""
         if self._is_fresh() and not force:
             return self._view.snap
-        with self._lock:
+        async with self._lock:
             # Another caller may have refreshed while we waited for the lock.
             if self._is_fresh() and not force:
                 return self._view.snap
             try:
-                return self._refresh()
+                async with self._client() as http:
+                    return await self._refresh(http)
             except FeedError:
                 age = self._age()
                 if allow_stale and self._view and age is not None and age < STALE_GRACE_SECONDS:
@@ -171,23 +180,31 @@ class BorderFeed:
                     return self._view.snap
                 raise
 
-    def _refresh(self) -> Snapshot:
+    @asynccontextmanager
+    async def _client(self):
+        if self._http is not None:
+            yield self._http
+        else:
+            async with HttpClient() as http:
+                yield http
+
+    async def _refresh(self, http: HttpClient) -> Snapshot:
         now = self._clock()                     # once per refresh: every window agrees
         cached_payload = self._cached(CBP, now)
         readings, statuses, to_fetch = self._plan_sources(now)
 
-        # CBP and the scraped sites are independent, so they are read at the same time.
-        jobs = [(source, partial(source.fetch, now)) for source in to_fetch]
+        # CBP and the scraped sites are independent, so they are read at the same time:
+        # total latency is the slowest of them, not the sum.
+        jobs = [source.fetch(http, now) for source in to_fetch]
         if cached_payload is None:
-            jobs.append((CBP, self._fetch))
-        results = opinions.fetch_all(jobs)
+            jobs.append(self._fetch(http))
+        results = await asyncio.gather(*jobs, return_exceptions=True)
+        cbp_result = results.pop() if cached_payload is None else cached_payload
 
         try:
-            payload = cached_payload
-            if payload is None:
-                ok, payload = results[CBP]
-                if not ok:
-                    raise payload
+            if isinstance(cbp_result, BaseException):
+                raise cbp_result
+            payload = cbp_result
             snap = cbp.build(payload, now)
         except Exception as exc:
             self._last_error = f"{type(exc).__name__}: {exc}"
@@ -195,9 +212,8 @@ class BorderFeed:
             raise FeedError(self._last_error) from exc
 
         readings = readings_from(snap) + readings
-        for source in to_fetch:
-            ok, value = results[source]
-            if not ok:
+        for source, value in zip(to_fetch, results):
+            if isinstance(value, BaseException):
                 log.warning("source %s failed: %s", source.name, value)
                 statuses[source.name] = SourceStatus("failed", type(value).__name__)
                 continue
@@ -214,33 +230,32 @@ class BorderFeed:
             # stretches its window, a changed one snaps it back.
             self._remember(CBP, payload, self._fingerprint)
         if self.enrich:
-            self._seed_trend(snap)
+            await self._seed_trend(snap)
         self._record_trend(snap)
         self._roll_previous(snap)
         if self.enrich:
-            self._prefetch_previous(snap)
-            self._refresh_typical()
+            await asyncio.gather(self._prefetch_previous(snap), self._refresh_typical())
 
         self._old_view, self._view = self._view, _View(
             snap, consensus.reconcile_all(readings), statuses, opinions.compare_mirrors(readings))
         self._fetched_monotonic = time.monotonic()
         self._last_error = None
         self._serving_stale = False
-        self._persist(snap, changed)
+        await self._persist(snap, changed)
         return snap
 
-    def _persist(self, snap: Snapshot, changed: bool) -> None:
+    async def _persist(self, snap: Snapshot, changed: bool) -> None:
         # Keep border_ports in step with the code registry, once per process. The
         # migration seeds it, but a renamed bridge here would otherwise never reach it.
         if self.storage.enabled and not self._ports_synced:
-            self.storage.upsert_ports()
+            await self.storage.upsert_ports()
             self._ports_synced = True
         # An unchanged fingerprint means every row would collide on content_hash, so the
         # write is pure cost. Skip it and say so in the run log instead.
         if changed:
-            self.storage.log_run("snapshot", snap, self.storage.save_readings(snap), "ok")
+            await self.storage.log_run("snapshot", snap, await self.storage.save_readings(snap), "ok")
         else:
-            self.storage.log_run("snapshot", snap, 0, "unchanged")
+            await self.storage.log_run("snapshot", snap, 0, "unchanged")
 
     def _track_fingerprint(self, snap: Snapshot) -> bool:
         """Remember when these exact numbers first appeared.
@@ -307,13 +322,13 @@ class BorderFeed:
         for port, lane_id, lane in cbp.open_lanes(snap):
             history.add_point(self._recent, (port.port_number, lane_id), (snap.at, lane.delay_minutes), cutoff)
 
-    def _seed_trend(self, snap: Snapshot) -> None:
+    async def _seed_trend(self, snap: Snapshot) -> None:
         """A fresh process has no movement to report; the last 90 minutes are in the database."""
         if self._trend_seeded or not self.storage.enabled:
             return
         self._trend_seeded = True
         cutoff = history.trend_cutoff(snap.at)
-        for row in self.storage.readings_since(cutoff.isoformat()):
+        for row in await self.storage.readings_since(cutoff.isoformat()):
             if row.get("delay_minutes") is not None and row.get("captured_at"):
                 point = (datetime.fromisoformat(row["captured_at"]), int(row["delay_minutes"]))
                 history.add_point(self._recent, (row["port_number"], row["lane"]), point, cutoff)
@@ -322,13 +337,13 @@ class BorderFeed:
         """How this lane has moved over the last hour and a half, if we have seen it."""
         return history.trend(self._recent.get((port_number, lane), []))
 
-    def _refresh_typical(self) -> None:
+    async def _refresh_typical(self) -> None:
         if not self.storage.enabled:
             return
         now = time.monotonic()
         if self._typical_due is not None and now < self._typical_due:
             return
-        rows = self.storage.typical_waits()
+        rows = await self.storage.typical_waits()
         if rows is None:                       # the call failed: try again soon, keep what we had
             self._typical_due = now + history.TYPICAL_RETRY_SECONDS
             return
@@ -355,33 +370,25 @@ class BorderFeed:
                 self._previous[key] = current[1]
             self._current[key] = (lane.content_hash, lane.delay_minutes)
 
-    def _prefetch_previous(self, snap: Snapshot) -> None:
-        """Look up every lane memory cannot answer in one pass, in parallel.
+    async def _prefetch_previous(self, snap: Snapshot) -> None:
+        """Look up, all at once, every open lane memory cannot answer.
 
-        Only a fresh process needs this; afterwards memory answers and nothing is sent.
+        This is what a fresh process needs — otherwise every deploy loses one cycle of
+        deltas and alerts. Afterwards memory answers and nothing is sent. Every lane an
+        answer can ask about is open, so after this previous_minutes never needs I/O.
         """
         if not self.storage.enabled:
             return
         missing = [(port.port_number, lane_id, lane.content_hash)
                    for port, lane_id, lane in cbp.open_lanes(snap)
                    if (port.port_number, lane_id) not in self._previous]
-        found = opinions.fetch_all([(m, partial(self._previous_from_storage, *m)) for m in missing])
-        for (port_number, lane_id, _), (ok, value) in found.items():
-            self._previous[(port_number, lane_id)] = value if ok else None
+        found = await asyncio.gather(*(self.storage.recent_readings(p, lane) for p, lane, _ in missing))
+        for (port_number, lane_id, current_hash), rows in zip(missing, found):
+            self._previous[(port_number, lane_id)] = history.previous_from_rows(rows, current_hash)
 
-    def previous_minutes(self, port_number: str, lane: str, current_hash: str | None = None) -> int | None:
-        """Last open reading for this lane: memory first, then the database.
-
-        The database fallback is what a fresh process needs — otherwise every deploy
-        loses one cycle of deltas and alerts.
-        """
-        key = (port_number, lane)
-        if key not in self._previous:
-            self._previous[key] = self._previous_from_storage(port_number, lane, current_hash)
-        return self._previous[key]
-
-    def _previous_from_storage(self, port_number: str, lane: str, current_hash: str | None) -> int | None:
-        return history.previous_from_rows(self.storage.recent_readings(port_number, lane), current_hash)
+    def previous_minutes(self, port_number: str, lane: str) -> int | None:
+        """Last distinct open reading for this lane, from memory (seeded from storage)."""
+        return self._previous.get((port_number, lane))
 
     # -- one lane, decorated -----------------------------------------------
     _score = staticmethod(scoring.score)
@@ -425,7 +432,7 @@ class BorderFeed:
         # than sending them to a slower one that is open.
         too_tight = bool(crosses_at and closes_at
                          and crosses_at + timedelta(minutes=scoring.CLOSING_MARGIN) > closes_at)
-        was = self.previous_minutes(port.port_number, lane_id, lane.content_hash) if lane.has_minutes else None
+        was = self.previous_minutes(port.port_number, lane_id) if lane.has_minutes else None
         delta = history.delta(lane.delay_minutes, was) if lane.has_minutes else None
 
         # When sources disagree we plan for the worst of them. A headline that promises
@@ -467,41 +474,21 @@ class BorderFeed:
             "stale": lane.stale,
         }
 
-    # -- what the pipeline asks for ---------------------------------------
-    def ranked(self, lane: str = "car", snap: Snapshot | None = None) -> list[dict]:
+    # -- answers over one snapshot (no I/O) -------------------------------
+    def ranked_in(self, snap: Snapshot, lane: str = "car") -> list[dict]:
         """Best bet first; bridges that close too soon sink below the usable ones."""
-        snap = snap or self.snapshot()
         rows = [self._decorate(snap, p, lane) for p in snap.ports if lane in p.lanes]
         usable = sorted((r for r in rows if r["state"] == "open"),
                         key=lambda r: (r["closes_before_you_cross"], *self._rank_key(r)))
         return usable + [r for r in rows if r["state"] != "open"]
 
-    def best(self, lane: str = "car", snap: Snapshot | None = None) -> dict | None:
+    def best_in(self, snap: Snapshot, lane: str = "car") -> dict | None:
         """The bridge we would actually send someone to for this lane."""
-        rows = self.ranked(lane, snap)
+        rows = self.ranked_in(snap, lane)
         top = rows[0] if rows else None
         return top if top and top["state"] == "open" and not top["closes_before_you_cross"] else None
 
-    def waits(self, lang: str = "es", lanes: tuple[str, ...] | None = None) -> dict:
-        """Everything, or just the lanes asked for.
-
-        A pipeline that only posts car waits does not need four ranked lists and every
-        lane of every port, so `lanes` trims the response it has to parse.
-        """
-        snap = self.snapshot()
-        wanted = tuple(lanes) if lanes else text.CAPTION_LANES
-        return {
-            **snap.to_dict(),
-            "best": {l: self.best(l, snap) for l in wanted},
-            "ranked": {l: self.ranked(l, snap) for l in wanted},
-            "caption_es": text.caption(self, snap, "es"),
-            "caption_en": text.caption(self, snap, "en"),
-            "updated_label": text.last_honest_update(snap),
-        }
-
-    def bridge(self, port_key: str, lane: str = "car", lang: str = "es",
-               snap: Snapshot | None = None) -> dict:
-        snap = snap or self.snapshot()
+    def bridge_in(self, snap: Snapshot, port_key: str, lane: str = "car", lang: str = "es") -> dict:
         port = snap.port(port_key)
         if port is None:
             return {"found": False, "reply": text.unknown_bridge(lang), "options": text.menu(snap, lang)}
@@ -512,20 +499,19 @@ class BorderFeed:
 
         body = dict(self._decorate(snap, port, lane))
         body["found"] = True
-        body["alternative"] = self.alternative(port.port_number, lane, snap,
-                                               any_open=body["closes_before_you_cross"])
+        body["alternative"] = self.alternative_in(snap, port.port_number, lane,
+                                                  any_open=body["closes_before_you_cross"])
         body["reply"] = text.bridge_reply(body, lang)
         return body
 
-    def alternative(self, port_number: str, lane: str = "car", snap: Snapshot | None = None,
-                    any_open: bool = False) -> dict | None:
+    def alternative_in(self, snap: Snapshot, port_number: str, lane: str = "car",
+                       any_open: bool = False) -> dict | None:
         """A materially faster bridge for the same lane, or None.
 
         any_open drops the "must save 10 minutes" rule: when their bridge shuts before
         they would reach it, a slower bridge that is still open is the better answer.
         """
-        snap = snap or self.snapshot()
-        best = self.best(lane, snap)
+        best = self.best_in(snap, lane)
         if not best or best["port_number"] == port_number:
             return None
         port = snap.port(port_number)
@@ -537,16 +523,43 @@ class BorderFeed:
             return None
         return {**best, "saves_minutes": saved}
 
-    def my_digest(self, ports: list[str], lane: str = "car", lang: str = "es") -> dict:
+    # -- what the pipeline asks for ---------------------------------------
+    async def ranked(self, lane: str = "car") -> list[dict]:
+        return self.ranked_in(await self.snapshot(), lane)
+
+    async def best(self, lane: str = "car") -> dict | None:
+        return self.best_in(await self.snapshot(), lane)
+
+    async def waits(self, lang: str = "es", lanes: tuple[str, ...] | None = None) -> dict:
+        """Everything, or just the lanes asked for.
+
+        A pipeline that only posts car waits does not need four ranked lists and every
+        lane of every port, so `lanes` trims the response it has to parse.
+        """
+        snap = await self.snapshot()
+        wanted = tuple(lanes) if lanes else text.CAPTION_LANES
+        return {
+            **snap.to_dict(),
+            "best": {lane: self.best_in(snap, lane) for lane in wanted},
+            "ranked": {lane: self.ranked_in(snap, lane) for lane in wanted},
+            "caption_es": text.caption(self, snap, "es"),
+            "caption_en": text.caption(self, snap, "en"),
+            "updated_label": text.last_honest_update(snap),
+        }
+
+    async def bridge(self, port_key: str, lane: str = "car", lang: str = "es") -> dict:
+        return self.bridge_in(await self.snapshot(), port_key, lane, lang)
+
+    async def my_digest(self, ports: list[str], lane: str = "car", lang: str = "es") -> dict:
         """Only the bridges this person saved, in their lane. Their whole post."""
-        snap = self.snapshot()
-        found = [r for r in (self.bridge(p, lane, lang, snap) for p in ports) if r.get("found")]
-        best = self.best(lane, snap)
+        snap = await self.snapshot()
+        found = [r for r in (self.bridge_in(snap, p, lane, lang) for p in ports) if r.get("found")]
+        best = self.best_in(snap, lane)
         return {"lane": lane, "bridges": found, "best": best,
                 "message": text.my_digest(found, best, lane, lang)}
 
-    def drops(self, below: int, lane: str = "car", lang: str = "es",
-              since: datetime | None = None) -> dict:
+    async def drops(self, below: int, lane: str = "car", lang: str = "es",
+                    since: datetime | None = None) -> dict:
         """Lanes that crossed under `below`, as events any number of consumers can read.
 
         Without `since`: alerts that still describe the current reading, the same answer
@@ -559,17 +572,16 @@ class BorderFeed:
         quiet until it climbs back to the limit plus a margin. That state is stored, so a
         restart does not resend the drop it already sent.
         """
-        snap = self.snapshot()
+        snap = await self.snapshot()
         current: dict[str, str] = {}
         for port, lane_id, reading in cbp.open_lanes(snap):
             if lane_id != lane:
                 continue
             current[port.port_number] = reading.content_hash
-            was = self.previous_minutes(port.port_number, lane, reading.content_hash)
-            self.alerts.check(port.port_number, lane, below, reading.delay_minutes, was,
-                              reading.content_hash)
+            await self.alerts.check(port.port_number, lane, below, reading.delay_minutes,
+                                    self.previous_minutes(port.port_number, lane), reading.content_hash)
 
-        events = self.alerts.events(lane, below, since, current if since is None else None)
+        events = await self.alerts.events(lane, below, since, current if since is None else None)
         return {"generated_at": snap.generated_at, "lane": lane, "below": below,
                 "quiet_hour": self.is_quiet_hour(),
                 "cursor": self.alerts.cursor(lane, below) or (since.isoformat() if since else None),
@@ -595,30 +607,30 @@ class BorderFeed:
         }
 
     # -- ground truth ------------------------------------------------------
-    def start_crossing(self, port_key: str, lane: str = "car", lang: str = "es",
-                       reporter: str | None = None) -> dict:
+    async def start_crossing(self, port_key: str, lane: str = "car", lang: str = "es",
+                             reporter: str | None = None) -> dict:
         """They joined the line. Freeze what every source says right now."""
-        body = self.bridge(port_key, lane, lang)
+        body = await self.bridge(port_key, lane, lang)
         if not body.get("found"):
             raise CrossingError("no such bridge", "unknown_bridge")
-        crossing = self.crossings.start(body, reporter)
+        crossing = await self.crossings.start(body, reporter)
         crossing["reply"] = text.crossing_started(body, lang)
         return crossing
 
-    def finish_crossing(self, crossing_id: str, lang: str = "es") -> dict:
-        result = self.crossings.finish(crossing_id)
+    async def finish_crossing(self, crossing_id: str, lang: str = "es") -> dict:
+        result = await self.crossings.finish(crossing_id)
         result["reply"] = text.crossing_finished(result, cbp.PORTS.get(result["port_number"], {}), lang)
         return result
 
-    def accuracy(self, days: int = 30) -> dict:
-        return self.crossings.accuracy(days)
+    async def accuracy(self, days: int = 30) -> dict:
+        return await self.crossings.accuracy(days)
 
-    def health(self) -> dict:
+    async def health(self) -> dict:
         # A freshly started process has read nothing yet. Take one reading rather than
         # reporting "not ok", which would page someone over a server that just booted.
         if self._view is None and self._last_error is None:
             try:
-                self.snapshot()
+                await self.snapshot()
             except FeedError:
                 pass
 

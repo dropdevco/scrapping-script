@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from ...core.http import HttpClient
 from .. import cbp
 from .base import Reading, Source
 
@@ -27,8 +28,5 @@ class CbpSource(Source):
     name = "cbp"
     independent = True
 
-    def __init__(self, fetcher=cbp.fetch):
-        self._fetch = fetcher
-
-    def fetch(self, now: datetime) -> list[Reading]:
-        return readings_from(cbp.build(self._fetch(), now))
+    async def fetch(self, http: HttpClient, now: datetime) -> list[Reading]:
+        return readings_from(cbp.build(await cbp.fetch(http), now))

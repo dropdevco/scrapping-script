@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from .. import http
+from ...core.http import HttpClient
 from .base import Reading, Source
 
 URL = "https://borderswaittime.com/united-states-mexico/el-paso/"
@@ -29,14 +29,19 @@ PORTS = {
 # through. The segment must stop at the next lane label: a passenger card is followed
 # by Sentri, Ready and Pedestrian rows, any of which may say "Lanes Closed".
 GENERAL_RE = re.compile(r"General Lanes:\s*(.*?)(?=\b(?:Sentri|Ready|Pedestrian|Commercial)\b|$)",
-                        re.I | re.S)
-DELAY_RE = re.compile(r"(\d+)\s*min\s*delay", re.I)
+                        re.IGNORECASE | re.DOTALL)
+DELAY_RE = re.compile(r"(\d+)\s*min\s*delay", re.IGNORECASE)
 # Which CBP update the numbers belong to. Comparing only readings of the same update is
 # what keeps a mirror cached for 20 minutes from "disagreeing" with a newer CBP reading.
-LABEL_RE = re.compile(r"At\s+(?:\d{1,2}:\d{2}\s*[ap]m|noon|midnight)\s*[A-Z]{3}", re.I)
+LABEL_RE = re.compile(r"At\s+(?:\d{1,2}:\d{2}\s*[ap]m|noon|midnight)\s*[A-Z]{3}", re.IGNORECASE)
 # The four bridges with a passenger card; Santa Teresa and Tornillo have none.
 EXPECTED_PORTS = frozenset({"240202", "240203", "240201", "240204"})
-CLOSED_RE = re.compile(r"lanes?\s*closed", re.I)
+CLOSED_RE = re.compile(r"lanes?\s*closed", re.IGNORECASE)
+# Overnight CBP stops publishing and the mirror says so for every card: "General Lanes:
+# Update pending: Please refresh the page after a few minutes." Seen live at 00:11 MDT on
+# 2026-09-29, all four cards. Dropping those lanes made a healthy page parse to nothing,
+# which the empty-page check then reported as the page having changed shape, every night.
+PENDING_RE = re.compile(r"update\s*pending", re.IGNORECASE)
 
 
 def parse(page: str, now: datetime) -> list[Reading]:
@@ -70,6 +75,11 @@ def parse(page: str, now: datetime) -> list[Reading]:
             readings.append(Reading(port, "car", "closed", None, source="borderswaittime",
                                     independent=False))
             continue
+        if PENDING_RE.search(segment):
+            # CBP's own "Update Pending" parses to no_data too, so the two still compare.
+            readings.append(Reading(port, "car", "no_data", None, source="borderswaittime",
+                                    independent=False))
+            continue
         found = DELAY_RE.search(segment)
         if found:
             label = LABEL_RE.search(segment)
@@ -84,8 +94,8 @@ class BordersWaitTimeSource(Source):
     independent = False          # mirrors CBP; never counts as corroboration
     expected_ports = EXPECTED_PORTS
 
-    def __init__(self, url: str = URL, timeout: int = 20, opener=None):
-        self.url, self.timeout, self._opener = url, timeout, opener
+    def __init__(self, url: str = URL, opener=None):
+        self.url, self._opener = url, opener
 
-    def fetch(self, now: datetime) -> list[Reading]:
-        return parse(http.get_text(self.url, self.timeout, self._opener), now)
+    async def fetch(self, http: HttpClient, now: datetime) -> list[Reading]:
+        return parse(self._opener() if self._opener else await http.get_text(self.url), now)

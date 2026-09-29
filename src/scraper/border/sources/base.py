@@ -4,6 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from ...core.config import settings
+from ...core.http import HttpClient
+
 
 @dataclass(frozen=True)
 class Reading:
@@ -34,7 +37,10 @@ class Source:
     expected_ports: frozenset[str] = frozenset()
 
     def is_configured(self) -> bool:
-        return True
+        """No network here. ENABLED_SOURCES / DISABLED_SOURCES apply by name, the same
+        switch the engine's registry honours."""
+        return settings.source_allowed(self.name)
 
-    def fetch(self, now: datetime) -> list[Reading]:
+    async def fetch(self, http: HttpClient, now: datetime) -> list[Reading]:
+        """Raise on hard failure; the feed records it and answers from CBP alone."""
         raise NotImplementedError

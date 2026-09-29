@@ -3,26 +3,26 @@
 Everything a follower could send goes through the same code the pipeline calls, so
 what you see here is what they would receive. Nothing is sent to Meta.
 
-    python3 tools/chat.py                                  # live CBP
-    python3 tools/chat.py --from-file tests/fixtures/cbp_feed.json   # offline, fixed data
-    python3 tools/chat.py --lang en
+    python -m scraper.border.devtools.chat                   # live CBP
+    python -m scraper.border.devtools.chat --from-file tests/border/fixtures/cbp_feed.json
+    python -m scraper.border.devtools.chat --lang en
 
 Commands start with a slash; anything else is treated as a message from a follower.
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
-
 from scraper.border import cbp, text
-from scraper.border.storage import Storage
-from scraper.border.service import BorderFeed, FeedError
 from scraper.border.devtools.fake_instagram import FakeGraph, FakePipeline
+from scraper.border.service import BorderFeed, FeedError
+from scraper.border.storage import BorderStore
 
 COLOR = {"you": "\033[0;36m", "bot": "\033[0;33m", "note": "\033[2m",
          "warn": "\033[0;31m", "off": "\033[0m"}
@@ -53,6 +53,9 @@ class Chat:
         self.graph = FakeGraph()
         self.pipeline = FakePipeline(feed, self.graph, lang)
         self.user = "tu"
+        # input() is blocking, so the conversation runs on one loop driven a turn at a time.
+        self._loop = asyncio.new_event_loop()
+        self._wait = self._loop.run_until_complete
         logging.disable(logging.CRITICAL)
 
     def say(self, text: str) -> None:
@@ -67,8 +70,8 @@ class Chat:
         where = "live CBP" if self.live else "saved data"
         print("\n" + paint("bot", "Chisme · puentes Juárez–El Paso", self.color))
         self.note(f"Reading {where}. Type like a follower would; nothing is sent to Instagram.\n")
-        for text, why in SUGGESTIONS:
-            print(f"  {paint('you', text, self.color):<45} {paint('note', why, self.color)}")
+        for said, why in SUGGESTIONS:
+            print(f"  {paint('you', said, self.color):<45} {paint('note', why, self.color)}")
         self.note("\n  /ayuda for commands\n")
 
     # -- commands ----------------------------------------------------------
@@ -83,7 +86,7 @@ class Chat:
             print()
         elif name in ("post", "publicacion"):
             try:
-                data = self.feed.waits(self.lang)
+                data = self._wait(self.feed.waits(self.lang))
                 self.say(data["caption_es"] if self.lang == "es" else data["caption_en"])
             except FeedError as exc:
                 self.warn(str(exc))
@@ -94,7 +97,7 @@ class Chat:
         elif name in ("fuentes", "sources"):
             self.sources()
         elif name in ("estado", "health"):
-            health = self.feed.health()
+            health = self._wait(self.feed.health())
             keep = {k: health[k] for k in ("ok", "degraded", "frozen", "last_ok", "storage_enabled")}
             print(f"  {json.dumps(keep, ensure_ascii=False)}")
         else:
@@ -103,11 +106,11 @@ class Chat:
 
     def sources(self) -> None:
         try:
-            snap = self.feed.snapshot()
+            snap = self._wait(self.feed.snapshot())
         except FeedError as exc:
             self.warn(str(exc))
             return
-        for source, status in self.feed.health()["sources"].items():
+        for source, status in self._wait(self.feed.health())["sources"].items():
             print(f"  {source:<20}{status}")
         disputed = [(key, d) for key, d in self.feed.decisions.items() if d.disputed]
         if not disputed:
@@ -146,7 +149,7 @@ class Chat:
 
             before = len(self.graph.calls)
             try:
-                self.pipeline.on_message(self.user, message)
+                self._wait(self.pipeline.on_message(self.user, message))
             except FeedError as exc:
                 self.warn(str(exc))
                 continue
@@ -169,17 +172,19 @@ def main(argv: list[str] | None = None) -> int:
 
     live = args.from_file is None
     if live:
-        feed = BorderFeed(storage=Storage(url="", key=""))
+        feed = BorderFeed(storage=BorderStore(client=None))
     else:
         payload = json.loads(args.from_file.read_text())
-        clock = datetime.now(timezone.utc)
+        clock = datetime.now(UTC)
         if args.at:
             hour, _, minute = args.at.partition(":")
             local = datetime.now(cbp.LOCAL_TZ).replace(hour=int(hour), minute=int(minute or 0),
                                                        second=0, microsecond=0)
-            clock = local.astimezone(timezone.utc)
-        feed = BorderFeed(storage=Storage(url="", key=""), fetcher=lambda: payload,
-                          clock=lambda: clock)
+            clock = local.astimezone(UTC)
+        async def saved(_http):
+            return payload
+
+        feed = BorderFeed(storage=BorderStore(client=None), fetcher=saved, clock=lambda: clock)
 
     return Chat(feed, args.lang, color=not args.no_color, live=live).run()
 

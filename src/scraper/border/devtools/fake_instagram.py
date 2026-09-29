@@ -16,6 +16,7 @@ Exit code 0 means every simulated call carried a sane payload.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import urllib.error
 import urllib.parse
@@ -24,11 +25,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-
 from scraper.border import cbp, text
-from scraper.border.storage import Storage
 from scraper.border.crossings import CrossingError
 from scraper.border.service import BorderFeed
+from scraper.border.storage import BorderStore
 
 GRAPH = "https://graph.facebook.com/v21.0"
 
@@ -57,7 +57,9 @@ class FakeGraph:
 
 # ------------------------------------------------------------- feed clients
 class HttpFeed:
-    """Pulls over HTTP, for testing a running `python -m border.api`."""
+    """Pulls over HTTP, for testing a running `python -m scraper.border.api`.
+
+    Same coroutine surface as BorderFeed, so FakePipeline cannot tell them apart."""
 
     def __init__(self, base: str):
         self.base = base.rstrip("/")
@@ -80,42 +82,40 @@ class HttpFeed:
             except json.JSONDecodeError:
                 return exc.code, {"error": f"HTTP {exc.code}", "body": raw[:200].decode(errors="replace")}
 
-    def _fetch(self, path: str) -> dict:
-        return self._send(f"{self.base}{path}")[1]
-
-    def _get(self, path: str, **params) -> dict:
+    async def _get(self, path: str, **params) -> dict:
         query = urllib.parse.urlencode(params)
-        return self._fetch(f"{path}?{query}" if query else path)
+        target = f"{self.base}{path}?{query}" if query else f"{self.base}{path}"
+        return (await asyncio.to_thread(self._send, target))[1]
 
-    def waits(self, lang="es"):
-        return self._get("/waits", lang=lang)
+    async def waits(self, lang="es"):
+        return await self._get("/waits", lang=lang)
 
-    def my_digest(self, ports, lane="car", lang="es"):
-        return self._get("/mine", ports=",".join(ports), lane=lane, lang=lang)
+    async def my_digest(self, ports, lane="car", lang="es"):
+        return await self._get("/mine", ports=",".join(ports), lane=lane, lang=lang)
 
-    def bridge(self, key, lane="car", lang="es"):
+    async def bridge(self, key, lane="car", lang="es"):
         # People type "el puente libre"; a raw space is not a legal request target.
-        return self._get(f"/waits/{urllib.parse.quote(key, safe='')}", lane=lane, lang=lang)
+        return await self._get(f"/waits/{urllib.parse.quote(key, safe='')}", lane=lane, lang=lang)
 
-    def drops(self, below, lane="car", lang="es", since=None):
+    async def drops(self, below, lane="car", lang="es", since=None):
         params = {"below": below, "lane": lane, "lang": lang}
         if since is not None:
             params["since"] = since.isoformat()
-        return self._get("/drops", **params)
+        return await self._get("/drops", **params)
 
-    def _post(self, path: str, body: dict) -> dict:
+    async def _post(self, path: str, body: dict) -> dict:
         request = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
                                          headers={"Content-Type": "application/json"}, method="POST")
-        status, answer = self._send(request)
+        status, answer = await asyncio.to_thread(self._send, request)
         if status >= 400:
             raise CrossingError(answer.get("error", f"HTTP {status}"), answer.get("code", "unknown"))
         return answer
 
-    def start_crossing(self, port, lane="car", lang="es", reporter=None):
-        return self._post("/crossings", {"port": port, "lane": lane, "lang": lang, "reporter": reporter})
+    async def start_crossing(self, port, lane="car", lang="es", reporter=None):
+        return await self._post("/crossings", {"port": port, "lane": lane, "lang": lang, "reporter": reporter})
 
-    def finish_crossing(self, crossing_id, lang="es"):
-        return self._post(f"/crossings/{crossing_id}/done", {"lang": lang})
+    async def finish_crossing(self, crossing_id, lang="es"):
+        return await self._post(f"/crossings/{crossing_id}/done", {"lang": lang})
 
 
 # ---------------------------------------------------------------- pipeline
@@ -126,14 +126,14 @@ class FakePipeline:
         self.saved: dict[str, dict] = {}      # user -> {"ports": [...], "lane": "car_sentri"}
         self.crossing: dict[str, str] = {}    # user -> the crossing they are in the middle of
 
-    def daily_post(self) -> str:
-        data = self.feed.waits(self.lang)
+    async def daily_post(self) -> str:
+        data = await self.feed.waits(self.lang)
         caption = data["caption_es"] if self.lang == "es" else data["caption_en"]
         slides = sum(1 for p in data["ports"] if p["has_live_data"]) or 1
         self.graph.publish_carousel(caption, slides)
         return caption
 
-    def on_message(self, user_id: str, message: str) -> None:
+    async def on_message(self, user_id: str, message: str) -> None:
         """The small part of the conversation that needs our data."""
         msg = message.strip().lower()
 
@@ -141,11 +141,11 @@ class FakePipeline:
             saved = self.saved.get(user_id)
             if saved:
                 # A regular crosser gets their two bridges in their lane, not all thirty lines.
-                digest = self.feed.my_digest(saved["ports"], saved["lane"], self.lang)
+                digest = await self.feed.my_digest(saved["ports"], saved["lane"], self.lang)
                 self.graph.send_message(user_id, digest["message"],
                                         quick_replies=["Todos", "Cambiar carril", "Alto"])
                 return
-            data = self.feed.waits(self.lang)
+            data = await self.feed.waits(self.lang)
             names = [p["name_es"] if self.lang == "es" else p["name"] for p in data["ports"]]
             head = data["caption_es"] if self.lang == "es" else data["caption_en"]
             self.graph.send_message(user_id, head, quick_replies=names[:4])
@@ -154,7 +154,7 @@ class FakePipeline:
         if msg.startswith(("guardar", "save", "mi puente")):
             target = msg.split(maxsplit=1)[1] if " " in msg else ""
             lane = "car_sentri" if "sentri" in msg else "car_ready" if "ready" in msg else "car"
-            answer = self.feed.bridge(target.replace("sentri", "").strip() or target, lane, self.lang)
+            answer = await self.feed.bridge(target.replace("sentri", "").strip() or target, lane, self.lang)
             if not answer.get("found"):
                 self.graph.send_message(user_id, answer["reply"], quick_replies=answer.get("options"))
                 return
@@ -185,7 +185,7 @@ class FakePipeline:
             lane = saved["lane"] if saved else "car"
             port = target.strip() or (saved["ports"][0] if saved else "")
             try:
-                crossing = self.feed.start_crossing(port, lane, self.lang, reporter=user_id)
+                crossing = await self.feed.start_crossing(port, lane, self.lang, reporter=user_id)
             except CrossingError as exc:
                 self.graph.send_message(user_id, text.crossing_error(exc.code, self.lang))
                 return
@@ -200,7 +200,7 @@ class FakePipeline:
                                         if self.lang == "es" else "Send \"crossing\" and the bridge first.")
                 return
             try:
-                reply = self.feed.finish_crossing(crossing_id, self.lang)["reply"]
+                reply = (await self.feed.finish_crossing(crossing_id, self.lang))["reply"]
             except CrossingError as exc:
                 reply = text.crossing_error(exc.code, self.lang)
             self.graph.send_message(user_id, reply)
@@ -213,24 +213,24 @@ class FakePipeline:
             return
 
         # anything else is read as a bridge name
-        answer = self.feed.bridge(msg, "car", self.lang)
+        answer = await self.feed.bridge(msg, "car", self.lang)
         self.graph.send_message(user_id, answer["reply"],
                                 quick_replies=None if answer.get("found") else answer.get("options"))
 
-    def scheduled_message(self, user_id: str, port_key: str | None = None, lane: str = "car") -> None:
+    async def scheduled_message(self, user_id: str, port_key: str | None = None, lane: str = "car") -> None:
         """Their saved bridges when they have some, otherwise the one asked for."""
         saved = self.saved.get(user_id)
         if saved and not port_key:
-            self.graph.send_message(user_id, self.feed.my_digest(saved["ports"], saved["lane"], self.lang)["message"])
+            self.graph.send_message(user_id, (await self.feed.my_digest(saved["ports"], saved["lane"], self.lang))["message"])
             return
-        self.graph.send_message(user_id, self.feed.bridge(port_key, lane, self.lang)["reply"])
+        self.graph.send_message(user_id, (await self.feed.bridge(port_key, lane, self.lang))["reply"])
 
-    def alert_sweep(self) -> int:
+    async def alert_sweep(self) -> int:
         """Each subscription keeps its own cursor, so no subscriber's alert is taken by
         another asking for the same limit first."""
         sent = 0
         for sub in self.subscriptions:
-            answer = self.feed.drops(sub["below"], sub["lane"], self.lang, since=sub.get("cursor"))
+            answer = await self.feed.drops(sub["below"], sub["lane"], self.lang, since=sub.get("cursor"))
             for drop in answer["drops"]:
                 self.graph.send_message(sub["user_id"], drop["message"])
                 sent += 1
@@ -240,30 +240,30 @@ class FakePipeline:
 
 
 # -------------------------------------------------------------------- main
-def run(feed, lang: str = "es") -> FakeGraph:
+async def run(feed, lang: str = "es") -> FakeGraph:
     graph = FakeGraph()
     pipeline = FakePipeline(feed, graph, lang)
 
     print("== daily post ==")
-    print(pipeline.daily_post(), "\n")
+    print(await pipeline.daily_post(), "\n")
 
     print("== messages ==")
     for user, msg in [("user-1", "puentes"), ("user-1", "el puente libre"),
                       ("user-1", "guardar paso del norte sentri"), ("user-1", "puentes"),
                       ("user-2", "zaragoza"), ("user-2", "avísame cuando baje de 30 min"),
                       ("user-3", "puente que no existe")]:
-        pipeline.on_message(user, msg)
+        await pipeline.on_message(user, msg)
         print(f"  {user} sent {msg!r}")
         for line in graph.calls[-1]["params"]["message"]["text"].splitlines():
             print(f"    -> {line}")
 
     print("\n== scheduled 6:30 message (their saved bridges) ==")
-    pipeline.scheduled_message("user-1")
+    await pipeline.scheduled_message("user-1")
     for line in graph.calls[-1]["params"]["message"]["text"].splitlines():
         print(f"  -> {line}")
 
     print("\n== alert sweep ==")
-    print(f"  {pipeline.alert_sweep()} alert(s) sent "
+    print(f"  {await pipeline.alert_sweep()} alert(s) sent "
           f"({len(pipeline.subscriptions)} subscription(s) checked)")
 
     return graph
@@ -272,7 +272,7 @@ def run(feed, lang: str = "es") -> FakeGraph:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--from-file", type=Path, help="replay a saved CBP feed")
-    ap.add_argument("--url", help="pull over HTTP from a running border.api instead")
+    ap.add_argument("--url", help="pull over HTTP from a running scraper.border.api instead")
     ap.add_argument("--lang", default="es", choices=["es", "en"])
     ap.add_argument("--out", type=Path, help="write the recorded Meta calls here")
     args = ap.parse_args(argv)
@@ -280,10 +280,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.url:
         feed = HttpFeed(args.url)
     else:
-        fetcher = (lambda: json.loads(args.from_file.read_text())) if args.from_file else cbp.fetch
-        feed = BorderFeed(storage=Storage(url="", key=""), fetcher=fetcher)
+        async def from_file(_http):
+            return json.loads(args.from_file.read_text())
 
-    graph = run(feed, args.lang)
+        feed = BorderFeed(storage=BorderStore(client=None),
+                          fetcher=from_file if args.from_file else cbp.fetch)
+
+    graph = asyncio.run(run(feed, args.lang))
 
     print(f"\n== recorded {len(graph.calls)} Meta call(s), none sent ==")
     for call in graph.calls:

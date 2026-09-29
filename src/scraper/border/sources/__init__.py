@@ -17,5 +17,12 @@ from .pasosfronterizos import PasosFronterizosSource
 # The sources BorderFeed reads besides CBP, which it reads itself for the full snapshot.
 SOURCES: list[Source] = [PasosFronterizosSource(), BordersWaitTimeSource()]
 
-__all__ = ["Reading", "Source", "SOURCES", "CbpSource", "PasosFronterizosSource",
-           "BordersWaitTimeSource", "readings_from"]
+__all__ = [
+           "SOURCES",
+           "BordersWaitTimeSource",
+           "CbpSource",
+           "PasosFronterizosSource",
+           "Reading",
+           "Source",
+           "readings_from",
+]

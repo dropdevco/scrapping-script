@@ -8,7 +8,8 @@
 Live CBP border wait times for the six El Paso–Juárez ports, shaped for the Chisme
 Instagram pipeline to **pull** from. No app, no UI, no scheduler of our own.
 
-Python 3.12+, standard library only. Nothing to install.
+Part of the `scraper` package: it uses the engine's `HttpClient`, `settings` and Supabase
+client, and needs nothing beyond `pip install -e ".[dev]"`.
 
 ## Run
 
@@ -19,7 +20,7 @@ python -m scraper.border.devtools.demo        # five-scene demo, safe to run in 
 python -m scraper.border.devtools.fake_instagram   # simulate Instagram against live CBP
 python -m scraper.border.api --port 8088      # the pull surface (run next to the pipeline)
 python -m scraper.border.selfcheck            # does the live feed still look like the feed we parse?
-python -m scraper.border.poll --loop 300      # record a reading every 5 min, prune daily
+python -m scraper.border.poll --prune         # record one reading (GitHub Actions schedules it)
 ```
 
 Uses the repo's editable install (`pip install -e ".[dev]"`); no extra setup.
@@ -44,14 +45,16 @@ Uses the repo's editable install (`pip install -e ".[dev]"`); no extra setup.
 
 One CBP read is reused for 5 minutes, so the pipeline can ask as often as it likes.
 
-To import it directly instead of over HTTP:
+To import it directly instead of over HTTP — every answer is a coroutine, like the rest
+of the engine, and it can share a caller's `HttpClient`:
 
 ```python
-from border.service import BorderFeed
-feed = BorderFeed()
-feed.waits()["caption_es"]
-feed.bridge("paso-del-norte", "car")["reply"]
-feed.drops(below=30)["drops"]
+from scraper.border.service import BorderFeed
+async with HttpClient() as http:
+    feed = BorderFeed(http=http)
+    (await feed.waits())["caption_es"]
+    (await feed.bridge("paso-del-norte", "car"))["reply"]
+    (await feed.drops(below=30))["drops"]
 ```
 
 ## Built for someone who crosses daily
@@ -181,13 +184,14 @@ and valuable as a regression test against production: when a mirror of CBP disag
 with _our_ reading of CBP, the bug is ours. `/health` reports it:
 
 ```json
-"parser_check": {"compared": 4, "mismatches": []}
+"parser_check": {"compared": 4, "skipped_other_update": 0, "mismatches": []}
 ```
 
 It is marked `independent=False`, so it can never change an answer — only raise a flag.
-Only readings of the **same CBP update** are compared (`At 7:00 pm MDT` on both sides):
-the mirror is cached longer than CBP, and right after CBP publishes the two describe
-different hours. Those are counted as `skipped_other_update`, not reported as bugs.
+Only readings of the **same CBP update** are compared: both sides must carry the stamp
+(`At 7:00 pm MDT`) and it must match. The mirror lags CBP — overnight it reads "Update
+pending", with no stamp, for lanes CBP already has numbers for — so anything else is
+counted as `skipped_other_update`, not reported as a bug. Overnight that is all four.
 This is the check that would have caught the ahead-of-clock stamps and the `"At Noon"`
 format before either reached a post.
 
@@ -335,9 +339,11 @@ future stamp as "updated".
 
 ## When the feed misbehaves
 
-`fetch` retries on `{429, 500, 502, 503, 504}` and transport errors — three attempts,
-exponential backoff capped at 30s, honouring a numeric `Retry-After`. A 404 is not
-retried. One flaky moment should not cost a post.
+Every upstream read goes through the engine's `core/http.py` `HttpClient`: it retries
+`{429, 500, 502, 503, 504}` and transport errors with exponential backoff capped at 30s,
+honours a numeric `Retry-After`, negotiates gzip, and identifies itself with the
+engine's `USER_AGENT`. Both scraped sites were confirmed live to serve their full page
+to that honest agent (2026-09-29), so no browser user-agent is sent.
 
 `/health` also catches the quieter failure, CBP answering happily with numbers that
 stopped moving:
@@ -362,7 +368,7 @@ posting rather than keep publishing stale numbers as fresh.
 | Command                       | What it is for                                                                                                                                                                                                                                                                                                                                    |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `python -m scraper.border.selfcheck` | Asks the live feed and fails loudly if a field, a port, a lane group or a status word changed. Unit tests run on saved responses, so they stay green through exactly that kind of drift. Exits 1 on any problem, `--json` for a monitor                                                                                                           |
-| `python -m scraper.border.poll` | Records one reading. `--loop 300` keeps going, backing off while the feed is failing, and applies retention at start and once a day; `--prune` does it after a single reading (for cron); `--keep-days` sets how many days of readings stay (60); `--dry-run` writes nothing. A last-good reading served after a failure counts as a failure here |
+| `python -m scraper.border.poll` | Records one reading and exits. No `--loop`: GitHub Actions is the only scheduler here, so a missed run shows in the Actions UI. `--prune` applies retention after the reading (run it daily); `--keep-days` sets how many days of readings stay (60); `--dry-run` writes nothing. A last-good reading served after a failure counts as a failure here |
 
 `selfcheck` also fails when a scraped site parses to nothing, loses a bridge, or a CBP
 mirror disagrees with our parsing of the same update. A site that is simply down is
@@ -372,8 +378,10 @@ Captions are capped at 2,000 characters — below Instagram's 2,200 limit, with 
 the pipeline's own hashtags. If a caption ever ran long, the compact lane lines are
 dropped before the headline.
 
-The scraper reads `robots.txt` before its first fetch and disables itself if it is
-disallowed; an unreachable `robots.txt` counts as allowed, as crawlers conventionally
+The scraper asks `robots.txt` through the engine's `HttpClient.can_fetch` before its first
+fetch and disables itself if it is disallowed; `DISABLED_SOURCES=pasosfronterizos` switches
+it off by name, the same switch the engine's registry honours. An unreachable `robots.txt`
+counts as allowed, as crawlers conventionally
 treat it.
 
 ## Database
@@ -407,9 +415,9 @@ Additive only, `if not exists` throughout, RLS enabled with zero policies on eve
 Nothing in Chisme's own tables is touched — no `events`, `venues`, `trends`, `runs`,
 `ig_posts`, `ig_post_metrics` or `ig_post_edits`.
 
-Storage is optional. With `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` unset, `Storage`
-disables itself and the feed still answers, the same way `storage.py` degrades in the
-scraper engine.
+Storage is optional. With `SUPABASE_URL` and `SUPABASE_KEY` unset (the engine's own
+settings), `BorderStore` disables itself and the feed still answers, the same way
+`core/storage.py` degrades. It uses the engine's Supabase client, pushed to a thread.
 
 ## Chat with it
 

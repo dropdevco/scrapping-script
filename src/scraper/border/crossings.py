@@ -8,7 +8,6 @@ when it mattered, not on a later, luckier reading.
 """
 from __future__ import annotations
 
-import threading
 import uuid
 from datetime import datetime, timedelta
 
@@ -49,10 +48,9 @@ class CrossingLog:
     def __init__(self, storage, clock):
         self._storage = storage
         self._clock = clock
-        self._lock = threading.Lock()
         self._crossings: dict[str, dict] = {}
 
-    def start(self, row: dict, reporter: str | None = None) -> dict:
+    async def start(self, row: dict, reporter: str | None = None) -> dict:
         """row is a decorated lane (BorderFeed.bridge) at the moment they join the line."""
         if row.get("state") != "open":
             raise CrossingError("that lane is not open right now", "not_open")
@@ -67,20 +65,18 @@ class CrossingLog:
             "claims": _claims(row),
             "reporter": reporter,
         }
-        with self._lock:
-            self._crossings[crossing["id"]] = crossing
-        self._storage.save_crossing(dict(crossing))
+        self._crossings[crossing["id"]] = crossing
+        await self._storage.save_crossing(dict(crossing))
         return dict(crossing)
 
-    def finish(self, crossing_id: str) -> dict:
+    async def finish(self, crossing_id: str) -> dict:
         try:
             crossing_id = str(uuid.UUID(crossing_id))   # never put raw input in a query
         except (ValueError, AttributeError, TypeError):
             raise CrossingError("no such crossing", "unknown") from None
-        with self._lock:
-            crossing = self._crossings.get(crossing_id)
+        crossing = self._crossings.get(crossing_id)
         if crossing is None:
-            crossing = self._storage.get_crossing(crossing_id)
+            crossing = await self._storage.get_crossing(crossing_id)
             if crossing is None:
                 raise CrossingError("no such crossing", "unknown")
         if crossing.get("finished_at"):
@@ -93,22 +89,20 @@ class CrossingLog:
                                 "implausible")
 
         crossing = {**crossing, "finished_at": now.isoformat(), "actual_minutes": actual}
-        with self._lock:
-            self._crossings[crossing_id] = crossing
-        self._storage.finish_crossing(crossing_id, crossing["finished_at"], actual)
+        self._crossings[crossing_id] = crossing
+        await self._storage.finish_crossing(crossing_id, crossing["finished_at"], actual)
         return {**crossing, "errors": {c["source"]: c["minutes"] - actual
                                        for c in crossing["claims"] if c.get("minutes") is not None}}
 
-    def accuracy(self, days: int = 30) -> dict:
+    async def accuracy(self, days: int = 30) -> dict:
         """How far each source was from what people actually waited.
 
         error = claimed − actual, so a positive bias means the source over-states the
         wait and a negative one means it promises less than people get.
         """
         since = self._clock() - timedelta(days=days)
-        finished = {c["id"]: c for c in self._storage.crossings_since(since.isoformat())}
-        with self._lock:
-            finished.update({i: c for i, c in self._crossings.items() if c.get("finished_at")})
+        finished = {c["id"]: c for c in await self._storage.crossings_since(since.isoformat())}
+        finished.update({i: c for i, c in self._crossings.items() if c.get("finished_at")})
         finished = {i: c for i, c in finished.items()
                     if c.get("actual_minutes") is not None
                     and datetime.fromisoformat(c["finished_at"]) >= since}

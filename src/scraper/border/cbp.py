@@ -14,25 +14,19 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import json
 import re
-import time
-import urllib.error
 from collections.abc import Iterator
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 
-from . import http
+from ..core.eventtime import event_tz
+from ..core.http import HttpClient
 
 FEED_URL = "https://bwt.cbp.gov/api/waittimes"
-LOCAL_TZ = ZoneInfo("America/Denver")
-# ASCII only: HTTP headers are latin-1, and an en dash here raises at request time.
-USER_AGENT = "ChismeBorderFeed/0.1 (El Paso-Juarez border wait times)"
+# The engine's zone, not a second copy of it: El Paso and Juárez share one clock, and a
+# wait-time "cruzas 9:40" must agree with the event times on the same account.
+LOCAL_TZ = event_tz()
 FRESH_MINUTES = 90  # CBP posts roughly hourly; older than this reads as stale
-RETRY_STATUSES = {429, 500, 502, 503, 504}
-MAX_RETRIES = 3
-MAX_BACKOFF = 30.0
 DAY_MINUTES = 24 * 60
 # A stamp CBP dated in the future hides when the reading was really taken. Reporting it
 # as age 0 would make the least trustworthy number win every freshness comparison.
@@ -76,9 +70,9 @@ LOOKUP_STOPWORDS = {"puente", "puentes", "bridge", "international", "internacion
 
 STATES = {"no delay": "open", "delay": "open", "lanes closed": "closed", "update pending": "no_data"}
 NULLISH = {"", "n/a", "-", "none"}
-STAMP_RE = re.compile(r"(\d{1,2}):(\d{2})\s*(am|pm)", re.I)
+STAMP_RE = re.compile(r"(\d{1,2}):(\d{2})\s*(am|pm)", re.IGNORECASE)
 # Hours arrive as "24 hrs/day", "6 am-Midnight", "6 am-10 pm".
-HOURS_RE = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?|noon|midnight", re.I)
+HOURS_RE = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?|noon|midnight", re.IGNORECASE)
 # CBP writes the two turning points as words: "At Noon MDT", "At Midnight MDT".
 WORD_TIMES = {"noon": (12, 0), "midnight": (0, 0)}
 
@@ -347,7 +341,7 @@ def _port(raw: dict, now: datetime) -> Port:
 
 
 def build(feed: list[dict], now: datetime | None = None) -> Snapshot:
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     by_number = {p["port_number"]: p for p in feed if p.get("port_number") in PORTS}
     ports = [_port(by_number[n], now) for n in sorted(PORTS, key=lambda n: PORTS[n]["order"]) if n in by_number]
     return Snapshot(
@@ -358,32 +352,11 @@ def build(feed: list[dict], now: datetime | None = None) -> Snapshot:
     )
 
 
-def fetch(url: str = FEED_URL, timeout: int = 30, retries: int = MAX_RETRIES,
-          sleep=time.sleep) -> list[dict]:
-    """Read the feed, retrying the failures that are worth retrying.
-
-    Same shape as the scraper engine's http.py: retry on {429, 500, 502, 503, 504}
-    and transport errors, exponential backoff capped at 30s, honour a numeric
-    Retry-After. One flaky moment must not cost a post.
-    """
-    last: Exception | None = None
-
-    for attempt in range(retries + 1):
-        try:
-            return json.loads(http.get(url, timeout, USER_AGENT))
-        except urllib.error.HTTPError as exc:
-            last = exc
-            after = exc.headers.get("Retry-After") if exc.headers else None
-            exc.close()   # release the socket now rather than whenever GC gets to it
-            if exc.code not in RETRY_STATUSES or attempt == retries:
-                raise
-            wait = float(after) if (after or "").strip().isdigit() else min(2.0 ** attempt, MAX_BACKOFF)
-            sleep(min(wait, MAX_BACKOFF))
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-            last = exc
-            if attempt == retries:
-                raise
-            sleep(min(2.0 ** attempt, MAX_BACKOFF))
-
-    raise last if last else RuntimeError("fetch failed without an error")
-
+async def fetch(http: HttpClient, url: str = FEED_URL) -> list[dict]:
+    """Read the feed through the engine's client, which already retries 429 and 5xx
+    with backoff, honours Retry-After, and negotiates gzip (93 KB -> 9 KB). The feed
+    sends no ETag or Last-Modified, so conditional GET is not available."""
+    payload = await http.get_json(url)
+    if not isinstance(payload, list):
+        raise TypeError(f"CBP feed returned {type(payload).__name__}, expected a list of ports")
+    return payload

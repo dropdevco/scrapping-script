@@ -7,9 +7,7 @@ rather than raising, which is why a healthy page's ports are declared up front.
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import Callable, Hashable
 
 from .sources import Reading
 
@@ -35,27 +33,6 @@ class SourceStatus:
             return self.state
         separator = ": " if self.state in ("empty", "failed") else " "
         return f"{self.state}{separator}{self.detail}"
-
-
-MAX_WORKERS = 8           # a fresh process's storage prefetch is the widest fan-out
-
-
-def fetch_all(jobs: list[tuple[Hashable, Callable[[], object]]]) -> dict:
-    """Run every job at once: total latency is the slowest source, not the sum.
-
-    Returns key -> (True, value) or (False, exception); nothing raises from here.
-    """
-    def run(job):
-        key, call = job
-        try:
-            return key, (True, call())
-        except Exception as exc:
-            return key, (False, exc)
-
-    if not jobs:
-        return {}
-    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(jobs))) as pool:
-        return dict(pool.map(run, jobs))
 
 
 def judge(source, readings: list[Reading]) -> SourceStatus:
@@ -103,9 +80,12 @@ def compare_mirrors(readings: list[Reading]) -> dict:
         mine = ours.get((reading.port_number, reading.lane))
         if mine is None:
             continue
-        # The mirror is cached longer than CBP. Once CBP publishes, the two describe
-        # different updates and a difference says nothing about our parsing.
-        if mine.label and reading.label and not same_update(mine.label, reading.label):
+        # Only a reading of the SAME CBP update says anything about our parsing. The
+        # mirror lags CBP: live at 00:12 MDT on 2026-09-29 it still read "Update pending"
+        # (no stamp at all) for a lane CBP already had at 25 min, and the check reported
+        # our parser as broken. So both sides must carry the stamp, and it must match;
+        # anything else is counted as skipped rather than compared.
+        if not (mine.label and reading.label and same_update(mine.label, reading.label)):
             skipped += 1
             continue
         compared += 1

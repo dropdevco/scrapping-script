@@ -14,8 +14,8 @@ back the `cursor` from its last answer and receives only what is newer.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import threading
 from datetime import datetime, timedelta
 
 MEMORY_HOURS = 48          # events older than this are served from nowhere; nobody asks
@@ -37,13 +37,13 @@ class AlertBook:
     def __init__(self, storage, clock):
         self._storage = storage
         self._clock = clock
-        self._lock = threading.Lock()
+        self._lock = asyncio.Lock()
         self._events: dict[str, dict] = {}     # id -> event, oldest first
         self._latest: dict[Key, dict] = {}     # the newest alert per key: its arm state
         self._loaded = False
 
     # -- state -------------------------------------------------------------
-    def _load(self) -> None:
+    async def _load(self) -> None:
         """Pick up what earlier processes sent. Once per process, on first use."""
         if self._loaded:
             return
@@ -51,7 +51,7 @@ class AlertBook:
         if not self._storage.enabled:
             return
         since = self._clock() - timedelta(hours=MEMORY_HOURS)
-        for row in sorted(self._storage.alerts_since(since.isoformat()), key=_at):
+        for row in sorted(await self._storage.alerts_since(since.isoformat()), key=_at):
             self._remember(dict(row))
 
     def _remember(self, event: dict) -> None:
@@ -78,18 +78,18 @@ class AlertBook:
         return [e for e in self._events.values() if e["lane"] == lane and int(e["below"]) == below]
 
     # -- detection ---------------------------------------------------------
-    def check(self, port_number: str, lane: str, below: int, minutes: int,
-              previous: int | None, reading_hash: str) -> dict | None:
+    async def check(self, port_number: str, lane: str, below: int, minutes: int,
+                    previous: int | None, reading_hash: str) -> dict | None:
         """Record an alert if this reading is a fresh crossing under `below`."""
-        with self._lock:
-            self._load()
+        async with self._lock:
+            await self._load()
             key = (port_number, lane, below)
             latest = self._latest.get(key)
             armed = latest is None or latest.get("rearmed_at") is not None
 
             if not armed and minutes >= below + REARM_MARGIN:
                 latest["rearmed_at"] = self._clock().isoformat()
-                self._storage.rearm_alert(latest["id"], latest["rearmed_at"])
+                await self._storage.rearm_alert(latest["id"], latest["rearmed_at"])
                 armed = True
 
             if previous is None or previous < below or minutes >= below or not armed:
@@ -102,17 +102,17 @@ class AlertBook:
                      "reading_hash": reading_hash,
                      "detected_at": self._next_time().isoformat(), "rearmed_at": None}
             self._remember(event)
-            self._storage.save_alert(dict(event))
+            await self._storage.save_alert(dict(event))
             self._trim()
             return event
 
     # -- reading -----------------------------------------------------------
-    def events(self, lane: str, below: int, since: datetime | None = None,
-               current: dict[str, str] | None = None) -> list[dict]:
+    async def events(self, lane: str, below: int, since: datetime | None = None,
+                     current: dict[str, str] | None = None) -> list[dict]:
         """With `since`, everything newer. Without it, alerts still describing the
         current reading — the same answer however many times it is asked."""
-        with self._lock:
-            self._load()
+        async with self._lock:
+            await self._load()
             mine = self._mine(lane, below)
             if since is not None:
                 return [dict(e) for e in mine if _at(e) > since]
@@ -120,6 +120,5 @@ class AlertBook:
             return [dict(e) for e in mine if current.get(e["port_number"]) == e["reading_hash"]]
 
     def cursor(self, lane: str, below: int) -> str | None:
-        with self._lock:
-            mine = self._mine(lane, below)
-            return mine[-1]["detected_at"] if mine else None
+        mine = self._mine(lane, below)
+        return mine[-1]["detected_at"] if mine else None

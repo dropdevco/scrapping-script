@@ -34,10 +34,14 @@ SHORT_NAMES = {   # what people call them in a one-line list
 
 
 def _clock(iso: str | None, lang: str) -> str:
+    """'9:40 p. m.' / '9:40 pm'. Hand-rolled rather than strftime("%-I"): that flag is
+    glibc-only and this must render identically on CI (Linux) and local Windows."""
     if not iso:
         return "?"
-    text = datetime.fromisoformat(iso).strftime("%-I:%M %p").lower()
-    return text.replace("am", "a. m.").replace("pm", "p. m.") if lang == "es" else text
+    at = datetime.fromisoformat(iso)
+    afternoon = at.hour >= 12
+    meridiem = ("p. m." if afternoon else "a. m.") if lang == "es" else ("pm" if afternoon else "am")
+    return f"{at.hour % 12 or 12}:{at.minute:02d} {meridiem}"
 
 
 def _pick(en: str, es: str, lang: str) -> str:
@@ -164,7 +168,7 @@ def caption(feed, snapshot: Snapshot, lang: str = "es") -> str:
     lines = [("Puentes Juárez–El Paso" if es else "Juárez–El Paso bridges")
              + f" · {_clock(snapshot.local_at.isoformat(), lang)}"]
 
-    best = feed.best(HEADLINE_LANE, snapshot)
+    best = feed.best_in(snapshot, HEADLINE_LANE)
     if best:
         name = _row_name(best, lang)
         # A disputed headline shows the range, so nobody is promised the optimistic end.
@@ -175,7 +179,7 @@ def caption(feed, snapshot: Snapshot, lang: str = "es") -> str:
     lines.append("")
 
     lines.append(_label(HEADLINE_LANE, lang))
-    for row in feed.ranked(HEADLINE_LANE, snapshot):
+    for row in feed.ranked_in(snapshot, HEADLINE_LANE):
         short = _short(row["port_number"], _row_name(row, lang), lang)
         if row["state"] == "open" and row.get("sources_disagree"):
             lines.append(f"{short} {row['optimistic_minutes']}–{row['planning_minutes']} min")
@@ -191,7 +195,7 @@ def caption(feed, snapshot: Snapshot, lang: str = "es") -> str:
     for lane_id in CAPTION_LANES:
         if lane_id == HEADLINE_LANE:
             continue
-        open_rows = [r for r in feed.ranked(lane_id, snapshot) if r["state"] == "open"]
+        open_rows = [r for r in feed.ranked_in(snapshot, lane_id) if r["state"] == "open"]
         if not open_rows:
             continue
         parts = [f"{_short(r['port_number'], _row_name(r, lang), lang)} {r['minutes']}" for r in open_rows]
@@ -340,8 +344,8 @@ def my_digest(rows: list[dict], best: dict | None, lane_id: str, lang: str = "es
                 if r["state"] == "open" and r.get("effective_minutes") is not None]
         if mine and min(mine) - best["effective_minutes"] >= 10:
             name = _row_name(best, lang)
-            lines.append((f"Más rápido: {name} {best['minutes']} min."
-                          if es else f"Faster: {name} at {best['minutes']} min."))
+            lines.append(f"Más rápido: {name} {best['minutes']} min."
+                          if es else f"Faster: {name} at {best['minutes']} min.")
     return "\n".join(lines)
 
 

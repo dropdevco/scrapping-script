@@ -14,9 +14,11 @@ Run it next to the pipeline:  python -m border.api --port 8088
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+import threading
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -24,7 +26,7 @@ from .cbp import LANE_LABELS
 from .crossings import CrossingError
 from .service import BorderFeed, FeedError
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("scraper.border.api")
 DEFAULT_LANE = "car"
 DEFAULT_LANG = "es"
 MAX_BODY = 10_000
@@ -45,7 +47,7 @@ def _parse_since(raw: str) -> datetime:
         when = datetime.fromisoformat(raw.replace(" ", "+"))   # a bare "+" in a query decodes as a space
     except ValueError:
         raise BadRequest("since must be the cursor from a previous /drops answer") from None
-    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
 
 
 def _lanes(raw: str | None, many: bool = False) -> list[str]:
@@ -66,7 +68,7 @@ def _whole(raw: str | None, what: str, low: int | None = None, high: int | None 
     return int(text)
 
 
-def route(feed: BorderFeed, path: str, query: dict[str, list[str]], method: str = "GET",
+async def route(feed: BorderFeed, path: str, query: dict[str, list[str]], method: str = "GET",
           body: dict | None = None) -> tuple[int, dict]:
     """(status, body). Never raises: the pipeline gets a shaped error instead."""
     def one(key: str, default: str | None = None) -> str | None:
@@ -75,32 +77,32 @@ def route(feed: BorderFeed, path: str, query: dict[str, list[str]], method: str 
     parts = [unquote(p) for p in path.strip("/").split("/") if p]
     try:
         if method == "POST":
-            return _post(feed, parts, body or {})
+            return await _post(feed, parts, body or {})
         lang = one("lang", DEFAULT_LANG)
         if not parts:
             return 200, {"service": "chisme-border", "endpoints": ENDPOINTS}
         if parts == ["health"]:
-            return 200, feed.health()
+            return 200, await feed.health()
         if parts == ["waits"]:
-            return 200, feed.waits(lang, tuple(_lanes(one("lane"), many=True)) if one("lane") else None)
+            return 200, await feed.waits(lang, tuple(_lanes(one("lane"), many=True)) if one("lane") else None)
         if len(parts) == 2 and parts[0] == "waits":
-            answer = feed.bridge(parts[1], _lanes(one("lane"))[0], lang)
+            answer = await feed.bridge(parts[1], _lanes(one("lane"))[0], lang)
             return (200 if answer.get("found") else 404), answer
         if parts == ["mine"]:
             ports = [p for p in (one("ports") or "").split(",") if p]
             if not ports:
                 raise BadRequest("ports is required: a comma-separated list of bridges")
-            return 200, feed.my_digest(ports, _lanes(one("lane"))[0], lang)
+            return 200, await feed.my_digest(ports, _lanes(one("lane"))[0], lang)
         if parts == ["best"]:
             lane = _lanes(one("lane"))[0]
-            best = feed.best(lane)
+            best = await feed.best(lane)
             return (200, best) if best else (503, {"error": f"no bridge is reporting {lane} right now"})
         if parts == ["drops"]:
             below = _whole(one("below"), "below is required and must be a whole number of minutes")
             since = _parse_since(one("since")) if one("since") else None
-            return 200, feed.drops(below, _lanes(one("lane"))[0], lang, since)
+            return 200, await feed.drops(below, _lanes(one("lane"))[0], lang, since)
         if parts == ["accuracy"]:
-            return 200, feed.accuracy(_whole(one("days", "30"), "days must be a whole number from 1 to 365", 1, 365))
+            return 200, await feed.accuracy(_whole(one("days", "30"), "days must be a whole number from 1 to 365", 1, 365))
         return 404, {"error": f"no such endpoint: /{'/'.join(parts)}"}
     except BadRequest as exc:
         return 400, {"error": str(exc), **exc.extra}
@@ -112,30 +114,36 @@ def route(feed: BorderFeed, path: str, query: dict[str, list[str]], method: str 
         return 500, {"error": f"{type(exc).__name__}: {exc}"}
 
 
-def _post(feed: BorderFeed, parts: list[str], body: dict) -> tuple[int, dict]:
+async def _post(feed: BorderFeed, parts: list[str], body: dict) -> tuple[int, dict]:
     lang = str(body.get("lang") or DEFAULT_LANG)
     try:
         if parts == ["crossings"]:
             if not body.get("port"):
                 raise BadRequest("port is required")
             reporter = body.get("reporter")
-            return 201, feed.start_crossing(str(body["port"]), _lanes(body.get("lane"))[0], lang,
+            return 201, await feed.start_crossing(str(body["port"]), _lanes(body.get("lane"))[0], lang,
                                             str(reporter) if reporter else None)
         if len(parts) == 3 and parts[0] == "crossings" and parts[2] == "done":
-            return 200, feed.finish_crossing(parts[1], lang)
+            return 200, await feed.finish_crossing(parts[1], lang)
     except CrossingError as exc:
         return exc.http_status, {"error": str(exc), "code": exc.code}
     return 404, {"error": f"no such endpoint: POST /{'/'.join(parts)}"}
 
 
 class Handler(BaseHTTPRequestHandler):
+    """The stdlib server answers on a thread per request; the feed lives on one event
+    loop, so every request is handed to that loop and waited on."""
     feed: BorderFeed
+    loop: asyncio.AbstractEventLoop
 
-    def do_GET(self):  # noqa: N802 - stdlib naming
+    def _run(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop).result()
+
+    def do_GET(self):
         parsed = urlparse(self.path)
-        self._respond("GET", *route(self.feed, parsed.path, parse_qs(parsed.query)))
+        self._respond("GET", *self._run(route(self.feed, parsed.path, parse_qs(parsed.query))))
 
-    def do_POST(self):  # noqa: N802 - stdlib naming
+    def do_POST(self):
         parsed = urlparse(self.path)
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY:
@@ -146,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._respond("POST", 400, {"error": "body must be JSON"})
         if not isinstance(body, dict):
             return self._respond("POST", 400, {"error": "body must be a JSON object"})
-        self._respond("POST", *route(self.feed, parsed.path, parse_qs(parsed.query), "POST", body))
+        self._respond("POST", *self._run(route(self.feed, parsed.path, parse_qs(parsed.query), "POST", body)))
 
     def _respond(self, method: str, status: int, body: dict) -> None:
         payload = json.dumps(body, ensure_ascii=False, indent=2).encode()
@@ -169,7 +177,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(port: int = 8088, host: str = "127.0.0.1") -> None:
-    Handler.feed = BorderFeed()
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, name="border-feed", daemon=True).start()
+    Handler.feed, Handler.loop = BorderFeed(), loop
     server = ThreadingHTTPServer((host, port), Handler)
     print(f"chisme-border listening on http://{host}:{port}")
     server.serve_forever()

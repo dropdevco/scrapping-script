@@ -53,7 +53,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # The pip cache keys on a dependency file and looks for requirements.txt by
+          # default; this repo has none, and a cache step that finds nothing to key on
+          # fails the job before the poll starts. pyproject.toml is where the deps live.
           cache: pip
+          cache-dependency-path: pyproject.toml
 
       # [kb] brings gspread for the sheet step, the same extra the scrape job uses.
       - name: Install
@@ -101,7 +105,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # The pip cache keys on a dependency file and looks for requirements.txt by
+          # default; this repo has none, and a cache step that finds nothing to key on
+          # fails the job before the poll starts. pyproject.toml is where the deps live.
           cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install
         run: |

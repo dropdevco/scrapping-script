@@ -2,12 +2,13 @@
 
     python -m scraper.border poll [--prune] [--dry-run]   # record one reading (GitHub Actions)
     python -m scraper.border selfcheck [--json]           # does live CBP still parse?
+    python -m scraper.border sheet [--dry-run]            # publish crossing times to the KB sheet
     python -m scraper.border serve [--port 8088]          # local HTTP pull surface
     python -m scraper.border chat                         # the DM experience in a terminal
     python -m scraper.border demo                         # five scripted scenes
     python -m scraper.border simulate                     # a fake Instagram against the feed
 
-Each command is also its own module (python -m scraper.border.poll, ...). Only poll and
+Each command is also its own module (python -m scraper.border.poll, ...). poll, sheet and
 selfcheck are production; serve and the three rehearsal tools are for local use, the
 way mcp_server.py is.
 """
@@ -20,6 +21,7 @@ import sys
 COMMANDS = {
     "poll": "scraper.border.poll",
     "selfcheck": "scraper.border.selfcheck",
+    "sheet": "scraper.border.sheet",
     "serve": "scraper.border.api",
     "chat": "scraper.border.devtools.chat",
     "demo": "scraper.border.devtools.demo",

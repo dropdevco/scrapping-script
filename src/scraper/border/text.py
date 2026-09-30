@@ -558,11 +558,16 @@ def wait_words(state: str, minutes: int | None, lang: str = "es") -> str:
 
 
 def current_summary(bridge: str, lane_label: str, wait: str, source: str | None,
-                    checked_iso: str, lang: str = "es") -> str:
-    """One sentence the bot can quote as it stands."""
+                    checked_iso: str, lang: str = "es", known_as: list[str] | None = None) -> str:
+    """One sentence the bot can quote as it stands, ending with the names people use for
+    the bridge — the knowledge base retrieves on this sentence, and "Centro" appears in
+    no official name."""
+    names = _joined(known_as or [], lang).replace(" y ", " o ").replace(" and ", " or ")
     if lang == "es":
         cited = f" según {source}" if source else ""
-        return f"{bridge} · {lane_label}: {wait}{cited} (revisado el {stamp(checked_iso, lang)})."
+        also = f" También le dicen {names}." if names else ""
+        return f"{bridge} · {lane_label}: {wait}{cited} (revisado el {stamp(checked_iso, lang)}).{also}"
     cited = f" per {source}" if source else ""
-    return f"{bridge} · {lane_label}: {wait}{cited} (checked {stamp(checked_iso, lang)})."
+    also = f" Also known as {names}." if names else ""
+    return f"{bridge} · {lane_label}: {wait}{cited} (checked {stamp(checked_iso, lang)}).{also}"
 

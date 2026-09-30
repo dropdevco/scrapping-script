@@ -97,6 +97,11 @@ class BorderStore:
             "keep_alerts_days": keep_alerts_days}))
 
     # -- reads -------------------------------------------------------------
+    async def current_waits(self) -> list[dict]:
+        """Every row of border_current_waits, for the knowledge-base sheet."""
+        return await self._call("current_waits", lambda c: c.table("border_current_waits")
+                                .select("*").order("port_number").order("lane")) or []
+
     async def recent_readings(self, port_number: str, lane: str, limit: int = 3) -> list[dict]:
         """Newest first. Used to tell a genuine drop from a first sighting."""
         return await self._call("recent_readings", lambda c: c.table("border_readings").select("*")

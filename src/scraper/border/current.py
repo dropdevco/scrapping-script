@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from . import text
-from .cbp import LANE_LABELS, LOCAL_TZ, Snapshot
+from .cbp import LANE_LABELS, LOCAL_TZ, PORTS, Snapshot
 
 # How a source is named in a sentence a follower may read; the source column keeps the id.
 SOURCE_NAMES = {"cbp": "CBP", "pasosfronterizos": "pasosfronterizos.com"}
@@ -31,6 +31,7 @@ def rows(feed, snap: Snapshot, checked_at: datetime) -> list[dict]:
             minutes = (decision.minutes if decision else lane.delay_minutes) if state == "open" else None
             source = (decision.chosen_source if decision else "cbp") if state == "open" else "cbp"
             lane_en, lane_es = LANE_LABELS[lane_id]
+            known_as = PORTS.get(port.port_number, {}).get("known_as", [])
             row = {
                 "port_number": port.port_number,
                 "lane": lane_id,
@@ -45,12 +46,13 @@ def rows(feed, snap: Snapshot, checked_at: datetime) -> list[dict]:
                 "lanes_open": lane.lanes_open,
                 "cbp_updated_at": lane.cbp_updated_at,
                 "checked_at": checked_at.isoformat(),
+                "also_known_as": ", ".join(known_as) or "Not listed",
             }
             for lang, bridge, label in (("es", port.name_es, lane_es), ("en", port.name, lane_en)):
                 wait = text.wait_words(state, minutes, lang)
                 row[f"wait_{lang}"] = wait
                 row[f"summary_{lang}"] = text.current_summary(
                     bridge, label, wait, SOURCE_NAMES.get(source, source) if state == "open" else None,
-                    checked_local, lang)
+                    checked_local, lang, known_as)
             out.append(row)
     return out

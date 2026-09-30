@@ -26,7 +26,7 @@ from border_support import (  # noqa: F401 - setUpModule/tearDownModule are hook
 from scraper.border import current
 from scraper.border.sources.base import Reading
 
-TEXT_COLUMNS = ("bridge_es", "bridge_en", "lane_es", "lane_en", "state", "wait_es", "wait_en",
+TEXT_COLUMNS = ("also_known_as", "bridge_es", "bridge_en", "lane_es", "lane_en", "state", "wait_es", "wait_en",
                 "summary_es", "summary_en", "source", "port_number", "lane", "checked_at")
 # The lanes agreed per bridge (walking SENTRI is published by no source and was dropped).
 AGREED = {
@@ -76,9 +76,10 @@ class CurrentWaits(unittest.IsolatedAsyncioTestCase):
         pdn = next(r for r in rows if (r["port_number"], r["lane"]) == ("240202", "car"))
         self.assertEqual(pdn["summary_es"],
                          "Paso del Norte (Santa Fe) · Autos: 48 min según CBP "
-                         "(revisado el 22 sep 2026, 1:40 p. m.).")
+                         "(revisado el 22 sep 2026, 1:40 p. m.). También le dicen Centro, Santa Fe o PDN.")
         self.assertEqual(pdn["summary_en"],
-                         "Paso del Norte · Cars: 48 min per CBP (checked Sep 22, 2026, 1:40 pm).")
+                         "Paso del Norte · Cars: 48 min per CBP (checked Sep 22, 2026, 1:40 pm). "
+                         "Also known as Centro, Santa Fe or PDN.")
         for r in rows:
             for column in ("summary_es", "summary_en"):
                 self.assertNotRegex(r[column], re.compile(r"\bhace\b|\bago\b|\bhoy\b|\btoday\b"))
@@ -89,6 +90,16 @@ class CurrentWaits(unittest.IsolatedAsyncioTestCase):
         pdn = next(r for r in rows if (r["port_number"], r["lane"]) == ("240202", "car"))
         self.assertEqual((pdn["minutes"], pdn["cbp_minutes"], pdn["source"]), (20, 48, "pasosfronterizos"))
         self.assertIn("según pasosfronterizos.com", pdn["summary_es"])
+
+    async def test_the_names_from_the_meeting_are_in_every_row(self):
+        """"¿cómo está Centro?" must find a row: Centro is in no official name."""
+        rows, _ = await self.rows()
+        by_port = {r["port_number"]: r for r in rows}
+        for port, name in (("240202", "Centro"), ("240201", "Puente Libre"),
+                           ("240204", "Lerdo"), ("240203", "Zaragoza")):
+            with self.subTest(name=name):
+                self.assertIn(name, by_port[port]["also_known_as"])
+                self.assertIn(name, by_port[port]["summary_es"])
 
     async def test_checked_at_is_the_run_time(self):
         rows, _ = await self.rows()

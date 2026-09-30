@@ -32,21 +32,31 @@ DAY_MINUTES = 24 * 60
 # as age 0 would make the least trustworthy number win every freshness comparison.
 UNKNOWN_AGE = 45
 
-# Registry mirrors border_ports in 0001_border_waits.sql. Kept in code as well so the
+# known_as: the names people actually call a bridge, as the meeting of 2026-09-29 did
+# ("Centro", "Puente Libre", "Lerdo", "Zaragoza"). Curated and correctly spelled — they
+# are written into the knowledge base — unlike `aliases`, which also carries the
+# misspellings the lookup has to tolerate.
+# Registry mirrors border_ports in 0013_border_waits.sql. Kept in code as well so the
 # feed works with no database, the way Storage degrades to a no-op.
 PORTS: dict[str, dict] = {
     "240202": {"name": "Paso del Norte", "name_es": "Paso del Norte (Santa Fe)", "slug": "paso-del-norte",
-               "aliases": ["pdn", "santa fe", "puente santa fe", "centro"], "order": 10},
+               "aliases": ["pdn", "santa fe", "puente santa fe", "centro"], "order": 10,
+               "known_as": ["Centro", "Santa Fe", "PDN"]},
     "240203": {"name": "Ysleta–Zaragoza", "name_es": "Zaragoza–Ysleta", "slug": "ysleta",
-               "aliases": ["zaragoza", "zaragosa", "ysleta", "zaragoza-ysleta"], "order": 20},
+               "aliases": ["zaragoza", "zaragosa", "ysleta", "zaragoza-ysleta"], "order": 20,
+               "known_as": ["Zaragoza", "Ysleta"]},
     "240201": {"name": "Bridge of the Americas", "name_es": "Puente Libre (Córdova–Américas)", "slug": "bota",
-               "aliases": ["bota", "libre", "puente libre", "cordova", "córdova", "free bridge", "americas"], "order": 30},
+               "aliases": ["bota", "libre", "puente libre", "cordova", "córdova", "free bridge", "americas"], "order": 30,
+               "known_as": ["Puente Libre", "Córdova", "Américas", "BOTA"]},
     "240204": {"name": "Stanton–Lerdo", "name_es": "Lerdo–Stanton", "slug": "stanton",
-               "aliases": ["stanton", "lerdo", "good neighbor"], "order": 40},
+               "aliases": ["stanton", "lerdo", "good neighbor"], "order": 40,
+               "known_as": ["Lerdo", "Stanton"]},
     "240801": {"name": "Santa Teresa", "name_es": "Jerónimo–Santa Teresa", "slug": "santa-teresa",
-               "aliases": ["santa teresa", "jeronimo", "jerónimo", "san jeronimo"], "order": 50},
+               "aliases": ["santa teresa", "jeronimo", "jerónimo", "san jeronimo"], "order": 50,
+               "known_as": ["Jerónimo", "San Jerónimo"]},
     "240221": {"name": "Tornillo–Guadalupe", "name_es": "Guadalupe–Tornillo", "slug": "tornillo",
-               "aliases": ["tornillo", "guadalupe", "marcelino serna"], "order": 60},
+               "aliases": ["tornillo", "guadalupe", "marcelino serna"], "order": 60,
+               "known_as": ["Guadalupe", "Marcelino Serna"]},
 }
 
 # feed group -> feed lane key -> our lane id

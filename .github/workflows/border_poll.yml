@@ -6,7 +6,7 @@ name: border-poll
 # src/scraper/border/poll.py. GitHub Actions is the only scheduler in this system; the
 # poller takes one reading and exits.
 #
-# Needs migrations 0013-0016 applied first. Until they are, every write fails, the
+# Needs migrations 0013-0017 applied first. Until they are, every write fails, the
 # poller exits 3, and this workflow goes red — deliberately, rather than running green
 # while recording nothing (ADR-0011).
 on:
@@ -55,10 +55,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # [kb] brings gspread for the sheet step, the same extra the scrape job uses.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e ".[kb]"
 
       # Exit codes: 1 CBP unreadable, 2 Supabase not configured, 3 a write failed.
       # All three fail the run, which is what makes GitHub email the owner.
@@ -72,6 +73,20 @@ jobs:
           else
             python -m scraper.border poll --quiet
           fi
+
+      # Supabase -> Google Sheet -> GoHighLevel: republish the crossing times to their tab
+      # of the knowledge-base sheet from what the poll just stored. Off until the repo
+      # variable BORDER_KB_TAB names the tab (the engine ships features inert), and never
+      # fatal, matching the kb export in scheduled-scrape: a Sheets outage must not fail
+      # the reading that already landed.
+      - name: Publish crossing times to the knowledge-base sheet
+        if: ${{ vars.BORDER_KB_TAB != '' }}
+        continue-on-error: true
+        env:
+          BORDER_KB_TAB: ${{ vars.BORDER_KB_TAB }}
+          KB_SHEET_ID: ${{ secrets.KB_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python -m scraper.border sheet
 
   # Unit tests run on saved CBP responses, so they stay green through exactly the kind
   # of drift this catches: a renamed field, a new status word, a scraped page that

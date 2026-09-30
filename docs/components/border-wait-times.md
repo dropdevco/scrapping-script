@@ -15,13 +15,13 @@ poller starts once this branch is on `main`. What is left is in [Wiring it in](#
 
 |                          |                                                                                                                                                                                                                |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Entry point**          | `python -m scraper.border <poll\|selfcheck\|serve\|chat\|demo\|simulate>`                                                                                                                                      |
+| **Entry point** | `python -m scraper.border <poll\|sheet\|selfcheck\|serve\|chat\|demo\|simulate>` |
 | **Runs on** | GitHub Actions (`border-poll`): a reading every 10 min; retention + live selfcheck daily at 10:20 UTC |
 | **Reads**                | CBP's public feed (`bwt.cbp.gov/api/waittimes`), `pasosfronterizos.com`, `borderswaittime.com` (a CBP mirror, used only to check our parser)                                                                   |
-| **Writes** | `border_current_waits` (the knowledge-base feed), `border_ports`, `border_readings`, `border_runs`, `border_alerts`, `border_crossings` (migrations `0013`–`0016`) |
+| **Writes** | `border_current_waits` and the crossing-times tab of the knowledge-base Google Sheet (the bot's feed), `border_ports`, `border_readings`, `border_runs`, `border_alerts`, `border_crossings` (migrations `0013`–`0017`) |
 | **Requires**             | Nothing for live answers. `SUPABASE_URL` + `SUPABASE_KEY` for history, deltas that survive a restart, alerts and "normal for this hour"                                                                        |
 | **Uses from the engine** | `core.http.HttpClient` (retries, robots.txt, gzip, `USER_AGENT`), `core.config.settings`, `core.eventtime.event_tz()`, the Supabase client from `core.storage.Storage`, `ENABLED_SOURCES` / `DISABLED_SOURCES` |
-| **Tests** | `tests/border/` — 355 tests, one file per module (`pytest tests/border -q`) |
+| **Tests** | `tests/border/` — 366 tests, one file per module (`pytest tests/border -q`) |
 
 ---
 
@@ -30,6 +30,7 @@ poller starts once this branch is on `main`. What is left is in [Wiring it in](#
 | Command                                      | What it does                                                                                                                         | Where it runs                                 |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------- |
 | `poll [--prune] [--keep-days N] [--dry-run]` | Takes one reading, upserts `border_current_waits`, and exits. Exit 1: CBP unreadable; 2: Supabase unset; **3: a database write failed** | `border-poll`, every 10 min (`--prune` daily) |
+| `sheet [--dry-run] [--out F]` | Republishes `border_current_waits` to the knowledge-base sheet's crossing-times tab. Off (exit 0) until `BORDER_KB_TAB` is set; refuses an empty table | `border-poll`, after every reading, non-fatal |
 | `selfcheck [--json]`                         | Asks the live feed whether it still parses: fields, ports, status words, scraped pages, and the mirror check. Exits 1 on any problem | `border-poll`, daily                          |
 | `serve [--port 8088]`                        | The local HTTP pull surface (below)                                                                                                  | Local only, like `mcp_server.py`              |
 | `chat [--from-file F --at 21:40]`            | The DM experience in a terminal                                                                                                      | Local                                         |
@@ -509,6 +510,26 @@ figure (CBP's pedestrian lanes are standard and Ready only).
 A Sheet should read the text columns. The numeric ones may be NULL (a closed lane has no
 minutes), and GoHighLevel rejects a row with any blank cell.
 
+`0017_border_current_waits_known_as.sql` adds `also_known_as` ("Centro, Santa Fe, PDN"),
+and each summary now ends with those names ("También le dicen Centro, Santa Fe o PDN.").
+The meeting called the bridges Centro, Puente Libre, Lerdo and Zaragoza, and "Centro"
+appeared in no official name, so the bot's knowledge base never contained the word
+people ask with. The names are curated per bridge in `cbp.PORTS["…"]["known_as"]`.
+
+### Into the knowledge base: `python -m scraper.border sheet`
+
+Supabase → Google Sheet → GoHighLevel. The engine's `python -m scraper.kb export` writes
+events only; this writes the crossing times to their own tab of the **same** sheet, from
+`border_current_waits`, after every poll. It keeps the kb export's contract, because the
+same importer reads it: a bilingual `content` sentence per row (rows are what GoHighLevel
+embeds), no empty cell (`Not listed` as the fallback), append-only headers, an empty
+table refused before any write, and the engine's own `write_sheet` (grow, write,
+shrink — never clear first). A newest row older than 45 minutes is logged as an error:
+the rows still say when they were checked, but a quiet sheet looks current.
+
+Headers: `content, bridge_es, bridge_en, also_known_as, lane_es, lane_en, wait_es,
+wait_en, state, minutes, source, checked_at, data_current_as_of, port_number, lane_id`.
+
 Additive only, `if not exists` throughout, RLS enabled with zero policies on every table
 (deny-all for anon; the pipeline reads with the service-role key).
 
@@ -608,6 +629,7 @@ has been done.
    python -m scraper.apply_migration supabase/migrations/0014_border_retention.sql
    python -m scraper.apply_migration supabase/migrations/0015_border_alerts_crossings_typical.sql
    python -m scraper.apply_migration supabase/migrations/0016_border_current_waits.sql
+   python -m scraper.apply_migration supabase/migrations/0017_border_current_waits_known_as.sql
    ```
    Or paste each file, in that order, into the Supabase dashboard's **SQL Editor** and run it.
    Do this **before** merging: `border-poll` starts on its schedule once the workflow
@@ -615,8 +637,12 @@ has been done.
 2. **Nothing to add for scheduling.** `.github/workflows/border_poll.yml` is new and
    reads the existing `SUPABASE_URL` / `SUPABASE_KEY` secrets. GitHub only runs a
    scheduled workflow from `main`, so it starts once this branch is merged.
-3. **Point the Sheet automation at `border_current_waits`**, reading the text columns
-   (`summary_es` is written to be quoted as it stands).
+3. **Switch on the knowledge-base tab**: set the repository variable
+   `BORDER_KB_TAB` (Settings → Secrets and variables → Actions → Variables), e.g.
+   `crossing_times`. The step reuses the existing `KB_SHEET_ID` and
+   `GOOGLE_SERVICE_ACCOUNT_JSON` secrets; the tab is created on first write. Then add
+   that tab to the GoHighLevel knowledge-base import. If the Sheet is fed some other
+   way, leave the variable unset and point that automation at `border_current_waits`.
 4. **Expose it to the local agent** — two lines in `mcp_server.py` add `border_waits`,
    `border_bridge` and `border_health`:
    ```python

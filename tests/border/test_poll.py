@@ -13,12 +13,13 @@ from border_support import (  # noqa: F401 - setUpModule/tearDownModule are hook
     ROOT,
     MemoryStore,
     feed_for,
+    load,
     raises,
     setUpModule,
     tearDownModule,
 )
 
-from scraper.border import poll
+from scraper.border import cbp, poll
 from scraper.border.service import BorderFeed, FeedError
 from scraper.border.storage import BorderStore
 
@@ -68,6 +69,9 @@ class LoudFailures(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(poll, "BorderFeed", lambda **options: feed_for("cbp_feed.json", **options)):
             self.assertEqual(await poll.run(quiet=True), 0)
         self.assertEqual(store.calls["save_readings"], 1)
+        self.assertEqual(store.calls["upsert_current"], 1)
+        lanes = sum(len(p.lanes) for p in cbp.build(load("cbp_feed.json"), NOW).ports)
+        self.assertEqual(len(store.current), lanes)    # every lane of every bridge
 
 
 class Retention(unittest.IsolatedAsyncioTestCase):

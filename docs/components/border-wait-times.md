@@ -16,12 +16,12 @@ the repo was edited. The four small hooks it still needs are in
 |                          |                                                                                                                                                                                                                |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Entry point**          | `python -m scraper.border <poll\|selfcheck\|serve\|chat\|demo\|simulate>`                                                                                                                                      |
-| **Runs on**              | GitHub Actions (`border-poll`): a reading every 15 min; retention + live selfcheck daily at 10:20 UTC                                                                                                          |
+| **Runs on** | GitHub Actions (`border-poll`): a reading every 10 min; retention + live selfcheck daily at 10:20 UTC |
 | **Reads**                | CBP's public feed (`bwt.cbp.gov/api/waittimes`), `pasosfronterizos.com`, `borderswaittime.com` (a CBP mirror, used only to check our parser)                                                                   |
-| **Writes**               | `border_ports`, `border_readings`, `border_runs`, `border_alerts`, `border_crossings` (migrations `0013`–`0015`)                                                                                               |
+| **Writes** | `border_current_waits` (the knowledge-base feed), `border_ports`, `border_readings`, `border_runs`, `border_alerts`, `border_crossings` (migrations `0013`–`0016`) |
 | **Requires**             | Nothing for live answers. `SUPABASE_URL` + `SUPABASE_KEY` for history, deltas that survive a restart, alerts and "normal for this hour"                                                                        |
 | **Uses from the engine** | `core.http.HttpClient` (retries, robots.txt, gzip, `USER_AGENT`), `core.config.settings`, `core.eventtime.event_tz()`, the Supabase client from `core.storage.Storage`, `ENABLED_SOURCES` / `DISABLED_SOURCES` |
-| **Tests** | `tests/border/` — 348 tests, one file per module (`pytest tests/border -q`) |
+| **Tests** | `tests/border/` — 355 tests, one file per module (`pytest tests/border -q`) |
 
 ---
 
@@ -29,7 +29,7 @@ the repo was edited. The four small hooks it still needs are in
 
 | Command                                      | What it does                                                                                                                         | Where it runs                                 |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------- |
-| `poll [--prune] [--keep-days N] [--dry-run]` | Takes one reading and exits. Exit 1: CBP unreadable; 2: Supabase unset; **3: a database write failed**                               | `border-poll`, every 15 min (`--prune` daily) |
+| `poll [--prune] [--keep-days N] [--dry-run]` | Takes one reading, upserts `border_current_waits`, and exits. Exit 1: CBP unreadable; 2: Supabase unset; **3: a database write failed** | `border-poll`, every 10 min (`--prune` daily) |
 | `selfcheck [--json]`                         | Asks the live feed whether it still parses: fields, ports, status words, scraped pages, and the mirror check. Exits 1 on any problem | `border-poll`, daily                          |
 | `serve [--port 8088]`                        | The local HTTP pull surface (below)                                                                                                  | Local only, like `mcp_server.py`              |
 | `chat [--from-file F --at 21:40]`            | The DM experience in a terminal                                                                                                      | Local                                         |
@@ -480,6 +480,35 @@ stopped.
 | `border_typical_waits(weeks, min_days)` | Median and p75 wait per port, lane, local weekday and hour                                                                                                                                      |
 | `border_prune(...)`                     | One retention job: readings 60 days (the typical-wait baseline looks back 8 weeks, so 0002's 30-day default would starve it), runs 14 days, re-armed alerts 30 days. Crossings are never pruned |
 
+`0016_border_current_waits.sql` adds **`border_current_waits`**, the crossing-times table
+the knowledge base reads (GitHub Actions → Supabase → Google Sheet → GoHighLevel). One row
+per bridge × lane, upserted by `border.poll` on every run, every 10 minutes:
+
+| Column | Holds |
+|---|---|
+| `bridge_es` / `bridge_en`, `lane_es` / `lane_en` | "Zaragoza–Ysleta" / "Ysleta–Zaragoza", "Peatones" / "Walking" |
+| `state` | `open`, `closed` or `no_data` |
+| `wait_es` / `wait_en` | "38 min", "1 h 15", "cerrado" / "closed", "sin datos" / "no data" — never empty |
+| `summary_es` / `summary_en` | "Paso del Norte (Santa Fe) · Autos: 48 min según CBP (revisado el 22 sep 2026, 1:40 p. m.)." |
+| `minutes`, `cbp_minutes`, `source` | What a follower is told (the fresher of CBP and pasosfronterizos), CBP's own figure, and where it came from |
+| `lanes_open`, `cbp_updated_at`, `checked_at` | Lanes open, CBP's stamp, and when this row was last written |
+
+Every lane CBP lists gets a row on every run, open or not, so a lane never silently
+drops out of the knowledge base. The lanes agreed on 2026-09-29 are all covered:
+
+| Bridge | Lanes |
+|---|---|
+| Puente Libre (Bridge of the Americas) | all traffic, Ready Lane, walking, trucks (plus walking Ready, truck FAST) |
+| Centro (Paso del Norte) | all traffic, SENTRI, Ready Lane, walking (plus walking Ready) |
+| Lerdo (Stanton) | SENTRI (the car lane is listed and usually closed) |
+| Zaragoza (Ysleta) | all traffic, SENTRI, Ready Lane, walking (plus trucks) |
+
+"Walking SENTRI" was dropped: neither CBP nor pasosfronterizos publishes a walking SENTRI
+figure (CBP's pedestrian lanes are standard and Ready only).
+
+A Sheet should read the text columns. The numeric ones may be NULL (a closed lane has no
+minutes), and GoHighLevel rejects a row with any blank cell.
+
 Additive only, `if not exists` throughout, RLS enabled with zero policies on every table
 (deny-all for anon; the pipeline reads with the service-role key).
 
@@ -575,18 +604,23 @@ below has been done.
    python -m scraper.apply_migration supabase/migrations/0013_border_waits.sql
    python -m scraper.apply_migration supabase/migrations/0014_border_retention.sql
    python -m scraper.apply_migration supabase/migrations/0015_border_alerts_crossings_typical.sql
+   python -m scraper.apply_migration supabase/migrations/0016_border_current_waits.sql
    ```
+   Or paste each file, in that order, into the Supabase dashboard's **SQL Editor** and run it.
    Do this **before** merging: `border-poll` starts on its schedule once the workflow
    is on `main`, and until the tables exist every run exits 3 and goes red.
 2. **Nothing to add for scheduling.** `.github/workflows/border_poll.yml` is new and
-   reads the existing `SUPABASE_URL` / `SUPABASE_KEY` secrets.
-3. **Expose it to the local agent** — two lines in `mcp_server.py` add `border_waits`,
+   reads the existing `SUPABASE_URL` / `SUPABASE_KEY` secrets. GitHub only runs a
+   scheduled workflow from `main`, so it starts once this branch is merged.
+3. **Point the Sheet automation at `border_current_waits`**, reading the text columns
+   (`summary_es` is written to be quoted as it stands).
+4. **Expose it to the local agent** — two lines in `mcp_server.py` add `border_waits`,
    `border_bridge` and `border_health`:
    ```python
    from .border.mcp_tools import register as register_border_tools
    register_border_tools(mcp)
    ```
-4. **Decide how wait times reach Instagram.** Every piece exists — a caption capped
+5. **Decide how wait times reach Instagram.** Every piece exists — a caption capped
    under Instagram's limit, replies, alerts with cursors — but not the choice of
    format: a new `ig_posts.kind` (which means widening `ig_posts_kind_check`, verified
    against the live constraint name as `0010` did), or a line in the existing digest.

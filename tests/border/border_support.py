@@ -78,6 +78,11 @@ class MemoryStore(BorderStore):
         self.calls["save_readings"] += 1
         return 0
 
+    async def upsert_current(self, rows):
+        self.calls["upsert_current"] += 1
+        self.current = {(r["port_number"], r["lane"]): r for r in rows}
+        return len(rows)
+
     async def log_run(self, tool, snapshot, written, status, error=None, params=None):
         self.runs.append(status)
 

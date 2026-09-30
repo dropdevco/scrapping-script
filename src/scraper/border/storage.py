@@ -71,6 +71,15 @@ class BorderStore:
             rows, on_conflict="content_hash", ignore_duplicates=True))
         return len(written) if isinstance(written, list) else 0
 
+    async def upsert_current(self, rows: list[dict]) -> int:
+        """Replace each (bridge, lane) row of border_current_waits with its latest state.
+        Written every run, changed or not: checked_at is what shows the data is live."""
+        if not rows:
+            return 0
+        written = await self._call("upsert_current", lambda c: c.table("border_current_waits").upsert(
+            rows, on_conflict="port_number,lane"))
+        return len(written) if isinstance(written, list) else 0
+
     async def log_run(self, tool: str, snapshot: Snapshot | None, written: int, status: str) -> None:
         # Per-port open-lane counts are what tell "CBP reported nothing for this bridge"
         # apart from "our poll broke".

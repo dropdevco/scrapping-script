@@ -32,10 +32,11 @@ def test_the_daily_cron_is_the_one_the_jobs_test_for():
     assert f'[ "$SCHEDULE" = "{daily[0]}" ]' in text             # the --prune branch
 
 
-def test_polling_is_no_faster_than_cbp_can_change():
-    """One row per CBP update, and CBP updates about hourly: every 15 minutes is enough."""
+def test_the_knowledge_base_is_refreshed_every_ten_minutes():
+    """Agreed with Carlos, 2026-09-29: border_current_waits feeds the knowledge base and
+    carries pasosfronterizos' fresher number, so it is rewritten every 10 minutes."""
     frequent = [c for c in _crons() if c.startswith("*/")]
-    assert frequent == ["*/15 * * * *"]
+    assert frequent == ["*/10 * * * *"]
 
 
 def test_the_workflow_reads_the_engines_secret_names():

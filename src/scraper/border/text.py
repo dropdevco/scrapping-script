@@ -532,3 +532,37 @@ def _joined(names: list[str], lang: str) -> str:
     last = " y " if lang == "es" else " and "
     return ", ".join(names[:-1]) + last + names[-1]
 
+
+# ------------------------------------------------ knowledge base (current waits)
+MONTHS = {"es": ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"),
+          "en": ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")}
+
+
+def stamp(iso: str, lang: str = "es") -> str:
+    """An absolute local date and time: "29 sep 2026, 2:10 p. m." / "Sep 29, 2026, 2:10 pm".
+    Never "hace 5 min": a knowledge-base row is read long after it is written, and a
+    relative time is false by then. Hand-rolled for the same reason as _clock."""
+    at = datetime.fromisoformat(iso)
+    month = MONTHS["es" if lang == "es" else "en"][at.month - 1]
+    day = f"{at.day} {month} {at.year}" if lang == "es" else f"{month} {at.day}, {at.year}"
+    return f"{day}, {_clock(iso, lang)}"
+
+
+def wait_words(state: str, minutes: int | None, lang: str = "es") -> str:
+    """Never empty: GoHighLevel rejects a row with any blank cell."""
+    if state == "open" and minutes is not None:
+        return duration(minutes)
+    if state == "closed":
+        return "cerrado" if lang == "es" else "closed"
+    return "sin datos" if lang == "es" else "no data"
+
+
+def current_summary(bridge: str, lane_label: str, wait: str, source: str | None,
+                    checked_iso: str, lang: str = "es") -> str:
+    """One sentence the bot can quote as it stands."""
+    if lang == "es":
+        cited = f" según {source}" if source else ""
+        return f"{bridge} · {lane_label}: {wait}{cited} (revisado el {stamp(checked_iso, lang)})."
+    cited = f" per {source}" if source else ""
+    return f"{bridge} · {lane_label}: {wait}{cited} (checked {stamp(checked_iso, lang)})."
+

@@ -1,19 +1,22 @@
 name: border-poll
 
-# Records CBP border wait times into border_readings, so deltas, drop alerts, the
-# trend and "normal for this hour" have history to compare against even after a quiet
-# spell (src/scraper/border/poll.py). GitHub Actions is the only scheduler in this
-# system; the poller takes one reading and exits.
+# Records border wait times: border_current_waits (every lane of every bridge, as a
+# follower would be told it — what the knowledge-base Sheet reads) and border_readings
+# (CBP's history, for deltas, drop alerts, the trend and "normal for this hour").
+# src/scraper/border/poll.py. GitHub Actions is the only scheduler in this system; the
+# poller takes one reading and exits.
 #
-# Needs migrations 0013-0015 applied first. Until they are, every write fails, the
+# Needs migrations 0013-0016 applied first. Until they are, every write fails, the
 # poller exits 3, and this workflow goes red — deliberately, rather than running green
 # while recording nothing (ADR-0011).
 on:
   schedule:
-    # CBP republishes about once an hour and border_readings keeps one row per CBP
-    # update (content_hash is unique), so polling faster than every 15 minutes only
-    # writes "unchanged". 15 minutes catches each update within a quarter hour.
-    - cron: "*/15 * * * *"
+    # Every 10 minutes, as agreed with Carlos (2026-09-29). CBP republishes about once
+    # an hour, but pasosfronterizos refreshes every few minutes and
+    # border_current_waits carries the fresher of the two, so this keeps the knowledge
+    # base within ten minutes of what a follower would be told. border_readings is
+    # unaffected: it keeps one row per CBP update whatever the cadence.
+    - cron: "*/10 * * * *"
     # Once a day: apply retention and ask the live feed whether it still parses.
     # 10:20 UTC is ~04:20 in El Paso, before the morning rush, and away from the
     # :00 of the scrape (11:00 UTC) so the two never compete for a runner.

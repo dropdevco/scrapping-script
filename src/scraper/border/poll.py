@@ -4,6 +4,9 @@
     python -m scraper.border.poll --prune       # ...then apply retention (run it daily)
     python -m scraper.border.poll --dry-run     # read and report, write nothing
 
+Each run also upserts border_current_waits: every lane of every bridge as a follower
+would be told it right now, which is what the knowledge-base Sheet reads.
+
 Without it, border_readings only fills when something happens to ask, so deltas, drop
 alerts, the trend and "normal for this hour" are blind after any quiet spell. There
 is no --loop: GitHub Actions is the only scheduler in this system, deliberately, so a
@@ -27,6 +30,7 @@ import logging
 import time
 from datetime import UTC, datetime
 
+from . import current
 from .service import BorderFeed, FeedError
 from .storage import BorderStore
 
@@ -39,6 +43,9 @@ async def once(feed: BorderFeed, dry_run: bool = False) -> dict:
     # A last-good reading served after a failure is not a reading at all for a poller.
     snapshot = await feed.snapshot(force=True, allow_stale=False)
     lanes = [lane for port in snapshot.ports for lane in port.lanes.values()]
+    # The knowledge-base table: every lane of every bridge, as a follower would be told it.
+    now_rows = current.rows(feed, snapshot, datetime.now(UTC))
+    written = 0 if dry_run else await feed.storage.upsert_current(now_rows)
     result = {
         "at": datetime.now(UTC).isoformat(timespec="seconds"),
         "ms": round((time.monotonic() - started) * 1000),
@@ -48,9 +55,11 @@ async def once(feed: BorderFeed, dry_run: bool = False) -> dict:
         "disputed": feed.lanes_disputed,
         "sources": {name: str(status) for name, status in feed.source_status.items()},
         "stored": not dry_run and feed.storage.enabled,
+        "current_rows": written,
     }
     if dry_run:
         result["would_write"] = len(lanes)
+        result["would_write_current"] = len(now_rows)
     return result
 
 

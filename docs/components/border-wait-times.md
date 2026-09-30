@@ -21,7 +21,7 @@ poller starts once this branch is on `main`. What is left is in [Wiring it in](#
 | **Writes** | `border_current_waits` and the crossing-times tab of the knowledge-base Google Sheet (the bot's feed), `border_ports`, `border_readings`, `border_runs`, `border_alerts`, `border_crossings` (migrations `0013`–`0017`) |
 | **Requires**             | Nothing for live answers. `SUPABASE_URL` + `SUPABASE_KEY` for history, deltas that survive a restart, alerts and "normal for this hour"                                                                        |
 | **Uses from the engine** | `core.http.HttpClient` (retries, robots.txt, gzip, `USER_AGENT`), `core.config.settings`, `core.eventtime.event_tz()`, the Supabase client from `core.storage.Storage`, `ENABLED_SOURCES` / `DISABLED_SOURCES` |
-| **Tests** | `tests/border/` — 366 tests, one file per module (`pytest tests/border -q`) |
+| **Tests** | `tests/border/test_border_*.py` — 366 tests, one file per module (`pytest tests/border -q`). The `test_border_` prefix is deliberate: `tests/` has no `__init__.py`, so a second `test_storage.py` anywhere would break collection of the whole suite |
 
 ---
 
@@ -681,4 +681,4 @@ Crossings under a minute or over six hours are refused as mistakes.
 
 ---
 
-_Verified against commit `8f3107c` (2026-09-29). Last updated 2026-09-29._
+_Verified against commit `bde8294` (2026-09-29). Last updated 2026-09-29._

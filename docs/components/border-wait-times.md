@@ -5,9 +5,9 @@ scraped source, ranked for someone deciding "leave now or wait", and written to 
 so everything downstream can read the same numbers. Owns `src/scraper/border/`, the
 `border_*` tables, and `.github/workflows/border_poll.yml`.
 
-**Status: built, not yet wired in.** Everything here is new files; nothing existing in
-the repo was edited. The four small hooks it still needs are in
-[Wiring it in](#wiring-it-in).
+**Status: built, tables created, not yet running.** Everything here is new files; nothing
+existing in the repo was edited. The tables exist in production (2026-09-29); the
+poller starts once this branch is on `main`. What is left is in [Wiring it in](#wiring-it-in).
 
 ---
 
@@ -596,10 +596,13 @@ Found by running against it, not by reading docs:
 
 ## Wiring it in
 
-Each is a small change to an existing file, deliberately left for review. Nothing
-below has been done.
+Each is a small change to an existing file, deliberately left for review. Only step 1
+has been done.
 
-1. **Apply the migrations**, in order:
+1. **Apply the migrations** — **done 2026-09-29** in the production project
+   (`data-scrapping`), through the SQL Editor, in order. Verified afterwards: six
+   `border_*` tables (`border_ports` seeded with the six bridges), the three functions and
+   the `border_recent_activity` view. For another environment:
    ```bash
    python -m scraper.apply_migration supabase/migrations/0013_border_waits.sql
    python -m scraper.apply_migration supabase/migrations/0014_border_retention.sql

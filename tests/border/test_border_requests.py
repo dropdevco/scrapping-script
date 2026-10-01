@@ -18,7 +18,7 @@ import pytest
 from scraper.border import cbp, requests
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "cbp_feed.json"
-SNAPSHOT = cbp.build(json.loads(FIXTURE.read_text()), datetime(2026, 9, 22, 19, 40, tzinfo=UTC))
+SNAPSHOT = cbp.build(json.loads(FIXTURE.read_text(encoding="utf-8")), datetime(2026, 9, 22, 19, 40, tzinfo=UTC))
 
 
 @pytest.mark.parametrize(("message", "port"), [

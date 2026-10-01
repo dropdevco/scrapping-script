@@ -28,7 +28,7 @@ NOW = datetime(2026, 9, 22, 3, 40, tzinfo=UTC)   # 9:40 pm MDT — Santa Teresa 
 MIDDAY = datetime(2026, 9, 22, 19, 40, tzinfo=UTC)  # 1:40 pm MDT — every bridge open for hours
 
 def load(name: str) -> list[dict]:
-    return json.loads((FIXTURES / name).read_text())
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 def feed_for(*files: str, now: datetime = NOW, **kwargs) -> BorderFeed:
     """A feed whose successive fetches return the given fixtures in order."""

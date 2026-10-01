@@ -97,7 +97,7 @@ class Retention(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.calls["prune"], 0)
 
     async def test_the_migration_keeps_enough_history_for_typical_waits(self):
-        sql = (ROOT / "supabase" / "migrations" / "0015_border_alerts_crossings_typical.sql").read_text()
+        sql = (ROOT / "supabase" / "migrations" / "0015_border_alerts_crossings_typical.sql").read_text(encoding="utf-8")
         self.assertIn("keep_readings_days int default 60", sql)
         self.assertIn("weeks int default 8", sql)
         self.assertGreaterEqual(poll.KEEP_READINGS_DAYS, 8 * 7)

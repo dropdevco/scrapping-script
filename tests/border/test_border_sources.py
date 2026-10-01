@@ -40,7 +40,7 @@ class SecondOpinionParsing(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls):
-        page = (FIXTURES / "pasosfronterizos.html").read_text(errors="replace")
+        page = (FIXTURES / "pasosfronterizos.html").read_text(encoding="utf-8", errors="replace")
         cls.readings = parse_pasos(page, NOW)
 
     def by(self, port, lane):
@@ -68,7 +68,7 @@ class MirrorAsParserCheck(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.page = (FIXTURES / "borderswaittime.html").read_text(errors="replace")
+        cls.page = (FIXTURES / "borderswaittime.html").read_text(encoding="utf-8", errors="replace")
 
     async def test_it_reads_the_data_card_not_the_navigation(self):
         readings = {r.port_number: (r.state, r.minutes) for r in parse_mirror(self.page, NOW)}
@@ -125,7 +125,7 @@ class Politeness(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(source.is_configured(), "the refusal sticks for the process")
 
     async def test_an_allowed_page_is_fetched_and_parsed(self):
-        page = (FIXTURES / "pasosfronterizos.html").read_text(errors="replace")
+        page = (FIXTURES / "pasosfronterizos.html").read_text(encoding="utf-8", errors="replace")
         readings = await PasosFronterizosSource().fetch(FakeHttp(page=page), NOW)
         self.assertEqual({r.port_number for r in readings}, PasosFronterizosSource.expected_ports)
 
@@ -170,10 +170,10 @@ class ScrapersThatBreakQuietly(unittest.IsolatedAsyncioTestCase):
         self.assertIn("240201", status)
 
     async def test_the_real_parsers_declare_what_a_healthy_page_shows(self):
-        page = (FIXTURES / "pasosfronterizos.html").read_text(errors="replace")
+        page = (FIXTURES / "pasosfronterizos.html").read_text(encoding="utf-8", errors="replace")
         found = {r.port_number for r in parse_pasos(page, NOW)}
         self.assertEqual(PasosFronterizosSource.expected_ports - found, set())
-        mirror = (FIXTURES / "borderswaittime.html").read_text(errors="replace")
+        mirror = (FIXTURES / "borderswaittime.html").read_text(encoding="utf-8", errors="replace")
         self.assertEqual(EXPECTED_PORTS - {r.port_number for r in parse_mirror(mirror, NOW)}, set())
 
 class MirrorComparesTheSameUpdate(unittest.IsolatedAsyncioTestCase):
@@ -205,6 +205,6 @@ class MirrorComparesTheSameUpdate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len((await feed.health())["parser_check"]["mismatches"]), 1)
 
     async def test_the_mirror_parser_reads_the_update_label(self):
-        page = (FIXTURES / "borderswaittime.html").read_text(errors="replace")
+        page = (FIXTURES / "borderswaittime.html").read_text(encoding="utf-8", errors="replace")
         labels = {r.port_number: r.label for r in parse_mirror(page, NOW) if r.state == "open"}
         self.assertEqual(labels["240201"], "At 7:00 pm MDT")

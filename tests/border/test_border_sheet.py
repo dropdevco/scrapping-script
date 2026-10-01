@@ -90,6 +90,13 @@ async def test_an_empty_table_is_never_published():
     assert "refusing to publish an empty sheet" in err.getvalue()
 
 
+async def test_it_refuses_the_events_tab():
+    err = io.StringIO()
+    with mock.patch.object(sheet.settings, "kb_sheet_tab", "events"), contextlib.redirect_stderr(err):
+        assert await sheet.run(tab="Events", storage=Store([row()])) == 1
+    assert "KB_SHEET_TAB" in err.getvalue()
+
+
 async def test_it_writes_the_named_tab_through_the_engines_writer():
     written = {}
 

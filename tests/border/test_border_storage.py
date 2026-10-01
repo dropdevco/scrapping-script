@@ -28,6 +28,6 @@ class StorageOff(unittest.IsolatedAsyncioTestCase):
     async def test_rows_match_the_migration_columns(self):
         snap = cbp.build(load("cbp_feed.json"), NOW)
         row = next(iter(snap.ports[0].lanes.values())).to_row()
-        sql = (ROOT / "supabase" / "migrations" / "0013_border_waits.sql").read_text()
+        sql = (ROOT / "supabase" / "migrations" / "0013_border_waits.sql").read_text(encoding="utf-8")
         for column in row:
             self.assertIn(column, sql, f"{column} is written but not in the migration")

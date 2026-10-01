@@ -39,6 +39,7 @@ import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from ..core.config import settings
 from .cbp import LANES, LOCAL_TZ, PORTS
 from .storage import BorderStore
 
@@ -106,6 +107,13 @@ async def run(dry_run: bool = False, out: str | None = None, tab: str | None = N
     if not tab and not dry_run:
         print("BORDER_KB_TAB is not set — the crossing-times sheet export is off.")
         return 0
+    events_tab = settings.kb_sheet_tab
+    if tab and tab.casefold() == events_tab.casefold():
+        # write_sheet shrinks its tab to fit, so sharing one with `kb export` would have each
+        # job wipe the other's rows on its next run.
+        print(f"BORDER_KB_TAB ({tab!r}) is the events tab (KB_SHEET_TAB) — pick a different "
+              "tab for the crossing times.", file=sys.stderr)
+        return 1
     storage = storage or BorderStore()
     if not storage.enabled:
         print("Supabase is not configured — set SUPABASE_URL and SUPABASE_KEY.", file=sys.stderr)

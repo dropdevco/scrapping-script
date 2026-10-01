@@ -1,0 +1,120 @@
+name: border-poll
+
+# Records border wait times: border_current_waits (every lane of every bridge, as a
+# follower would be told it — what the knowledge-base Sheet reads) and border_readings
+# (CBP's history, for deltas, drop alerts, the trend and "normal for this hour").
+# src/scraper/border/poll.py. GitHub Actions is the only scheduler in this system; the
+# poller takes one reading and exits.
+#
+# Needs migrations 0013-0017 applied first. Until they are, every write fails, the
+# poller exits 3, and this workflow goes red — deliberately, rather than running green
+# while recording nothing (ADR-0011).
+on:
+  schedule:
+    # Every 10 minutes, as agreed with Carlos (2026-09-29). CBP republishes about once
+    # an hour, but pasosfronterizos refreshes every few minutes and
+    # border_current_waits carries the fresher of the two, so this keeps the knowledge
+    # base within ten minutes of what a follower would be told. border_readings is
+    # unaffected: it keeps one row per CBP update whatever the cadence.
+    - cron: "*/10 * * * *"
+    # Once a day: apply retention and ask the live feed whether it still parses.
+    # 10:20 UTC is ~04:20 in El Paso, before the morning rush, and away from the
+    # :00 of the scrape (11:00 UTC) so the two never compete for a runner.
+    - cron: "20 10 * * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run"
+        default: "poll"
+        type: choice
+        options: ["poll", "daily"]
+
+# Two overlapping polls would both read "unchanged" or both write the same rows (a
+# no-op on content_hash), so overlap is harmless — but a queue of them after an
+# Actions outage is pure waste. Keep at most one running and one waiting.
+concurrency:
+  group: border-poll
+  cancel-in-progress: false
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+  EVENT_TIMEZONE: ${{ vars.EVENT_TIMEZONE }}
+  USER_AGENT: ${{ vars.USER_AGENT }}
+  DISABLED_SOURCES: ${{ vars.DISABLED_SOURCES }}
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # The pip cache keys on a dependency file and looks for requirements.txt by
+          # default; this repo has none, and a cache step that finds nothing to key on
+          # fails the job before the poll starts. pyproject.toml is where the deps live.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # [kb] brings gspread for the sheet step, the same extra the scrape job uses.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[kb]"
+
+      # Exit codes: 1 CBP unreadable, 2 Supabase not configured, 3 a write failed.
+      # All three fail the run, which is what makes GitHub email the owner.
+      - name: Record one reading
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          JOB: ${{ github.event.inputs.job }}
+        run: |
+          if [ "$SCHEDULE" = "20 10 * * *" ] || [ "$JOB" = "daily" ]; then
+            python -m scraper.border poll --quiet --prune
+          else
+            python -m scraper.border poll --quiet
+          fi
+
+      # Supabase -> Google Sheet -> GoHighLevel: republish the crossing times to their tab
+      # of the knowledge-base sheet from what the poll just stored. Off until the repo
+      # variable BORDER_KB_TAB names the tab (the engine ships features inert), and never
+      # fatal, matching the kb export in scheduled-scrape: a Sheets outage must not fail
+      # the reading that already landed.
+      - name: Publish crossing times to the knowledge-base sheet
+        if: ${{ vars.BORDER_KB_TAB != '' }}
+        continue-on-error: true
+        env:
+          BORDER_KB_TAB: ${{ vars.BORDER_KB_TAB }}
+          KB_SHEET_ID: ${{ secrets.KB_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python -m scraper.border sheet
+
+  # Unit tests run on saved CBP responses, so they stay green through exactly the kind
+  # of drift this catches: a renamed field, a new status word, a scraped page that
+  # changed shape. Fatal on purpose, so the GitHub email is the alert.
+  selfcheck:
+    if: github.event.schedule == '20 10 * * *' || github.event.inputs.job == 'daily'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # The pip cache keys on a dependency file and looks for requirements.txt by
+          # default; this repo has none, and a cache step that finds nothing to key on
+          # fails the job before the poll starts. pyproject.toml is where the deps live.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Does live CBP still parse?
+        run: python -m scraper.border selfcheck

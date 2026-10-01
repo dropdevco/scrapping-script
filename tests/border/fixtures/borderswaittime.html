@@ -1,0 +1,1134 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>El Paso Border Wait Times Mexico To United States.</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="X-UA-Compatible" content="ie=edge" />
+    <meta name="keywords" content="El Paso, border, live, Live Webcam, live border, wait times, border crossing, El Paso borders, wait times, El Paso waittimes, border delays, border traffic, usa, mexico, usa, canada, border congestion, real-time border, current border, border tracker, border delays, border traffic, average border, USA-Mexico border, USA-Canada border, international border, immigration, port of entry, land border, pedestrian border, commercial vehicle, passenger vehicle, estimated border, live border, current border, average border, border transport, cross-border transport, cross-border trucking, trip planning, transport services, cross-border, cross-border travel, Laredo Bridge 1, Rio Grande City, Los Indios, Brownsville, Veterans, Chihuahua, El PasoStanton, El PasoBOTA, Presidio, Coahuila, Eagle Pass, Nuevo León, Solidarity, Tamaulipas, Andrade, San Luis Rio Colorado, Lukeville, Sonoyta, Mariposa, Grand Avenue, Nogales, Morley Gate, Naco, Laredo Colombia, Solidarity, World Trade, Laredo Bridge 1, Laredo, lincoln Interstate, Texas, Laredo, Juarez, Lincoln, Falcon Dam, Roma, Rio Grande City, Los Ebanos, Anzalduas, Hidalgo, Donna, Pharr, Progreso, Brownsville B&M, Brownsville Gateway, Brownsville Veterans, Eagle Pass II, Amistad Dam, Del Rio, Texas Chihuahua, Texas Coahuila, Texas Tamaulipas, Arizona Border Crossings, California Border Crossings, New Mexico Border Crossings, Texas Border Crossings, California, Baja California, San Ysidro, Otay Mesa, Tecate, Calexico West, Calexico East, Andrade 1, Arizona Sonora, San Luis, San Luis II, Lukeville Sonoyta, Sasabe, Nogales Mariposa, Nogales Grand Avenue, Nogales Morley Gate 1, travel planning, trip planning, travel itinerary, trip itinerary, travel guide, trip guide, travel tips, trip tips, travel advice, trip advice, travel planner, trip planner, travel organizer, trip organizer, travel plan.">
+
+   <meta name="description" content="Borders Wait Time provides real-time information on traffic congestion and wait times at the El Paso border between Mexico and the USA. Stay up-to-date with current wait times and average wait times for commercial vehicles, passenger vehicles, and pedestrians at the El Paso border crossing.">
+
+
+   <meta property="og:image" content="https://borderswaittime.com/united-states-mexico/el-paso/el-paso-border-wait-times.jpg">
+
+   <meta name="msapplication-TileColor" content="#245194">
+   <meta name="theme-color" content="#ffffff">
+   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+   <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+   <link rel="manifest" href="/site.webmanifest">
+   <link rel="mask-icon" href="/safari-pinned-tab.svg" color="#245194">
+
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Icons" />
+    <script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+    <script src="https://kit.fontawesome.com/e469519a88.js" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="/style.css">
+
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script>
+function toggleMenu() {
+var menu = document.querySelector("nav");
+menu.classList.toggle("active");
+}
+</script>
+
+   <style>
+    .video-wrapper {
+        margin-bottom: 20px;
+        background-color: #dddddd;
+        border-bottom: 1px solid #ffffff;
+    }
+
+    .video-header {
+        background-color: #245194;
+        color: #ffffff;
+        padding: 10px;
+        font-size: 18px;
+        font-weight: bold;
+        position: relative;
+        border-left: 1px solid #ffffff;
+    }
+
+    .video-frame {
+        padding: 10px;
+        background: #fff;
+        position: relative;
+        margin: 5px;
+        border-radius: 1px;
+        border-bottom: 10px solid #ffffff;
+    }
+
+    .video-container {
+        position: relative;
+        width: 100%;
+        max-width: 100vw;
+        height: 0;
+        padding-bottom: 56.25%; /* 16:9 aspect ratio (480/853 ≈ 56.25%) */
+        margin: 0 auto;
+    }
+
+    video {
+        width: 100%;
+        height: 100%;
+        position: absolute;
+        top: 0;
+        left: 0;
+        display: block;
+        opacity: 0; /* Hidden, canvas shows content */
+        transition: opacity 0.3s ease;
+    }
+
+    canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        display: block;
+        border: 1px solid red; /* Debug outline, can remove in production */
+    }
+
+.loading-poster {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #ccc url('https://raw.githubusercontent.com/Codelessly/FlutterLoadingGIFs/master/packages/cupertino_activity_indicator_medium.gif') center/contain no-repeat;
+    z-index: 10;
+    transition: opacity 0.3s;
+}
+
+    .loading-poster.hidden {
+        opacity: 0;
+        pointer-events: none;
+    }
+
+    .controls-row {
+        margin-top: 10px;
+        display: flex;
+        justify-content: space-between;
+        padding: 0 10px;
+    }
+
+    .toggle-button {
+        display: inline-block;
+        margin: 10px;
+        padding: 5px 15px;
+        background-color: #fff;
+        border: 1px solid #dee2e6;
+        color: #245194;
+        cursor: pointer;
+        font-size: 0.9em;
+        border-radius: 3px;
+        border-right: 5px solid #245194;
+        visibility: visible; /* Changed from hidden to ensure buttons are usable */
+    }
+
+    .toggle-button:hover {
+        background-color: #eee;
+        color: #c4123e;
+    }
+
+    .toggle-button.playing {
+        background-color: #c4123e;
+        color: white;
+    }
+
+    .toggle-button.playing:hover {
+        background-color: #1a3c6e;
+    }
+
+    .quality-toggle {
+        display: inline-block;
+        margin: 10px;
+        padding: 5px 15px;
+        background-color: #fff;
+        border: 1px solid #dee2e6;
+        color: #245194;
+        cursor: pointer;
+        font-size: 0.9em;
+        border-radius: 3px;
+        border-left: 5px solid #245194;
+    }
+
+    .quality-toggle:hover {
+        background-color: #eee;
+        color: #c4123e;
+    }
+
+    .status-indicator {
+        text-align: center;
+        margin-top: 25px;
+        font-size: 12px;
+        color: #c4123e;
+    }
+</style>
+
+</head>
+<body>
+<header>
+<div class="logo">
+<img src="/logo.png" alt="Live Border Wait Times." />
+<div style="font-size: 1.5em; font-weight: bold; margin-left: 17px;">Borders Wait Times.</div>
+</div>
+<div onclick="toggleMenu()">
+<div class="burger"></div>
+<div class="burger"></div>
+<div class="burger"></div>
+</div>
+<nav>
+
+<ul class="cbp-menu">
+
+<li><a href="https://borderswaittime.com/">Home</a></li>
+<li><a href="https://borderswaittime.com/about">About</a></li>
+<li><a href="https://borderswaittime.com/contact">Contact</a></li>
+</ul>
+<br/>
+<div class="scrollable-div" id="favorites">
+<span class="note">Below, you can view your list of favorite border crossing information. Scroll down to see the full list.</span>
+
+
+</div>
+<span class="note">Note: Your favorite URLs are saved in your browser's localStorage. Clearing your browser's localStorage will also remove your saved favorite URLs.</span>
+<br>
+<br>
+<br>
+<span class="note">Copyright &copy;  Border Wait Times.</span>
+<div class="close-menu" onclick="toggleMenu()">x</div>
+
+
+</nav>
+
+</header>
+<div id="MarqueeWaitTimeResult"></div>
+<br/>
+<div class="search-container">
+  <input id="Search" type="search" onkeyup="searchFunction()" placeholder=" Search for borders..">
+  <button class="favorite-toggle-button" id="favorite-toggle-button">Add to favorites</button>
+</div>
+
+<span id="note" class="note"></span>
+
+<div class="note">
+* Wait times listed are for entry into the United States.
+</div>
+
+
+<div class="center-translate">
+
+<div class='widget Translate' data-version='1' id='Translate1'>
+<br>
+<div id="google_translate_element"></div>
+<script>
+    function googleTranslateElementInit() {
+        setCookie('googtrans', '/en/en', 1);
+        new google.translate.TranslateElement({ pageLanguage: 'en', layout: google.translate.TranslateElement.InlineLayout.VERTICAL }, 'google_translate_element');
+    }
+    function setCookie(key, value, expiry) {
+        var expires = new Date();
+        expires.setTime(expires.getTime() + (expiry * 24 * 60 * 60 * 1000));
+        document.cookie = key + '=' + value + ';expires=' + expires.toUTCString();
+    }
+</script>
+</div>
+</div>
+
+<h1>Border Wait Times at El Paso, Real-Time Mexico to United States.</h1>
+
+<table class="resultTable">
+    <tr>
+        <th><h2>El Paso</h2></th>
+    </tr>
+    <tr>
+        <td>Hours: 24 hrs/day <br/> Date: 9/22/2026 <br/> <h4><b> <i class="fas fa-truck" style="font-size:17;color:#ffffff""></i>    Commercial Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 6 <br/>General Lanes:  <i class="fa fa-cog fa-spin" style="color:#e80c42"></i> <span style="color:#c4123e"> Update pending: Please refresh the page after a few minutes.</span>  <br/>Fast Lanes:  <i class="fa fa-cog fa-spin" style="color:#e80c42"></i> <span style="color:#c4123e"> Update pending: Please refresh the page after a few minutes.</span>  <br/> <h4><b> <i class="fas fa-car" style="font-size:17px;color:#ffffff"></i>   Passenger Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 13 <br/>General Lanes:  <i class="fa fa-cog fa-spin" style="color:#e80c42"></i> <span style="color:#c4123e"> Update pending: Please refresh the page after a few minutes.</span>  <br/>Sentri Lanes:  <i class="fa fa-cog fa-spin" style="color:#e80c42"></i> <span style="color:#c4123e"> Update pending: Please refresh the page after a few minutes.</span>  <br/>Ready Lanes:  <i class="fa fa-cog fa-spin" style="color:#e80c42"></i> <span style="color:#c4123e"> Update pending: Please refresh the page after a few minutes.</span>  <br/> <h4><b> <i class="fas fa-walking" style="font-size:17px;color:#ffffff"></i>   Pedestrian   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 12 <br/>General Lanes:  <i class="fa fa-cog fa-spin" style="color:#e80c42"></i> <span style="color:#c4123e"> Update pending: Please refresh the page after a few minutes.</span>  <br/>Ready Lanes:  <i class="fa fa-cog fa-spin" style="color:#e80c42"></i> <span style="color:#c4123e"> Update pending: Please refresh the page after a few minutes.</span>  <br/></td>
+    </tr>
+    <tr>
+        <td>Last Updated: Tue, 22 Sep 2026 21:10:03 EST</td>
+    </tr>
+
+</table>
+
+<table class="resultTable">
+    <tr>
+        <th><h2>El Paso - Bridge of the Americas (BOTA)</h2></th>
+    </tr>
+    <tr>
+        <td>Hours: 24 hrs/day <br/> Date: 9/22/2026 <br/> <h4><b> <i class="fas fa-truck" style="font-size:17;color:#ffffff""></i>    Commercial Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 3 <br/>General Lanes:  <span style="color:#f00741">Lanes Closed</span>  <br/>Fast Lanes:  <span style="color:#f00741">Lanes Closed</span>  <br/> <h4><b> <i class="fas fa-car" style="font-size:17px;color:#ffffff"></i>   Passenger Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 14 <br/>General Lanes: At 7:00 pm MDT <span style="color:#f00741">20</span> <span style="color:#f00741">min</span> delay 3 lane(s) <span style="color:green">open</span>  <br/>Sentri Lanes:  <span style="color:#f00741">N/A</span>  <br/>Ready Lanes: At 7:00 pm MDT <span style="color:#f00741">19</span> <span style="color:#f00741">min</span> delay 6 lane(s) <span style="color:green">open</span>  <br/> <h4><b> <i class="fas fa-walking" style="font-size:17px;color:#ffffff"></i>   Pedestrian   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 4 <br/>General Lanes: At 7:00 pm MDT <span style="color:#f00741">2</span> <span style="color:#f00741">min</span> delay 2 lane(s) <span style="color:green">open</span>  <br/>Ready Lanes:  <span style="color:#f00741">Lanes Closed</span>  <br/><b><i class="fas fa-exclamation-triangle" style="font-size:17px;color:#f00741"></i> <span style="color:#245194"> Border Notice </span>: </b>BOTA Passenger/Ready Lanes is <span style="color:green">open</span> west side of port; Passenger Hrs 24 hours/7days, BOTA CARGO Mon-FRI 6 am to 4 pm. SAT/SUN CLOSED. Tune into AM 1610 for info.</td>
+    </tr>
+    <tr>
+        <td>Last Updated: Tue, 22 Sep 2026 21:10:03 EST</td>
+    </tr>
+
+</table>
+
+<table class="resultTable">
+    <tr>
+        <th><h2>El Paso - Paso Del Norte (PDN)</h2></th>
+    </tr>
+    <tr>
+        <td>Hours: 24 hrs/day <br/> Date: 9/22/2026 <br/> <h4><b> <i class="fas fa-truck" style="font-size:17;color:#ffffff""></i>    Commercial Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: <span style="color:#f00741">N/A</span> <br/>General Lanes:  <span style="color:#f00741">N/A</span>  <br/>Fast Lanes:  <span style="color:#f00741">N/A</span>  <br/> <h4><b> <i class="fas fa-car" style="font-size:17px;color:#ffffff"></i>   Passenger Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 12 <br/>General Lanes: At 7:00 pm MDT <span style="color:#f00741">39</span> <span style="color:#f00741">min</span> delay 1 lane(s) <span style="color:green">open</span>  <br/>Sentri Lanes: At 7:00 pm MDT <span style="color:#f00741">1</span> <span style="color:#f00741">min</span> delay 1 lane(s) <span style="color:green">open</span>  <br/>Ready Lanes: At 7:00 pm MDT <span style="color:#f00741">37</span> <span style="color:#f00741">min</span> delay 3 lane(s) <span style="color:green">open</span>  <br/> <h4><b> <i class="fas fa-walking" style="font-size:17px;color:#ffffff"></i>   Pedestrian   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 14 <br/>General Lanes: At 7:00 pm MDT <span style="color:#f00741">1</span> <span style="color:#f00741">min</span> delay 3 lane(s) <span style="color:green">open</span>  <br/>Ready Lanes: At 7:00 pm MDT <span style="color:#f00741">1</span> <span style="color:#f00741">min</span> delay 3 lane(s) <span style="color:green">open</span>  <br/><b><i class="fas fa-exclamation-triangle" style="font-size:17px;color:#f00741"></i> <span style="color:#245194"> Border Notice </span>: </b>Ready Lanes are <span style="color:green">open</span> at PDN.  See www.getyouhome.gov for more information. Tune in to AM 1620 for border crossing information.</td>
+    </tr>
+    <tr>
+        <td>Last Updated: Tue, 22 Sep 2026 21:10:03 EST</td>
+    </tr>
+
+</table>
+
+<table class="resultTable">
+    <tr>
+        <th><h2>El Paso - Stanton DCL</h2></th>
+    </tr>
+    <tr>
+        <td>Hours: 6 am-Midnight <br/> Date: 9/22/2026 <br/> <h4><b> <i class="fas fa-truck" style="font-size:17;color:#ffffff""></i>    Commercial Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: <span style="color:#f00741">N/A</span> <br/>General Lanes:  <span style="color:#f00741">N/A</span>  <br/>Fast Lanes:  <span style="color:#f00741">N/A</span>  <br/> <h4><b> <i class="fas fa-car" style="font-size:17px;color:#ffffff"></i>   Passenger Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 3 <br/>General Lanes:  <span style="color:#f00741">Lanes Closed</span>  <br/>Sentri Lanes: At 7:00 pm MDT <span style="color:#f00741">1</span> <span style="color:#f00741">min</span> delay 2 lane(s) <span style="color:green">open</span>  <br/>Ready Lanes:  <span style="color:#f00741">N/A</span>  <br/> <h4><b> <i class="fas fa-walking" style="font-size:17px;color:#ffffff"></i>   Pedestrian   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: <span style="color:#f00741">N/A</span> <br/>General Lanes:  <span style="color:#f00741">N/A</span>  <br/>Ready Lanes:  <span style="color:#f00741">N/A</span>  <br/><b><i class="fas fa-exclamation-triangle" style="font-size:17px;color:#f00741"></i> <span style="color:#245194"> Border Notice </span>: </b>Be prepared for construction that may cause some delays in the southbound lanes of the Stanton bridge; early January - February.  Tune in to AM 1620 for border crossing information.</td>
+    </tr>
+    <tr>
+        <td>Last Updated: Tue, 22 Sep 2026 21:10:03 EST</td>
+    </tr>
+
+</table>
+
+<table class="resultTable">
+    <tr>
+        <th><h2>El Paso - Ysleta</h2></th>
+    </tr>
+    <tr>
+        <td>Hours: 24 hrs/day <br/> Date: 9/22/2026 <br/> <h4><b> <i class="fas fa-truck" style="font-size:17;color:#ffffff""></i>    Commercial Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 8 <br/>General Lanes: At 6:00 pm MDT <span style="color:#f00741">55</span> <span style="color:#f00741">min</span> delay 3 lane(s) <span style="color:green">open</span>  <br/>Fast Lanes: At 6:00 pm MDT <span style="color:#f00741">45</span> <span style="color:#f00741">min</span> delay 3 lane(s) <span style="color:green">open</span>  <br/> <h4><b> <i class="fas fa-car" style="font-size:17px;color:#ffffff"></i>   Passenger Vehicles   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 13 <br/>General Lanes:  <span style="color:#f00741">Lanes Closed</span>  <br/>Sentri Lanes: At 6:00 pm MDT <span style="color:#f00741">1</span> <span style="color:#f00741">min</span> delay 4 lane(s) <span style="color:green">open</span>  <br/>Ready Lanes: At 6:00 pm MDT <span style="color:#f00741">10</span> <span style="color:#f00741">min</span> delay 3 lane(s) <span style="color:green">open</span>  <br/> <h4><b> <i class="fas fa-walking" style="font-size:17px;color:#ffffff"></i>   Pedestrian   <i class="fas fa-clock" style="font-size:14px;"></i></b></h4>  Maximum Lanes: 4 <br/>General Lanes: At 6:00 pm MDT <span style="color:#f00741">1</span> <span style="color:#f00741">min</span> delay 2 lane(s) <span style="color:green">open</span>  <br/>Ready Lanes:  <span style="color:#f00741">N/A</span>  <br/><b><i class="fas fa-exclamation-triangle" style="font-size:17px;color:#f00741"></i> <span style="color:#245194"> Border Notice </span>: </b>YSL Passenger/Ready Lanes is <span style="color:green">open</span> west side of port; Passenger Hrs. 24 hours / 7 days, YSL CARGO Mon-FRI 6 am to Midnight. SAT 6 am to 2 pm. Tune into AM 1610 for info.
+
+
+</td>
+    </tr>
+    <tr>
+        <td>Last Updated: Tue, 22 Sep 2026 21:10:03 EST</td>
+    </tr>
+
+</table>
+
+</div>
+        <div class="video-header"><h2>El Paso Live Webcams for Border Crossing Updates</h2></div><br>
+    <!-- Video 1 -->
+<div class="video-wrapper">
+    <div class="video-header">Stanton Bridge 1</div>
+    <div class="video-frame">
+        <div class="video-container">
+            <div id="poster_1" class="loading-poster"></div>
+            <video id="video_1" muted playsinline>
+                <source src="https://zoocams.elpasozoo.org/BridgeStanton1.m3u8" type="application/x-mpegURL">
+            </video>
+            <canvas id="overlay_1"></canvas>
+        </div>
+    </div>
+    <div class="controls-row">
+        <button class="quality-toggle" data-video="video_1">High Quality</button>
+        <div id="status_1" class="status-indicator">Loading...</div>
+        <button class="toggle-button" data-video="video_1">▶ Play</button>
+    </div>
+</div>
+
+<!-- Video 2 -->
+<div class="video-wrapper">
+    <div class="video-header">Stanton Bridge 2</div>
+    <div class="video-frame">
+        <div class="video-container">
+            <div id="poster_2" class="loading-poster"></div>
+            <video id="video_2" muted playsinline>
+                <source src="https://zoocams.elpasozoo.org/BridgeStanton2.m3u8" type="application/x-mpegURL">
+            </video>
+            <canvas id="overlay_2"></canvas>
+        </div>
+    </div>
+    <div class="controls-row">
+        <button class="quality-toggle" data-video="video_2">High Quality</button>
+        <div id="status_2" class="status-indicator">Loading...</div>
+        <button class="toggle-button" data-video="video_2">▶ Play</button>
+    </div>
+</div>
+
+<!-- Video 3 -->
+<div class="video-wrapper">
+    <div class="video-header">Stanton Bridge 3</div>
+    <div class="video-frame">
+        <div class="video-container">
+            <div id="poster_3" class="loading-poster"></div>
+            <video id="video_3" muted playsinline>
+                <source src="https://zoocams.elpasozoo.org/BridgeStanton3.m3u8" type="application/x-mpegURL">
+            </video>
+            <canvas id="overlay_3"></canvas>
+        </div>
+    </div>
+    <div class="controls-row">
+        <button class="quality-toggle" data-video="video_3">High Quality</button>
+        <div id="status_3" class="status-indicator">Loading...</div>
+        <button class="toggle-button" data-video="video_3">▶ Play</button>
+    </div>
+</div>
+
+<!-- Video 4 -->
+<div class="video-wrapper">
+    <div class="video-header">Paso Del Norte Bridge 1</div>
+    <div class="video-frame">
+        <div class="video-container">
+            <div id="poster_4" class="loading-poster"></div>
+            <video id="video_4" muted playsinline>
+                <source src="https://zoocams.elpasozoo.org/bridgepdn1.m3u8" type="application/x-mpegURL">
+            </video>
+            <canvas id="overlay_4"></canvas>
+        </div>
+    </div>
+    <div class="controls-row">
+        <button class="quality-toggle" data-video="video_4">High Quality</button>
+        <div id="status_4" class="status-indicator">Loading...</div>
+        <button class="toggle-button" data-video="video_4">▶ Play</button>
+    </div>
+</div>
+
+<!-- Video 5 -->
+<div class="video-wrapper">
+    <div class="video-header">Bridge Zaragoza 1.</div>
+    <div class="video-frame">
+        <div class="video-container">
+            <div id="poster_5" class="loading-poster"></div>
+            <video id="video_5" muted playsinline>
+                <source src="https://zoocams.elpasozoo.org/BridgeZaragoza1.m3u8" type="application/x-mpegURL">
+            </video>
+            <canvas id="overlay_5"></canvas>
+        </div>
+    </div>
+    <div class="controls-row">
+        <button class="quality-toggle" data-video="video_5">High Quality</button>
+        <div id="status_5" class="status-indicator">Loading...</div>
+        <button class="toggle-button" data-video="video_5">▶ Play</button>
+    </div>
+</div>
+
+<!-- Video 6 -->
+<div class="video-wrapper">
+    <div class="video-header">Bridge Zaragoza 2.</div>
+    <div class="video-frame">
+        <div class="video-container">
+            <div id="poster_6" class="loading-poster"></div>
+            <video id="video_6" muted playsinline>
+                <source src="https://zoocams.elpasozoo.org/BridgeZaragoza2.m3u8" type="application/x-mpegURL">
+            </video>
+            <canvas id="overlay_6"></canvas>
+        </div>
+    </div>
+    <div class="controls-row">
+        <button class="quality-toggle" data-video="video_6">High Quality</button>
+        <div id="status_6" class="status-indicator">Loading...</div>
+        <button class="toggle-button" data-video="video_6">▶ Play</button>
+    </div>
+</div>
+
+<!-- Video 7 -->
+<div class="video-wrapper">
+    <div class="video-header">Stanton Bridge 7</div>
+    <div class="video-frame">
+        <div class="video-container">
+            <div id="poster_7" class="loading-poster"></div>
+            <video id="video_7" muted playsinline>
+                <source src="https://zoocams.elpasozoo.org/BridgeZaragoza3.m3u8" type="application/x-mpegURL">
+            </video>
+            <canvas id="overlay_7"></canvas>
+        </div>
+    </div>
+    <div class="controls-row">
+        <button class="quality-toggle" data-video="video_7">High Quality</button>
+        <div id="status_7" class="status-indicator">Loading...</div>
+        <button class="toggle-button" data-video="video_7">▶ Play</button>
+    </div>
+</div>
+
+
+
+
+<script>
+const PIXEL_SIZE = 20;
+let activeVideo = null;
+const videoStates = {};
+const videoPlayers = {};
+const fallbackImages = {};
+const DEBUG = false; // Set to false for production
+
+// Logging functions
+function log(...args) {
+    if (DEBUG) console.log(...args);
+}
+function warn(...args) {
+    if (DEBUG) console.warn(...args);
+}
+
+const videoConfigs = {
+    video_1: {
+        assumedWidth: 853,
+        assumedHeight: 480,
+        polygons: [
+            [[735, 81], [735, 81], [562, 472], [853, 479], [853, 36], [813, 23], [752, 50], [736, 82]]
+        ]
+    },
+    video_2: {
+        assumedWidth: 853,
+        assumedHeight: 480,
+        polygons: [
+            [[447, 12], [794, 175], [850, 247], [853, 8], [449, 2], [445, 4], [446, 14], [445, 8]]
+        ]
+    },
+    video_3: {
+        assumedWidth: 2560,
+        assumedHeight: 1920,
+        polygons: [
+            [[8, 653], [257, 500], [508, 611], [13, 1137], [0, 658]],
+            [[277, 358], [337, 485], [415, 518], [977, 472], [1114, 316], [1026, 215], [280, 355]],
+            [[767, 536], [1337, 526], [1296, 643], [539, 619], [738, 536]],
+            [[1423, 534], [1417, 583], [1811, 596], [1969, 645], [2420, 930], [2508, 954], [2524, 653], [1435, 534]],
+            [[1643, 277], [1643, 448], [2345, 529], [2360, 402], [1648, 282]],
+            [[91, 1101], [16, 1340], [547, 1433], [1482, 1446], [1371, 1161], [130, 1057]]
+        ]
+    },
+    video_4: {
+        assumedWidth: 1920,
+        assumedHeight: 1080,
+        polygons: [
+            [[744, 198], [19, 546], [8, 1063], [752, 1077], [787, 194], [760, 190], [740, 196]],
+            [[1114, 159], [1154, 198], [1889, 464], [1912, 474], [1914, 223], [1904, 299], [1320, 173], [1141, 167], [1117, 161]]
+        ]
+    },
+    video_5: {
+        assumedWidth: 853,
+        assumedHeight: 480,
+        polygons: [
+            [[545, 189], [566, 193], [534, 480], [396, 480], [542, 188]],
+            [[394, 206], [368, 209], [368, 218], [9, 353], [2, 353], [4, 307], [345, 207], [344, 192], [393, 191], [442, 183], [459, 182], [399, 204], [393, 207]],
+            [[648, 146], [584, 181], [548, 476], [853, 477], [853, 180], [765, 148], [650, 144], [649, 145]]
+        ]
+    },
+    video_6: {
+        assumedWidth: 853,
+        assumedHeight: 480,
+        polygons: [
+            [[4, 229], [154, 215], [216, 221], [297, 239], [402, 301], [611, 480], [283, 479], [230, 311], [175, 252], [16, 239], [3, 228]],
+            [[466, 168], [472, 213], [566, 234], [639, 257], [853, 299], [851, 236], [621, 206], [514, 188], [512, 171], [470, 167]]
+        ]
+    },
+    video_7: {
+        assumedWidth: 853,
+        assumedHeight: 480,
+        polygons: [
+            [[138, 252], [135, 343], [134, 430], [619, 428], [606, 291], [555, 252], [138, 252]],
+            [[527, 45], [665, 196], [696, 81], [549, 34], [529, 45]],
+            [[133, 142], [135, 65], [325, 17], [331, 25], [136, 138]]
+        ]
+    }
+};
+
+// Capture video frame
+function captureVideoFrame(video) {
+    if (!video || !video.videoWidth || !video.videoHeight || video.readyState < 2) {
+        warn(`Cannot capture frame for ${video.id}`);
+        return null;
+    }
+    try {
+        const tempCanvas = document.createElement('canvas');
+        const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+        tempCanvas.width = video.videoWidth;
+        tempCanvas.height = video.videoHeight;
+        tempCtx.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
+        log(`Captured frame for ${video.id}`);
+        return tempCanvas;
+    } catch (error) {
+        warn(`Error capturing frame for ${video.id}:`, error);
+        return null;
+    }
+}
+
+// Create fallback image
+function createFallbackImage(videoId, width, height) {
+    log(`Creating fallback for ${videoId}`);
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = width;
+    canvas.height = height;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = '#fff';
+    ctx.font = '20px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Stream Unavailable: ${videoId}`, width / 2, height / 2);
+    return canvas;
+}
+
+// Check canvas support
+function isCanvasSupported() {
+    const canvas = document.createElement('canvas');
+    return !!(canvas.getContext && canvas.getContext('2d'));
+}
+
+// Debounce function for resize events
+function debounce(fn, delay) {
+    let timeout;
+    return (...args) => {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => fn(...args), delay);
+    };
+}
+
+// Setup video player
+function setupVideoPlayer(videoId, canvasId, config, onComplete) {
+    log(`Setting up ${videoId}`);
+    if (!isCanvasSupported()) {
+        warn(`${videoId}: Canvas not supported`);
+        document.getElementById(`status_${videoId.split('_')[1]}`).textContent = "Browser not supported";
+        onComplete();
+        return {};
+    }
+
+    const video = document.getElementById(videoId);
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const statusElement = document.getElementById(`status_${videoId.split('_')[1]}`);
+    const posterElement = document.getElementById(`poster_${videoId.split('_')[1]}`);
+    let hlsInstance = null;
+    let animationFrameId = null;
+    let lastFrame = null;
+    let isLowQuality = true; // Enforce low quality by default
+    let retryCount = 0;
+    const MAX_RETRIES = 8;
+    let lastDrawTime = 0;
+    const DRAW_INTERVAL = 100;
+
+    if (!video || !canvas || !ctx || !statusElement || !posterElement) {
+        warn(`Missing elements for ${videoId}: video=${!!video}, canvas=${!!canvas}, ctx=${!!ctx}, status=${!!statusElement}, poster=${!!posterElement}`);
+        onComplete();
+        return {};
+    }
+
+    fallbackImages[videoId] = createFallbackImage(videoId, config.assumedWidth, config.assumedHeight);
+    videoStates[videoId] = {
+        hasError: true,
+        isPlaying: false,
+        isBuffering: false,
+        isFirstPlay: true,
+        isLowQuality: true // Initialize as low quality
+    };
+
+    function updateStatus(message) {
+        log(`Status for ${videoId}: ${message}`);
+        statusElement.textContent = message;
+    }
+
+    function updateCanvasSize() {
+        log(`Updating canvas size for ${videoId}`);
+        const rect = canvas.parentElement.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) {
+            warn(`Invalid canvas size for ${videoId}: ${rect.width}x${rect.height}`);
+            return;
+        }
+        const dpr = window.devicePixelRatio || 1;
+        canvas.style.width = `${rect.width}px`;
+        canvas.style.height = `${rect.height}px`;
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+    }
+
+    function drawOverlay(timestamp) {
+        if (timestamp - lastDrawTime < DRAW_INTERVAL) {
+            if (videoStates[videoId].isPlaying && !videoStates[videoId].hasError) {
+                animationFrameId = requestAnimationFrame(drawOverlay);
+            }
+            return;
+        }
+        lastDrawTime = timestamp;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const width = config.assumedWidth;
+        const height = config.assumedHeight;
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = rect.width / width;
+        const scaleY = rect.height / height;
+
+        let source = null;
+        if (videoStates[videoId].hasError || videoStates[videoId].isBuffering || video.readyState < 2) {
+            source = lastFrame || fallbackImages[videoId];
+        } else {
+            source = video;
+        }
+
+        try {
+            ctx.drawImage(source, 0, 0, rect.width, rect.height);
+        } catch (e) {
+            warn(`Draw error for ${videoId}:`, e);
+            ctx.drawImage(fallbackImages[videoId], 0, 0, rect.width, rect.height);
+        }
+
+        config.polygons.forEach(polygon => {
+            ctx.save();
+            ctx.beginPath();
+            polygon.forEach(([x, y], index) => {
+                if (index === 0) ctx.moveTo(x * scaleX, y * scaleY);
+                else ctx.lineTo(x * scaleX, y * scaleY);
+            });
+            ctx.closePath();
+            ctx.clip();
+
+            const pixelSize = isLowQuality ? PIXEL_SIZE * 2 : PIXEL_SIZE;
+            for (let y = 0; y < height; y += pixelSize) {
+                for (let x = 0; x < width; x += pixelSize) {
+                    try {
+                        const pixelData = ctx.getImageData(x * scaleX, y * scaleY, 1, 1).data;
+                        ctx.fillStyle = `rgba(${pixelData[0]}, ${pixelData[1]}, ${pixelData[2]}, ${pixelData[3] / 255})`;
+                        ctx.fillRect(x * scaleX, y * scaleY, pixelSize * scaleX, pixelSize * scaleY);
+                    } catch (e) {
+                        ctx.fillStyle = 'rgba(128, 128, 128, 0.8)';
+                        ctx.fillRect(x * scaleX, y * scaleY, pixelSize * scaleX, pixelSize * scaleY);
+                    }
+                }
+            }
+            ctx.restore();
+        });
+
+        if (videoStates[videoId].isPlaying && !videoStates[videoId].hasError) {
+            animationFrameId = requestAnimationFrame(drawOverlay);
+        }
+    }
+
+    function forcePixelation() {
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+        }
+        drawOverlay(performance.now());
+    }
+
+    function hidePoster() {
+        if (posterElement && videoStates[videoId].isFirstPlay) {
+            log(`Hiding poster for ${videoId}`);
+            posterElement.classList.add('hidden');
+            videoStates[videoId].isFirstPlay = false;
+        }
+    }
+
+    function attemptPlay() {
+        video.play().then(() => {
+            log(`${videoId}: Playback started`);
+            videoStates[videoId].isPlaying = true;
+            videoStates[videoId].hasError = false;
+            updateStatus("Playing");
+            hidePoster();
+            retryCount = 0;
+            forcePixelation();
+        }).catch(err => {
+            warn(`${videoId}: Play failed:`, err);
+            updateStatus("Playback failed - retrying...");
+            videoStates[videoId].hasError = true;
+            forcePixelation();
+            if (retryCount < MAX_RETRIES) {
+                retryCount++;
+                log(`Retrying ${videoId} (${retryCount}/${MAX_RETRIES})`);
+                setTimeout(setupHLS, 1000);
+            } else {
+                updateStatus("Stream unavailable");
+                hidePoster();
+                onComplete();
+            }
+        });
+    }
+
+    function setupHLS() {
+        if (hlsInstance) hlsInstance.destroy();
+        if (Hls.isSupported() && !video.canPlayType('application/vnd.apple.mpegurl')) {
+            log(`${videoId}: Using hls.js`);
+            hlsInstance = new Hls({
+                maxBufferLength: 4,
+                maxMaxBufferLength: 8,
+                liveSyncDurationCount: 3,
+                startLevel: 0, // Force lowest quality level
+                maxStartLevel: 0, // Restrict to lowest level
+                abrEwmaFastLive: 1.0, // Faster adaptation for live streams
+                abrEwmaSlowLive: 3.0,
+                abrBandWidthFactor: 0.7, // Conservative bandwidth estimation
+                maxMaxBitrate: 500000 // Cap maximum bitrate to reduce load on busy server
+            });
+            hlsInstance.loadSource(video.querySelector('source').src);
+            hlsInstance.attachMedia(video);
+
+            hlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
+                log(`${videoId}: Manifest parsed`);
+                updateStatus("Stream loaded");
+                // Ensure lowest quality is selected
+                hlsInstance.currentLevel = 0;
+            });
+
+            hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+                warn(`${videoId}: HLS error: ${data.type} - ${data.details}`, data);
+                updateStatus(`Stream error: ${data.type}`);
+                videoStates[videoId].hasError = true;
+                forcePixelation();
+                if (retryCount < MAX_RETRIES) {
+                    retryCount++;
+                    log(`Retrying ${videoId} (${retryCount}/${MAX_RETRIES})`);
+                    setTimeout(setupHLS, 1000);
+                } else {
+                    updateStatus("Stream unavailable");
+                    hidePoster();
+                    onComplete();
+                }
+            });
+        } else {
+            log(`${videoId}: Using native HLS`);
+            video.src = video.querySelector('source').src;
+            video.load();
+            video.addEventListener('canplay', () => {
+                log(`${videoId}: Can play native HLS`);
+                updateStatus("Stream loaded");
+            }, { once: true });
+        }
+    }
+
+    video.addEventListener('loadeddata', () => {
+        log(`${videoId}: Loaded data`);
+        lastFrame = captureVideoFrame(video);
+        videoStates[videoId].hasError = false;
+        forcePixelation();
+        hidePoster();
+        onComplete();
+    });
+
+    video.addEventListener('play', () => {
+        log(`${videoId}: Playing`);
+        videoStates[videoId].isPlaying = true;
+        videoStates[videoId].hasError = false;
+        updateStatus("Playing");
+        forcePixelation();
+    });
+
+    video.addEventListener('pause', () => {
+        log(`${videoId}: Paused`);
+        videoStates[videoId].isPlaying = false;
+        updateStatus("Paused");
+        forcePixelation();
+    });
+
+    video.addEventListener('waiting', () => {
+        log(`${videoId}: Buffering`);
+        videoStates[videoId].isBuffering = true;
+        updateStatus("Buffering...");
+        forcePixelation();
+    });
+
+    video.addEventListener('error', (e) => {
+        warn(`${videoId}: Video error:`, e);
+        updateStatus("Video error - retrying...");
+        videoStates[videoId].hasError = true;
+        forcePixelation();
+        if (retryCount < MAX_RETRIES) {
+            retryCount++;
+            log(`Retrying ${videoId} (${retryCount}/${MAX_RETRIES})`);
+            setTimeout(setupHLS, 1000);
+        } else {
+            updateStatus("Stream unavailable");
+            hidePoster();
+            onComplete();
+        }
+    });
+
+    video.addEventListener('timeupdate', () => {
+        if (videoStates[videoId].isPlaying && !videoStates[videoId].hasError) {
+            lastFrame = captureVideoFrame(video);
+            forcePixelation();
+        }
+    });
+
+    updateCanvasSize();
+    window.addEventListener('resize', debounce(() => {
+        updateCanvasSize();
+        forcePixelation();
+    }, 100));
+
+    setupHLS();
+    forcePixelation();
+
+    return {
+        forcePixelation,
+        play: () => attemptPlay(),
+        pause: () => video.pause(),
+        setQuality: (lowQuality) => {
+            isLowQuality = lowQuality;
+            if (hlsInstance) {
+                hlsInstance.currentLevel = lowQuality ? 0 : -1;
+                updateStatus(`Quality: ${lowQuality ? 'Low' : 'High'}`);
+            }
+            forcePixelation();
+        }
+    };
+}
+
+// Sequential video setup queue
+function setupVideoQueue() {
+    const videoIds = Object.keys(videoConfigs);
+    let currentIndex = 0;
+
+    function processNextVideo() {
+        if (currentIndex >= videoIds.length) {
+            log("All videos processed");
+            return;
+        }
+
+        const videoId = videoIds[currentIndex];
+        const canvasId = `overlay_${videoId.split('_')[1]}`;
+        log(`Initializing player for ${videoId}`);
+        videoPlayers[videoId] = setupVideoPlayer(videoId, canvasId, videoConfigs[videoId], () => {
+            log(`Completed setup for ${videoId}`);
+            currentIndex++;
+            processNextVideo();
+        });
+    }
+
+    processNextVideo();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    log("DOMContentLoaded fired");
+    setupVideoQueue();
+
+    document.querySelectorAll('.toggle-button').forEach(button => {
+        const videoId = button.getAttribute('data-video');
+        const handleToggle = () => {
+            log(`Toggle button clicked for ${videoId}`);
+            if (videoPlayers[videoId]) {
+                if (videoStates[videoId].isPlaying) {
+                    videoPlayers[videoId].pause();
+                    button.textContent = '▶ Play';
+                    button.classList.remove('playing');
+                    if (activeVideo === document.getElementById(videoId)) {
+                        activeVideo = null;
+                    }
+                } else {
+                    // Pause all other videos
+                    Object.keys(videoPlayers).forEach(otherVideoId => {
+                        if (otherVideoId !== videoId && videoStates[otherVideoId].isPlaying) {
+                            videoPlayers[otherVideoId].pause();
+                            const otherButton = document.querySelector(`.toggle-button[data-video="${otherVideoId}"]`);
+                            if (otherButton) {
+                                otherButton.textContent = '▶ Play';
+                                otherButton.classList.remove('playing');
+                            }
+                        }
+                    });
+                    activeVideo = document.getElementById(videoId);
+                    videoPlayers[videoId].play();
+                    button.textContent = '⏸ Pause';
+                    button.classList.add('playing');
+                }
+                videoPlayers[videoId].forcePixelation();
+            }
+        };
+        button.addEventListener('click', handleToggle);
+        button.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            handleToggle();
+        });
+    });
+
+    document.querySelectorAll('.quality-toggle').forEach(button => {
+        const videoId = button.getAttribute('data-video');
+        // Set initial button text to reflect low quality
+        button.textContent = 'Low Quality';
+        const handleQualityToggle = () => {
+            log(`Quality toggle clicked for ${videoId}`);
+            if (videoPlayers[videoId]) {
+                const newQuality = !videoStates[videoId].isLowQuality;
+                videoPlayers[videoId].setQuality(newQuality);
+                button.textContent = newQuality ? 'High Quality' : 'Low Quality';
+                videoStates[videoId].isLowQuality = newQuality;
+            }
+        };
+        button.addEventListener('click', handleQualityToggle);
+        button.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            handleQualityToggle();
+        });
+    });
+});
+</script>
+
+
+
+
+<div class="center-text">
+
+Share With Friends:
+
+<!-- AddToAny BEGIN -->
+<div class="a2a_kit a2a_kit_size_32 a2a_default_style" id="my_centered_buttons" data-a2a-url="https://borderswaittime.com/united-states-mexico/el-paso/" data-a2a-title="El Paso Border Wait Times Mexico To United States.">
+<a class="a2a_dd" href="https://www.addtoany.com/share"></a>
+<a class="a2a_button_whatsapp"></a>
+<a class="a2a_button_telegram"></a>
+<a class="a2a_button_viber"></a>
+<a class="a2a_button_facebook"></a>
+<a class="a2a_button_sms"></a>
+<a class="a2a_button_twitter"></a>
+<a class="a2a_button_linkedin"></a>
+<a class="a2a_button_pinterest"></a>
+</div>
+</div>
+<script async src="https://static.addtoany.com/menu/page.js"></script>
+<!-- AddToAny END -->
+<br>
+        <div class="contentDescription">
+            <h2>El Paso Border Crossings.</h2>
+
+            <p>El Paso is a city located on the border between the United States and Mexico. It is connected to Ciudad Juarez, Chihuahua by several international ports of entry managed by the City of El Paso International Bridges Department. These ports of entry provide crucial services to travelers and businesses while helping to ensure the safety and security of both countries.
+<br>
+The City of El Paso International Bridges Department manages three of the region's international ports of entry- the Paso Del Norte, Stanton and Zaragoza. The U.S. sides of these ports of entry are owned by the City of El Paso and they operate 24 hours a day, 7 days a week. Depending on an individual's transportation method, a different toll rate applies at the international bridges.
+<br>
+Travelers crossing the border at El Paso can take advantage of programs like the Secure Electronic Network for Travelers Rapid Inspection (SENTRI) to expedite their clearance process. This program allows for expedited clearance for pre-approved, low-risk travelers upon arrival in the United States. It is essential to have all your travel documents in order and to be prepared for potential wait times.
+<br>
+In summary, El Paso is a city located on the border between the United States and Mexico. It provides crucial services to travelers and businesses while helping to ensure the safety and security of both countries. Whether you are crossing for business or pleasure, be sure to have all your travel documents in order and be prepared for potential wait times.
+<br>
+Using websites like BordersWaitTime.com to check real-time information on wait times at different border crossings can help you plan your trip more efficiently. Knowing the wait times in advance can help you decide which border crossing to use and what time of day to cross. It can also help you plan for any potential delays and make any necessary adjustments to your travel plans. Being prepared and informed can help make the border crossing process smoother and less stressful.
+<br>
+It is always a good idea to plan ahead when crossing the border. Having all your travel documents in order and being prepared for potential wait times can help make the process smoother and less stressful. Taking advantage of programs like the Secure Electronic Network for Travelers Rapid Inspection (SENTRI) can help expedite the clearance process for pre-approved, low-risk travelers upon arrival in the United States.</p>
+        </div>
+
+    <a href="#" class="scrollup"><i class="fa fa-caret-square-o-up fa-2x"></i></a>
+
+
+<footer>
+  <p>Copyright &copy; 2023 Borders Wait Time.</p>
+</footer>
+
+<script>
+const currentUrl = window.parent.location.href;
+const pageTitle = window.parent.document.querySelector('title').textContent;
+const favoritesList = JSON.parse(localStorage.getItem('favorites')) || [];
+
+function updateFavoritesButton() {
+    const isFavorite = favoritesList.some(favorite => favorite.url === currentUrl);
+    const favoritesButton = document.querySelector('#favorite-toggle-button');
+
+    if (isFavorite) {
+        favoritesButton.textContent = 'View my list';
+        favoritesButton.onclick = toggleMenu;
+    } else {
+        favoritesButton.textContent = 'Add to my list';
+        favoritesButton.onclick = () => {
+            favoritesList.push({ url: currentUrl, title: pageTitle });
+            localStorage.setItem('favorites', JSON.stringify(favoritesList));
+            updateFavoritesList();
+            updateFavoritesButton();
+        };
+    }
+}
+
+function updateFavoritesList() {
+    const favoritesContainer = document.querySelector('#favorites');
+    favoritesContainer.innerHTML = '';
+
+    if (favoritesList.length === 0) {
+        favoritesContainer.textContent = 'Your favorites list is empty.';
+        return;
+    }
+
+    favoritesList.forEach(favorite => {
+        const link = document.createElement('a');
+        link.href = favorite.url;
+        link.textContent = favorite.title;
+        link.target = '_top';
+
+        const deleteButton = document.createElement('button');
+        deleteButton.textContent = 'Delete';
+        deleteButton.addEventListener('click', event => {
+            event.preventDefault();
+            const index = favoritesList.indexOf(favorite);
+            favoritesList.splice(index, 1);
+            localStorage.setItem('favorites', JSON.stringify(favoritesList));
+            updateFavoritesList();
+            updateFavoritesButton();
+        });
+
+        link.appendChild(deleteButton);
+        favoritesContainer.appendChild(link);
+    });
+}
+
+updateFavoritesButton();
+updateFavoritesList();
+</script>
+<script>
+function searchFunction() {
+  var input = document.getElementById("Search");
+  var filter = input.value.toLowerCase();
+  var nodes = document.getElementsByClassName('resultTable');
+
+  for (i = 0; i < nodes.length; i++) {
+    if (nodes[i].innerText.toLowerCase().includes(filter)) {
+      nodes[i].style.display = "block";
+    } else {
+      nodes[i].style.display = "none";
+    }
+  }
+}
+</script>
+<script>
+fetch('https://bwt.cbp.gov/api/bwtrss/getAllPortsRss/Mexico')
+  .then(response => response.text())
+  .then(str => (new window.DOMParser()).parseFromString(str, "text/xml"))
+  .then(data => {
+    let container = document.getElementById("MarqueeWaitTimeResult");
+    let items = data.getElementsByTagName("item");
+    let marqueeText = "";
+    for (let i = 0; i < items.length; i++) {
+      let title = items[i].getElementsByTagName("title")[0].childNodes[0].nodeValue;
+      let description = items[i].getElementsByTagName("description")[0].innerHTML;
+      if (description.includes("min")) {
+        marqueeText += title + " - ";
+        let descriptionParts = description.split("<br/>");
+        for (let j = 0; j < descriptionParts.length; j++) {
+          if (descriptionParts[j].includes("min")) {
+            marqueeText += `<span class="min">${descriptionParts[j]}</span> - `;
+          }
+        }
+      }
+      if (description.includes("open")) {
+        marqueeText += `<span class="open">${title}</span> - `;
+      }
+      if (description.includes("closed")) {
+        marqueeText += `<span class="closed">${title}</span> - `;
+      }
+    }
+    marqueeText = marqueeText.slice(0, -3);
+    let marqueeDiv = document.createElement("div");
+    marqueeDiv.classList.add("marquee");
+    marqueeDiv.innerHTML = `<p>${marqueeText}</p>`;
+    container.appendChild(marqueeDiv);
+  });
+</script>
+
+
+   <script src="scrollUp.js"></script>
+   <script src='https://translate.google.com/translate_a/element.js?cb=googleTranslateElementInit'></script>
+
+<!-- Default Statcounter code for borderwaittimes
+https://borderswaittime.com/ -->
+<script type="text/javascript">
+var sc_project=12892873; 
+var sc_invisible=1; 
+var sc_security="a78657e0"; 
+</script>
+<script type="text/javascript"
+src="https://www.statcounter.com/counter/counter.js"
+async></script>
+<noscript><div class="statcounter"><a title="Web Analytics"
+href="https://statcounter.com/" target="_blank"><img
+class="statcounter"
+src="https://c.statcounter.com/12892873/0/a78657e0/1/"
+alt="Web Analytics"
+referrerPolicy="no-referrer-when-downgrade"></a></div></noscript>
+<!-- End of Statcounter Code -->
+
+</body>
+</html>

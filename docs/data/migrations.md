@@ -36,6 +36,11 @@ Several migrations say so explicitly in a comment; copy that habit.
 | 0009 | `ig_post_edits` | The table + pending index; `photo_overrides`, `caption_is_custom`. **Does not enable RLS** | Telegram-driven edits, shaped by the serverless/Pillow split |
 | 0010 | `ig_post_kinds` | Widens the `kind` CHECK to five values; `period_key`; the live-period index | Four formats over one renderer |
 | 0011 | `internal_table_rls` | RLS, no policies, on `runs` and `ig_post_edits`. Applied 2026-09-17 | Closes the anon-key gap open since 0001/0009; matches the 0004/0008 posture |
+| 0013 | `border_waits` | `border_ports` (seeded with the six bridges), `border_readings` (append-only, `content_hash` UNIQUE), `border_runs`; RLS, no policies | Border wait times ([component](../components/border-wait-times.md)). Added by PR #8, applied to production 2026-09-29. (0012 is the editorial migration, documented elsewhere) |
+| 0014 | `border_retention` | A retention function for `border_readings` | Keeps the history table bounded; run daily by `border-poll --prune`. The file's header comment still says `0002`, a staging leftover |
+| 0015 | `border_alerts_crossings_typical` | `border_alerts`, `border_crossings`, the "normal for this hour" view, one retention job for all of it | Alerts survive a restart. Header comment says `0003` |
+| 0016 | `border_current_waits` | `border_current_waits` (PK `port_number, lane`; text columns never blank); RLS, no policies | The table the knowledge-base tab is built from; rewritten every poll |
+| 0017 | `border_current_waits_known_as` | A `known_as` column | The names people call each bridge ("Centro", "Puente Libre") |
 
 ---
 

@@ -1,12 +1,12 @@
 # CI/CD and Deployment
 
-Two GitHub Actions workflows, one Vercel project, one Supabase project. No PR-validation workflow of
-any kind.
+Four GitHub Actions workflows (`scheduled-scrape`, `ig-daily`, `border-poll`, and the `ci` test
+gate), one Vercel project, one Supabase project.
 
-> **The most important fact in this document:** nothing in CI runs `pytest`, `ruff check`,
-> `npm run lint` or `npm run build`. There are 239 tests and none of them execute in CI — including the
-> cron-drift guard that exists precisely to catch a half-year-invisible scheduling regression. **Run
-> tests locally; there is no safety net.** Tracked in [known-gaps.md](../known-gaps.md).
+> **What CI covers, and what it doesn't:** the `ci` workflow runs `pytest` on every pull request and
+> push to `main`, plus `ruff check` on the `border` package only (the rest of the repo has a lint
+> backlog). Nothing in CI runs `npm run lint` or `npm run build`, so the web app still has no gate.
+> The suite includes the cron-drift guard that catches a half-year-invisible scheduling regression.
 
 ---
 
@@ -122,6 +122,32 @@ produces roughly **28 failed-job emails a day**, not one.
 
 ---
 
+## `ci` — the test gate
+
+`.github/workflows/ci.yml`. On every pull request, push to `main` and manual dispatch: Python 3.12,
+`pip install -e ".[dev,social,kb]"` (`[trends]` and its pandas are left out; that source imports lazily
+and self-disables), then `pytest -W error::ResourceWarning`, then `ruff check src/scraper/border
+tests/border`. Runs with no `SUPABASE_*`, so it proves the suite passes with storage off. A newer push
+to the same ref cancels the older run. Make it a required check under branch protection to turn it
+from advice into a gate.
+
+---
+
+## `border-poll` — border wait times
+
+`.github/workflows/border_poll.yml`, added by PR #8. Every 10 minutes it reads CBP and
+pasosfronterizos, upserts `border_current_waits` and appends CBP history to `border_readings`; at 10:20
+UTC daily it also prunes and runs a live check that CBP still parses (`selfcheck`, fatal on purpose).
+Own concurrency group (`border-poll`, no cancel), so it never queues behind the scrape. A failed write
+exits 3 and turns the run red rather than passing silently.
+
+The final step, `python -m scraper.border sheet`, publishes the crossing times to their own tab of the
+knowledge-base sheet. It is **off until the repo variable `BORDER_KB_TAB` is set**, and
+`continue-on-error` — a Sheets outage must not fail a reading that already landed. Rollback: Actions →
+border-poll → Disable workflow. Full detail in [border-wait-times.md](../components/border-wait-times.md).
+
+---
+
 ## Deployment topology
 
 | Surface | Host |
@@ -185,7 +211,7 @@ Three things to know:
 
 ---
 
-## Local verification (what CI would run, if it ran anything)
+## Local verification (what `ci` runs, plus the web build)
 
 ```bash
 # Python
@@ -202,7 +228,7 @@ Do this before pushing. See the [verification contract](../engineering/conventio
 
 ## Gaps in this area
 
-- No CI runs tests, lint, or the web build.
+- CI runs the Python tests and border lint, but not repo-wide `ruff` (a backlog of several hundred findings) or the web lint/build.
 - `scheduled_scrape.yml` sets no `cache: pip` and declares no `concurrency` group.
 - **No rollback procedure is documented** for any surface.
 - Fine-grained `GH_DISPATCH_TOKEN` expiry will break "now" actions on a schedule with no alerting until

@@ -5,9 +5,9 @@ scraped source, ranked for someone deciding "leave now or wait", and written to 
 so everything downstream can read the same numbers. Owns `src/scraper/border/`, the
 `border_*` tables, and `.github/workflows/border_poll.yml`.
 
-**Status: built, tables created, not yet running.** Everything here is new files; nothing
-existing in the repo was edited. The tables exist in production (2026-09-29); the
-poller starts once this branch is on `main`. What is left is in [Wiring it in](#wiring-it-in).
+**Status: merged to `main` (PR #8, 2026-10-01); `border-poll` runs every 10 minutes.** The tables
+exist in production (2026-09-29). The sheet export stays off until `BORDER_KB_TAB` is set. What is
+left is in [Wiring it in](#wiring-it-in).
 
 ---
 

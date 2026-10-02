@@ -165,6 +165,16 @@ costs a column of NULLs rather than the data.
 
 ---
 
+## `border_*` tables
+
+Six tables, all added by migrations 0013–0017 and owned by `src/scraper/border/` — see
+[border-wait-times.md](../components/border-wait-times.md) for columns and semantics. They reference
+nothing else in this schema except each other (`border_ports` is the parent). RLS on, zero policies,
+so only the service-role key reads or writes them. `border_current_waits` is the one the knowledge-base
+sheet is built from.
+
+---
+
 ## `ig_post_edits`
 
 `id`, `post_id` (FK → `ig_posts` ON DELETE CASCADE), `op` (CHECK `drop_event` / `swap_photo`),

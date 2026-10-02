@@ -195,6 +195,7 @@ environments: `IG_TIMEZONE`, `IG_MIN_SLIDES`, `IG_AUTO_APPROVE_HOUR`, `IG_SLIDES
 | `KB_LOCATION` | `El Paso` | V |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | none | S — the whole key file as one value |
 | `GOOGLE_APPLICATION_CREDENTIALS` | none | — path alternative, local only |
+| `BORDER_KB_TAB` | none — unset means the crossing-times export is off | V — the tab `border-poll` writes in the same sheet. **Must differ from `KB_SHEET_TAB`**: each export shrinks its tab to fit, so sharing one wipes the other (the job refuses to run) |
 
 > **The step everyone misses:** share the sheet with the **service account's email as an Editor**. It
 > has no access until you do.

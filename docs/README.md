@@ -52,6 +52,7 @@ the only documents everyone is expected to have read.
 | [components/social-pipeline.md](components/social-pipeline.md) | `src/scraper/social/` — selection, rendering, Telegram approval, publishing, metrics |
 | [components/web-app.md](components/web-app.md) | `web/` — Next.js 16 site, admin surfaces, auth, map, i18n, design system |
 | [components/knowledge-base-export.md](components/knowledge-base-export.md) | `src/scraper/kb/` — the Google Sheet that grounds the GoHighLevel bot |
+| [components/border-wait-times.md](components/border-wait-times.md) | `src/scraper/border/` — live bridge wait times, the 10-minute `border-poll`, the crossing-times sheet tab |
 
 ### Data
 

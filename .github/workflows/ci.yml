@@ -1,0 +1,43 @@
+name: ci
+
+# The only workflow that runs tests. The others (scheduled-scrape, ig-daily, border-poll)
+# are production jobs; this is the gate a change passes before it reaches them.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # social brings Pillow (tests/social renders images), kb brings gspread. [trends]
+      # (pandas) is left out: pytrends is imported lazily and its source self-disables.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,social,kb]"
+
+      # No SUPABASE_* here, on purpose: the suite must pass with storage off, which is
+      # also how a contributor's machine runs it.
+      - name: Tests
+        run: python -m pytest -q -W error::ResourceWarning
+
+      # Scoped to the border package: the rest of the repo has a ruff backlog, and a
+      # gate that is red from day one gets ignored. Widen it as the backlog is paid down.
+      - name: Lint (border)
+        run: ruff check src/scraper/border tests/border

@@ -43,7 +43,7 @@ class FakeStorage:
         self.updates.append((post_id, patch))
 
 
-TODAY = date.today()
+TODAY = social._today("America/Denver")  # the code's clock, not the runner's: UTC on CI is a day ahead each evening
 
 
 def _row(post_id, day, error=None):

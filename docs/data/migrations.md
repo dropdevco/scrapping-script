@@ -41,6 +41,7 @@ Several migrations say so explicitly in a comment; copy that habit.
 | 0015 | `border_alerts_crossings_typical` | `border_alerts`, `border_crossings`, the "normal for this hour" view, one retention job for all of it | Alerts survive a restart. Header comment says `0003` |
 | 0016 | `border_current_waits` | `border_current_waits` (PK `port_number, lane`; text columns never blank); RLS, no policies | The table the knowledge-base tab is built from; rewritten every poll |
 | 0017 | `border_current_waits_known_as` | A `known_as` column | The names people call each bridge ("Centro", "Puente Libre") |
+| 0019 | `border_poll_dispatch` | `pg_cron`, `pg_net`; `dispatch_border_poll(job)`; three cron jobs (poll every 10 min, daily 10:20 UTC, housekeeping). **Inert until a GitHub token is in Vault** | GitHub's own cron proved unreliable (~1 run per 3 hours), so Postgres keeps the clock and dispatches `border-poll` through the GitHub API. (0018 is the weekly/hype migration, in a separate PR) |
 
 ---
 

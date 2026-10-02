@@ -60,3 +60,28 @@ def test_every_command_resolves_to_a_module_with_main(command):
     import importlib
 
     assert callable(importlib.import_module(COMMANDS[command]).main)
+
+
+MIGRATION = Path(__file__).resolve().parents[2] / "supabase/migrations/0019_border_poll_dispatch.sql"
+
+
+def test_the_dispatch_clock_targets_this_workflow_and_stays_off_without_a_token():
+    """GitHub's own cron fired ~4 times in 17 hours, so pg_cron dispatches the workflow.
+    The SQL has to name the right workflow file and jobs, never hand the token to
+    anon/authenticated, and do nothing when the vault secret is missing."""
+    sql = MIGRATION.read_text(encoding="utf-8")
+    assert "workflows/border_poll.yml/dispatches" in sql
+    assert WORKFLOW.exists()
+    assert "from public, anon, authenticated" in sql
+    assert "github_dispatch_token" in sql and "return null" in sql
+    # The jobs the workflow's `job` input accepts are the ones the function allows.
+    options = re.search(r'options: \[([^\]]+)\]', WORKFLOW.read_text(encoding="utf-8")).group(1)
+    for job in re.findall(r'"(\w+)"', options):
+        assert f"'{job}'" in sql
+
+
+def test_the_dispatch_crons_match_the_cadence_the_workflow_documents():
+    sql = MIGRATION.read_text(encoding="utf-8")
+    assert "'*/10 * * * *'" in sql and "dispatch_border_poll('poll')" in sql
+    daily = [c for c in _crons() if not c.startswith("*/")]
+    assert f"'{daily[0]}'" in sql and "dispatch_border_poll('daily')" in sql

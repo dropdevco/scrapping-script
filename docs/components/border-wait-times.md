@@ -615,6 +615,37 @@ Found by running against it, not by reading docs:
 - **`crossing_name` is empty for port 240221**, which is why the registry exists.
 - **Ports close**: Stanton runs 6 AM–midnight, Santa Teresa 6 AM–10 PM.
 
+## The clock: pg_cron, with GitHub's cron as backup
+
+GitHub Actions `schedule:` is best-effort. Observed after merge: 4 scheduled runs in 17 hours
+for a `*/10` cron, and the daily 10:20 UTC run never fired. That cannot deliver the
+10-minute freshness agreed on 2026-09-29, so migration `0019_border_poll_dispatch.sql`
+moves the clock into Supabase: `pg_cron` runs `dispatch_border_poll()` every 10 minutes
+(and the daily job at 10:20 UTC), which uses `pg_net` to call the workflow's
+`workflow_dispatch` through the GitHub API. The YAML crons stay as a backup; both share the
+`border-poll` concurrency group, so a doubled run is harmless.
+
+**Off until you do this once** (the function does nothing without the secret):
+
+1. Create a fine-grained token at `github.com/settings/personal-access-tokens/new`, owner =
+   the org, only this repository, permission **Actions: Read and write**. It needs an expiry;
+   put the date in your calendar, because the dispatch stops silently when it lapses.
+2. Apply `0019` in the SQL Editor, then store the token:
+   ```sql
+   select vault.create_secret('<token>', 'github_dispatch_token', 'border-poll dispatch');
+   ```
+3. Check it works (a `204` means GitHub accepted the dispatch):
+   ```sql
+   select status_code, created from net._http_response order by created desc limit 5;
+   select jobname, schedule, active from cron.job where jobname like 'border-poll%';
+   select status, start_time from cron.job_run_details order by start_time desc limit 5;
+   ```
+
+If `status_code` is `401`/`403`/`404` the token is wrong or expired. To stop it, run
+`select cron.unschedule('border-poll-dispatch');` (the workflow's own cron keeps going).
+
+---
+
 ## Wiring it in
 
 Each is a small change to an existing file, deliberately left for review. Only step 1

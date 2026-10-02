@@ -18,7 +18,7 @@ gate), one Vercel project, one Supabase project.
 | Manual | `workflow_dispatch` with `job` ∈ `all` (default) / `events` / `trends` |
 | Runner | `ubuntu-latest`, Python 3.12, **no pip cache** |
 | Timeout | 20 minutes |
-| Concurrency | **None declared** — two overlapping runs are possible |
+| Concurrency | Group `scheduled-scrape`, `cancel-in-progress: false` — added because the cross-run merge in `storage.py` is a read-then-write with no locking, so two overlapping runs could both conclude the same event is new and both insert it |
 | Install | `pip install -e ".[trends,kb]"` |
 
 Two steps:
@@ -35,15 +35,16 @@ only see it in the step log.
 
 ## `ig-daily` — the Instagram pipeline
 
-Four triggers:
+Five triggers:
 
 | Trigger | Schedule | Purpose |
 |---|---|---|
-| `workflow_run` on `scheduled-scrape` completing | — | Builds the daily digest (see below — it covers the *next* local day) |
+| `workflow_run` on `scheduled-scrape` completing | — | Builds the daily digest (see below — it covers the *next* local day) **and** checks for a hype-worthy event (`build --kind hype`, an extra unconditional step in the same job — most days a no-op) |
 | `schedule` | `0,30 13-23,0-2 * * *` — 28 ticks/day | The publish sweep |
 | `schedule` | `0 18 * * 4` — Thursdays | Builds the `weekend` post |
 | `schedule` | `0 18 1 * *` — the 1st | Builds the `monthly` post |
-| `workflow_dispatch` | — | `job` ∈ `both`/`build`/`publish`/`prune`/`rebuild`; `kind`; `post_id` |
+| `schedule` | `7 13 * * 0` — Sundays | Builds all six `weekly` pillar posts in one run, staggered through the day via their own `scheduled_for` |
+| `workflow_dispatch` | — | `job` ∈ `both`/`build`/`publish`/`prune`/`rebuild`; `kind` (now including `weekly`/`hype`); `post_id` |
 
 Concurrency group `ig-daily`, `cancel-in-progress: false`.
 
@@ -54,6 +55,7 @@ Concurrency group `ig-daily`, `cancel-in-progress: false`.
 | `0,30 13-23,0-2` | 07:00 – 20:30 | 06:00 – 19:30 |
 | `0 18 * * 4` | Thu 12:00 | Thu 11:00 |
 | `0 18 1 * *` | 1st 12:00 | 1st 11:00 |
+| `7 13 * * 0` | Sun 07:07 | Sun 06:07 |
 
 **The sweep window's shape is a bug fix, not an arbitrary range.** A 17:00 Denver deadline is 23:00 UTC
 in MDT but **00:00 UTC the next day** in MST, so the old `0,30 14-23` window covered summer and
@@ -79,6 +81,12 @@ guard below is unaffected.
 
 All four: `ubuntu-latest`, Python 3.12 with pip cache, `pip install -e ".[social]"`.
 
+**Editorial council env block:** `OPENROUTER_API_KEY` (secret), `COUNCIL_ENABLED`, `COUNCIL_MODEL`,
+`COUNCIL_MAX_CALLS` (all repo variables). Ships with `COUNCIL_ENABLED` off by default, so the workflow
+carries the wiring without the council actually running until someone flips the variable. Note
+`COUNCIL_TIMEOUT_SECONDS` is **not** in this env block today — see
+[configuration.md](configuration.md#editorial-council).
+
 ### Step-level failure behaviour
 
 This is the operationally important part.
@@ -90,6 +98,7 @@ This is the operationally important part.
 | build | `check-token` | `continue-on-error` — a dead token must not stop today's draft being built for review |
 | build | `prune` | FATAL |
 | build | `build --kind $KIND` | FATAL |
+| build | `build --kind hype` (only on the `workflow_run` trigger) | FATAL — but "nothing hype-worthy today" is a normal 0-exit outcome inside the app, not a failure |
 | rebuild | `apply-edits --post-id` | FATAL |
 | publish | `apply-edits` | FATAL |
 | publish | `autoapprove` | FATAL |
@@ -234,7 +243,7 @@ Do this before pushing. See the [verification contract](../engineering/conventio
 ## Gaps in this area
 
 - CI runs the Python tests and border lint, but not repo-wide `ruff` (a backlog of several hundred findings) or the web lint/build.
-- `scheduled_scrape.yml` sets no `cache: pip` and declares no `concurrency` group.
+- `scheduled_scrape.yml` still sets no `cache: pip` (a `concurrency` group was added — see above).
 - **No rollback procedure is documented** for any surface.
 - Fine-grained `GH_DISPATCH_TOKEN` expiry will break "now" actions on a schedule with no alerting until
   someone notices.
@@ -243,4 +252,4 @@ All tracked in [known-gaps.md](../known-gaps.md).
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-10.*
+*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-22.*

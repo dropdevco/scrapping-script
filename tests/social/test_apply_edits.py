@@ -7,7 +7,7 @@ the slide minimum, or overwriting a post that went live mid-rebuild.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -31,18 +31,20 @@ def _event(n: int) -> dict:
 
 
 EVENTS = [_event(n) for n in range(1, 7)]
+WINDOW = (f"{TODAY.isoformat()}T00:00:00+00:00", f"{(TODAY + timedelta(days=1)).isoformat()}T00:00:00+00:00")
 
 
 class FakeStorage:
     enabled = True
     client = object()
 
-    def __init__(self, post, edits):
+    def __init__(self, post, edits, bench=None):
         self.post = post
         self.edits = edits
         self.marked: list[tuple[list[str], str | None]] = []
         self.final_patch: dict | None = None
         self.cas_succeeds = True
+        self.bench = bench or []
 
     async def pending_edits(self, post_id=None):
         return list(self.edits)
@@ -53,10 +55,19 @@ class FakeStorage:
     async def events_by_ids(self, ids):
         # Deliberately reversed: events_by_ids makes no order guarantee, and
         # the rebuild must re-impose the post's own stored order.
-        return [e for e in reversed(EVENTS) if e["id"] in set(ids)]
+        pool = EVENTS + self.bench
+        return [e for e in reversed(pool) if e["id"] in set(ids)]
 
     async def mark_edits_applied(self, ids, error=None):
         self.marked.append((list(ids), error))
+
+    async def query_events_for_range(self, city, start_iso, end_iso):
+        # A backfill re-queries the post's own window; the fake window covers
+        # the whole pool, same as a real digest window would.
+        return EVENTS + self.bench
+
+    async def recent_slide_keys(self, since_date, kinds=("digest",)):
+        return set()
 
     async def apply_ig_post_edit_result(self, post_id, patch):
         if not self.cas_succeeds:
@@ -98,10 +109,13 @@ def wired(monkeypatch):
     monkeypatch.setattr(social.notify_mod, "notify_alert", _alert)
     monkeypatch.setattr(social.notify_mod, "notify_draft_ready", _draft_ready)
 
-    def _install(*, event_ids, edits, status="draft", caption_is_custom=False):
+    def _install(
+        *, event_ids, edits, status="draft", caption_is_custom=False, window=None, bench=None
+    ):
         post = {
             "id": POST,
             "post_date": TODAY.isoformat(),
+            "kind": "digest",
             "status": status,
             "event_ids": event_ids,
             "caption": "original caption",
@@ -109,7 +123,9 @@ def wired(monkeypatch):
             "slide_paths": [f"{TODAY.isoformat()}/{POST}/{i:02d}.jpg" for i in range(len(event_ids) + 1)],
             "photo_overrides": {},
         }
-        store = FakeStorage(post, edits)
+        if window:
+            post["window_start"], post["window_end"] = window
+        store = FakeStorage(post, edits, bench=bench)
         monkeypatch.setattr(social, "Storage", lambda: store)
         return store, uploaded, removed, alerts
 
@@ -216,6 +232,107 @@ async def test_an_out_of_range_index_is_ignored_rather_than_crashing(wired):
     store, _, _, _ = wired(event_ids=list(ALL_IDS), edits=[_drop(99)])
     assert await social.apply_edits() == 0
     assert store.final_patch["event_ids"] == ALL_IDS
+
+
+# ── drop backfill ────────────────────────────────────────────────────────────
+async def test_a_drop_is_backfilled_from_the_window_when_the_bench_has_room(wired, monkeypatch):
+    """Dropping a duplicate must not quietly ship a shorter carousel than the
+    day actually supports — a bench event fills the open slot."""
+    monkeypatch.setattr(settings, "ig_max_slides", len(ALL_IDS))
+    bench = _event(7)
+    store, _, _, _ = wired(
+        event_ids=list(ALL_IDS), edits=[_drop(2)], window=WINDOW, bench=[bench]
+    )
+    await social.apply_edits()
+    kept = store.final_patch["event_ids"]
+    assert len(kept) == len(ALL_IDS)
+    assert ALL_IDS[2] not in kept
+    assert bench["id"] in kept
+
+
+async def test_backfill_never_overshoots_ig_max_slides(wired, monkeypatch):
+    """Two bench events are available but only one slot opened up."""
+    monkeypatch.setattr(settings, "ig_max_slides", len(ALL_IDS))
+    bench = [_event(7), _event(8)]
+    store, _, _, _ = wired(
+        event_ids=list(ALL_IDS), edits=[_drop(2)], window=WINDOW, bench=bench
+    )
+    await social.apply_edits()
+    assert len(store.final_patch["event_ids"]) == len(ALL_IDS)
+
+
+async def test_backfill_skips_a_same_venue_duplicate_of_a_kept_event(wired, monkeypatch):
+    """The 2026-09-23 shape: a bench row is the same real happening as
+    something already kept, just worded differently — it must not be
+    readmitted even though it isn't literally the dropped id."""
+    monkeypatch.setattr(settings, "ig_max_slides", len(ALL_IDS))
+    duplicate_of_event_1 = {
+        **_event(8),
+        "title": "EVENT 1!",  # near-identical to kept Event 1's title
+        "venue": "Venue 1",  # same venue as kept Event 1
+        "ticket_links": [{"url": "x"}],  # outscores the real Event 1, so it's
+        # THIS row (a different id than kept's Event 1) that survives
+        # selection.choose()'s own internal collapse and reaches the pool —
+        # exercising _backfill_for_edit's own duplicate guard, not just the
+        # plain "already kept" id check.
+    }
+    store, _, _, _ = wired(
+        event_ids=list(ALL_IDS), edits=[_drop(2)], window=WINDOW, bench=[duplicate_of_event_1]
+    )
+    await social.apply_edits()
+    kept = store.final_patch["event_ids"]
+    assert duplicate_of_event_1["id"] not in kept
+    assert len(kept) == len(ALL_IDS) - 1  # nothing else was on the bench to fill the slot
+
+
+async def test_no_backfill_without_a_stored_window(wired, monkeypatch):
+    """An older post (or any caller that never set window_start/window_end)
+    gets no backfill rather than an error — best-effort, not a hard promise."""
+    monkeypatch.setattr(settings, "ig_max_slides", len(ALL_IDS))
+    store, _, _, _ = wired(event_ids=list(ALL_IDS), edits=[_drop(2)], bench=[_event(7)])
+    await social.apply_edits()
+    assert store.final_patch["event_ids"] == [ALL_IDS[0], ALL_IDS[1], ALL_IDS[3], ALL_IDS[4], ALL_IDS[5]]
+
+
+async def test_a_short_post_can_be_rescued_above_the_minimum_by_backfill(wired, monkeypatch):
+    """Below-minimum after a drop is a reason to backfill first, not to
+    refuse outright — refusing should only happen if the bench can't help.
+    The original post only used 4 of the 6 window events (say, an earlier
+    build with a tighter cap); backfill draws on the other 2 plus the bench,
+    not just enough to clear the minimum."""
+    monkeypatch.setattr(settings, "ig_max_slides", 9)
+    store, _, _, alerts = wired(
+        event_ids=ALL_IDS[:4], edits=[_drop(0)], window=WINDOW, bench=[_event(7)]
+    )
+    await social.apply_edits()
+    assert store.final_patch is not None
+    kept = store.final_patch["event_ids"]
+    assert len(kept) == 6  # 3 kept + the 2 unused window events + the bench event
+    assert ALL_IDS[0] not in kept  # the dropped event is not handed right back
+    assert not alerts
+
+
+async def test_swap_photo_alone_never_triggers_a_backfill_query(wired, monkeypatch):
+    """A photo swap doesn't change the slide count, so there's nothing to
+    refill — and no reason to pay for a window re-query."""
+    monkeypatch.setattr(settings, "ig_max_slides", len(ALL_IDS))
+    store, _, _, _ = wired(
+        event_ids=ALL_IDS[:4],
+        edits=[{"id": "e1", "post_id": POST, "op": "swap_photo",
+                "payload": {"event_id": ALL_IDS[0], "file_id": "f1"}}],
+        window=WINDOW, bench=[_event(7)],
+    )
+
+    async def _boom(*a, **k):
+        raise AssertionError("swap_photo alone must not query the window")
+
+    async def _no_swap(*a, **k):
+        return None
+
+    monkeypatch.setattr(store, "query_events_for_range", _boom)
+    monkeypatch.setattr(social, "_store_swapped_photo", _no_swap)
+    await social.apply_edits()
+    assert store.final_patch["event_ids"] == ALL_IDS[:4]
 
 
 # ── candidates_from_rows ──────────────────────────────────────────────────────

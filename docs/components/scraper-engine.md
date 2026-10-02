@@ -16,7 +16,7 @@ Package version `0.1.0`; distribution name is `scraper-mcp`, not "chisme".
 | **Runs on** | GitHub Actions, Python 3.12, daily 11:00 UTC (`scheduled-scrape`) |
 | **Writes** | `events`, `venues`, `trends`, `runs` |
 | **Hard requirement** | None. Without Supabase it still returns live results; it just persists nothing |
-| **Tests** | `tests/sources/` (15) only — `core/` is effectively untested. See [testing](../engineering/testing.md) |
+| **Tests** | `tests/sources/` (23) + `tests/core/` (68) — see [testing](../engineering/testing.md) |
 
 ---
 
@@ -174,6 +174,23 @@ so every match is tried in document order and the first containing `<p>` tags wi
 Meetup full text is fished out of `__NEXT_DATA__` by key search *"without hardcoding its exact nesting,
 which shifts between a site's deploys."* **When descriptions suddenly go short, suspect these first.**
 
+Two more Eventbrite-specific misses, found via a live report of one dropped event (2026-09-20) and now
+regression-tested in `tests/sources/test_events_web_time.py`, both of which silently produced a
+`start_time`/`end_time` of local midnight rather than an error:
+
+- **`_walk_for_events`'s `@type` match missed schema.org's `Festival` and `Hackathon` subtypes.** The
+  old check was a substring test (`"event" in x.lower()`), which matches `MusicEvent` but not
+  `Festival` — a real, fully-populated JSON-LD block (correct start/end times) was simply never looked
+  at. Fixed by adding `_NON_EVENT_SUFFIXED_TYPES = frozenset({"festival", "hackathon"})` alongside the
+  substring check, not instead of it.
+- **`_is_detail_url` only recognized Eventbrite's `-tickets-<id>` URL shape.** A free/RSVP listing uses
+  `-registration-<id>` instead, so the date-only-time revisit (the mechanism that's supposed to replace
+  a bare listing date with the detail page's real hour) never even fetched the page. Fixed by widening
+  the regex to `-(?:tickets|registration)-\d+`.
+
+Both bugs hit the same symptom for unrelated reasons, which is itself a lesson: a repeated symptom
+across independent code paths is worth checking for more than one root cause before calling it fixed.
+
 **`events_directories`.** Keyless and polite: robots-checked before every fetch, bounded page counts,
 and a site with no crawlable markup simply yields nothing rather than blocking the run.
 
@@ -283,17 +300,33 @@ Read methods, and which to use:
 rather than flags, and it is required reading before you add a read path — see
 [invariants §3](../architecture/invariants.md#a-public-facing-read-must-filter-status-itself).
 
-**Cross-run merge.** Only rows with both a resolved `venue_id` and a `start_time` are candidates. The
-window is built from **local** midnights, because *"a 7pm show is 01:00Z the next day, so a
-UTC-midnight window would drop every evening event on the last day of the range."* `_apply_merge`
-unions ticket links and categories and backfills only absent `description` / `image_url` / `end_time`,
-never touching `start_time`, `url`, `title`, `id` or `content_hash` — which is why the backfill scripts
-exist.
+**Cross-run merge — now two lanes.** Only rows with a `start_time` are candidates; the window is built
+from **local** midnights, because *"a 7pm show is 01:00Z the next day, so a UTC-midnight window would
+drop every evening event on the last day of the range."*
+
+- **Lane 1 (unchanged):** exact `venue_id` match. Fast, and correct whenever both sources resolved to
+  the same stored venue row.
+- **Lane 2 (`_find_cross_venue_duplicate`, new):** for whatever lane 1 didn't claim, a second pass using
+  the shared `is_same_stored_event()` predicate from `dedupe.py` (below) — same local day, folded-title
+  similarity ≥ 0.95, ≥ 3 meaningful title tokens, same coarse city, and **exactly one** candidate match
+  (ambiguity aborts to a duplicate rather than guessing). This is what catches two sources naming the
+  *same building* differently, e.g. "El Paso Live" vs. "Abraham Chavez Theatre" — a case lane 1 can
+  never see because the `venue_id`s are genuinely different rows.
+
+Both lanes route through the same `_apply_merge`, which unions ticket links and categories and
+backfills only absent `description` / `image_url` / `end_time`, never touching `start_time`, `url`,
+`title`, `id` or `content_hash` — which is why the backfill scripts exist. Lane 2 deliberately ignores
+which record's `start_time` is picked up as the base row's own — if the two sources disagree on start
+time, the loser's value is recorded to `raw["_merged_alt_start_times"]` and logged as a warning rather
+than silently discarded, so a real scheduling conflict between sources stays visible.
+
+A kill switch, `DEDUPE_CROSS_VENUE` (default on), disables lane 2 entirely if it ever needs to be turned
+off in production without a deploy.
 
 ### `dedupe.py` — identity and near-duplicate collapse
 
 `content_hash` = `sha1` of the URL when present, else `title|YYYY-MM-DD|venue`. Two confidence tiers
-for fuzzy matching, both requiring the **same non-null local calendar day** first:
+for in-batch fuzzy matching, both requiring the **same non-null local calendar day** first:
 
 - title similarity ≥ 0.9 alone, or
 - title token overlap ≥ 0.8 **and** venue similarity ≥ 0.6.
@@ -305,6 +338,35 @@ words dominate the ratio.
 
 The guiding asymmetry, from the handoff: **a false merge silently hides a real event, which is worse
 than an unmerged duplicate card.**
+
+**Stable identity under arrival order.** `_merge_into` used to keep whichever record was field-richer
+and never recompute `content_hash` — which meant a cluster's identity depended on *which source
+happened to be reachable that run*. If `events_web` failed on Monday, only the directories copy existed
+and stored under its hash; if both succeeded Tuesday, `events_web`'s copy was richer, got a *different*
+hash, and a second row was inserted for the same real event. One flaky scrape was enough to double a
+row. `_merge_into` now sets `content_hash = min(kept.content_hash, dup.content_hash)` — `min()` is
+commutative and associative, so a cluster converges on the same hash regardless of arrival order or
+which source contributed the richer fields. **This stabilizes the hash across *richness and order*, not
+across *which sources are reachable at all* — a genuinely new source joining the cluster for the first
+time still computes its own candidate hash and needs the cross-venue merge lane (see `storage.py`
+above) to actually catch it as the same event, not `min()` alone.**
+
+**Shared duplicate predicate.** `fold()` (bilingual, accent-stripping, stopword-aware) and
+`is_same_stored_event()` are the single implementation of "is this candidate the same real-world event
+as that stored row", used identically by `storage._find_cross_venue_duplicate` and
+`backfill_merge_duplicates --cross-venue` — previously these were two independently-maintained,
+gradually-diverging copies (`storage.py` vs. `backfill_merge_duplicates.py`). One surprising detail:
+`fold()` turns an apostrophe into a **space**, not nothing — `"Lowe's"` → `"lowe s"` (two tokens). Code
+that folds a name and then does substring/set matching must account for that, or a chain-name match
+(see [social-pipeline.md](social-pipeline.md#editorial-council-localnesspy-editorpy-clarifypy-criticpy))
+silently fails.
+
+`is_same_stored_event()`'s gates, all required: same local calendar day; folded-title similarity ≥ 0.95
+(higher than the in-batch 0.9, since this crosses venues and needs more confidence); **≥ 3 meaningful
+title tokens** — the guard that stops "Karaoke Night" or "Yoga in the Park" from ever cross-venue
+merging, since a 1–2 token title can't carry enough signal to be sure; same coarse city (`city_of()`);
+and **exactly one** candidate match, with ambiguity aborting to "treat as a duplicate row" rather than
+guessing which of several is the real match.
 
 ### `eventtime.py` + `timeutil.py`
 
@@ -339,10 +401,42 @@ candidate and keying on the address alone could hand one venue's coordinates to 
 
 | Module | Purpose |
 |---|---|
-| `categorize.py` | Keyword category guessing from the **title only** — descriptions are marketing boilerplate whose incidental words produce false positives. Multi-label on purpose. Default `"Community"` |
-| `address.py` | `format_address` — appends a `city, region postal` tail **only if** it is not already inside the street line, because some listings repeat the city in `streetAddress` |
+| `categorize.py` | Keyword category guessing from the **title only** — descriptions are marketing boilerplate whose incidental words produce false positives. Multi-label on purpose. Default `"Community"`. Writes `events.categories`, the website's taxonomy — **untouched** by, and unrelated to, the Instagram-only `content_tags.py` classifier documented in [social-pipeline.md](social-pipeline.md#content-pillars-corecontent_tagspy) |
+| `address.py` | `format_address` — appends a `city, region postal` tail **only if** it is not already inside the street line, because some listings repeat the city in `streetAddress`. Also owns `venue_identity()` — see below |
 | `media.py` | `clean_image_url` — rejects relative paths and placeholder markers. Meetup embeds relative fallback-graphic paths in its JSON-LD which would resolve against *our* domain and 404 |
 | `ticket_labels.py` | URL host → display label, 22 mappings, longest-first |
+
+---
+
+## Venue identity (`core/address.py`)
+
+The write-side counterpart to `dedupe.py`'s duplicate-detection: `venue_identity()` normalizes a venue's
+name + address into the pair `storage._address_hash` upserts on, so two sources describing the same
+building converge on one venue row instead of drifting into near-duplicates that then defeat both the
+per-venue diversity cap and cross-venue event merging.
+
+`normalize_address()` — NFKD accent-stripping (`café` / `cafe` compare equal), lowercase, drop a
+trailing country token (`, US` / `, Mexico`), map leading English number-words to digits (`normalize_venue_name`
+handles this too — **the actual "One Civic Center Plaza" vs "1 Civic Center Plaza" case** that was
+silently producing two venue rows for the same address), canonicalize street/directional abbreviations
+(`St`/`Street`, `Ave`/`Avenue`, `N`/`North`, …), strip a ZIP+4 suffix down to five digits, and remove
+punctuation — **except** a suite/unit marker (`ste`, `suite`, `#`), which is deliberately preserved: the
+failure mode of over-merging suite tokens is conflating two different tenants in one building onto one
+venue page, which is an acceptable annoyance, versus under-merging, which hides an event.
+
+`normalize_venue_name()` does the equivalent folding for the venue's display name alone, used by
+`dedupe.py`'s `fold()` and by `social/selection.py`'s name-first `venue_key` (still name-keyed on
+purpose — see [social-pipeline.md](social-pipeline.md#selection-selectionpy) for why an aggregator
+brand like "El Paso Live" needs name-keying regardless of how good the address normalizer gets).
+
+**Verified, not test-pinned, against the TypeScript port.** `web/src/lib/hash.ts` re-implements the same
+normalization line-for-line for the submission form's client-side venue matching. Byte-parity across 12
+hand-picked real-world cases (accents, ZIP+4, number-words, suite markers) was verified manually during
+this rollout, but **no committed automated test pins Python/TypeScript equivalence going forward** — see
+[known-gaps.md](../known-gaps.md).
+
+`backfill_merge_venues.py` (below) is the one-time convergence sweep; `_address_hash` computing the new
+identity on every future write is what keeps new rows from drifting again.
 
 ---
 
@@ -399,9 +493,11 @@ All are `python -m scraper.<module>`, all support `--dry-run`, and all but `appl
 | `backfill_event_timezones` | The naive-local-stored-as-UTC shift. Re-derives from each row's own `raw` with today's parser — **does not guess an offset** | Yes, and conservative: skips disagreements > 1 day |
 | `backfill_full_descriptions` | Re-fetches full descriptions, and for Visit El Paso / La Nube the real outbound link | Yes |
 | `backfill_geocode` | Fills `venues.lat/lng` where NULL. `--repair` **nulls out** coordinates today's rules would never produce | Fill pass yes; `--repair` is **deliberately destructive** |
-| `backfill_merge_duplicates` | Merges already-stored duplicates and **DELETES the losers** | Re-runnable but **destructive — always `--dry-run` first** |
-| `backfill_missing_event_times` | Date-only rows stored at local midnight: visits the detail page for the real hour | Yes, network-dependent |
+| `backfill_merge_venues` | Converges duplicate venue rows onto `venue_identity()`'s normalized `address_hash`: repoints `events.venue_id`, **then** deletes losers, **then** rewrites the keeper's hash — order is load-bearing since `venue_id` is an FK with no `on delete` | Re-runnable but **destructive — always `--dry-run` first** |
+| `backfill_merge_duplicates` | Merges already-stored duplicates and **DELETES the losers**. `--cross-venue` extends this to the lane-2 predicate in `dedupe.py`; also repoints `ig_posts.event_ids` before deleting a loser row, closing a pre-existing gap | Re-runnable but **destructive — always `--dry-run` first** |
+| `backfill_missing_event_times` | Date-only rows stored at local midnight: visits the detail page for the real hour. Recovers **both** `start_time` and `end_time` independently — each gated on its *own* field having been date-only in the original `raw` payload, since a real end time can legitimately land after midnight and must not be "fixed" by an hour heuristic | Yes, network-dependent |
 | `backfill_ticketmaster_images` | Repoints rows at the largest artwork in `raw.images` | Yes, no-op when already correct |
+| `backfill_content_tags` | Runs the rule-based content-pillar baseline (`content_tags.py::pillars_for`) over existing rows, IG-only, never touches `categories` | Yes, narrow `WHERE` so re-runs no-op |
 
 Two of these explain **why they must exist at all**, and both point at the same limitation:
 `_apply_merge` only ever backfills a *missing* field, so a truncated description or a midnight start
@@ -433,11 +529,23 @@ Ranked by how much time they are likely to cost you.
 11. **Caps are politeness limits, not correctness limits** — and raising one can starve another
     consumer. [ADR-0007](../architecture/adr/0007-horizon-venue-cap.md)
 12. **Two CSS selectors and one `__NEXT_DATA__` key search are one site redesign from breaking**, and
-    the code knows it. Suspect them when descriptions go short.
-13. **`core/` has no tests.** Changes to dedupe thresholds or the merge paths must be validated against
-    production data with `--dry-run` backfills, because nothing in CI will catch a regression — in fact
-    nothing in CI runs the tests at all.
+    the code knows it. Suspect them when descriptions go short. Two real Eventbrite misses of this
+    general shape (type-substring match, URL-shape match) already happened once — see the `events_web`
+    section above.
+13. **`core/` now has real tests** (`tests/core/`, 68 of them) for venue identity, dedupe stability and
+    the cross-venue duplicate predicate — but they're new, and changes to dedupe thresholds or the merge
+    paths should still be validated against production data with `--dry-run` backfills before trusting
+    them alone.
+14. **`min()`-stabilized `content_hash` only survives arrival order and field richness, not a new
+    source appearing.** See the "Stable identity under arrival order" note in `dedupe.py` above — a
+    genuinely new source for an existing event still needs the cross-venue merge lane to be caught.
+15. **Identity-hash changes need a "converge → deploy → scrape → converge again" rollout.** Enabling
+    normalized venue identity produced 97 duplicate venue rows on the very first live scrape after
+    deploy — stale hashes from rows written between the backfill and the deploy. Expected, not a
+    regression: the cross-venue merge lane still caught every resulting event-duplicate attempt (zero
+    duplicate posts), but the venue table itself needs a second `backfill_merge_venues` +
+    `backfill_merge_duplicates` pass afterward to fully converge.
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-10.*
+*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-20.*

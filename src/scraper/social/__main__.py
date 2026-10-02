@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import logging
 import sys
 from datetime import date, datetime, time, timedelta, timezone
@@ -20,6 +21,8 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from ..core.config import settings
+from ..core.content_tags import PILLARS
+from ..core.eventtime import local_day
 from ..core.http import HttpClient, redact_secrets
 from ..core.storage import Storage
 from ..sources import auth_meta
@@ -27,6 +30,7 @@ from . import caption as caption_mod
 from . import clarify as clarify_mod
 from . import critic as critic_mod
 from . import editor as editor_mod
+from . import hype as hype_mod
 from . import localness as localness_mod
 from . import notify as notify_mod
 from . import publish as publish_mod
@@ -47,6 +51,16 @@ MAX_PUBLISH_ATTEMPTS = 3
 # Marker in ig_posts.error so a held-back post alerts once, not every sweep.
 _HELD = "held:"
 
+# Suppression is scoped to each kind's own posting history (a monthly roundup
+# SHOULD repeat what the daily posts covered — that's what makes it a
+# roundup), and the lookback is longer for the slower formats, since "we
+# already showed this" means a different span for a weekly post. Shared by
+# _build_one and the Telegram-edit backfill so both suppress on the same
+# history.
+_RECENCY_LOOKBACK_DAYS = {
+    "digest": 14, "breaking": 14, "weekend": 35, "monthly": 120, "horizon": 200, "weekly": 35,
+}
+
 
 def _today(tz_name: str) -> date:
     return datetime.now(ZoneInfo(tz_name)).date()
@@ -62,6 +76,12 @@ def _suggested_schedule(day: date, tz_name: str, hour: int) -> str:
     if suggested <= now:
         suggested = now
     return suggested.astimezone(timezone.utc).isoformat()
+
+
+def _approve_hour(kind: str, slot_hour: int) -> int:
+    """Local hour at which silence becomes consent. Weekly drafts approve an hour before
+    their own slot so the six publish staggered; every other kind keeps the shared deadline."""
+    return max(slot_hour - 1, 0) if kind == "weekly" else settings.ig_auto_approve_hour
 
 
 def _parse_slots(raw: str, default_hour: int) -> list[tuple[Optional[str], int]]:
@@ -88,6 +108,22 @@ def _parse_slots(raw: str, default_hour: int) -> list[tuple[Optional[str], int]]
     return slots or [(None, default_hour)]
 
 
+# One slot per content pillar, spread across Sunday — the same multi-slot
+# mechanism IG_DIGEST_SLOTS already gives the daily post, applied to a fixed
+# six-item list instead of an env var, since the pillars themselves are
+# already a fixed taxonomy (core/content_tags.py). Easy to retune later.
+# The last slot must stay at or before 18:00 local: the publish sweep ends at 19:00 MST
+# (02:30 UTC), so a 20:00 slot opens after the final sweep and expires unpublished in
+# winter. tests/social/test_scheduling.py enforces it for both halves of the year.
+_WEEKLY_PILLAR_HOURS: tuple[int, ...] = (10, 12, 13, 15, 16, 18)
+_WEEKLY_PILLAR_SLOTS: list[tuple[Optional[str], int]] = list(zip(PILLARS, _WEEKLY_PILLAR_HOURS))
+
+# How far ahead a hype post is allowed to look for a candidate. Long enough to
+# catch a big touring show announced well in advance, short enough that a
+# spotlight always reads as "coming up soon," not "eventually."
+_HYPE_LOOKAHEAD_DAYS = 45
+
+
 # ── build ──────────────────────────────────────────────────────────────────────
 async def build(
     day: Optional[date], dry_run: bool, out_dir: Optional[str], kind: str = "digest"
@@ -106,8 +142,12 @@ async def build(
 
     # Slots split one DAY into several digests; they have no meaning for a
     # weekend or monthly roundup, which is one post per period by definition.
+    # A 'weekly' build reuses the exact same mechanism with one slot per
+    # content pillar instead of IG_DIGEST_SLOTS — see _WEEKLY_PILLAR_SLOTS.
     if kind == "digest":
         slots = _parse_slots(settings.ig_digest_slots, settings.ig_suggested_publish_hour)
+    elif kind == "weekly":
+        slots = _WEEKLY_PILLAR_SLOTS
     else:
         slots = [(None, settings.ig_suggested_publish_hour)]
 
@@ -131,55 +171,106 @@ async def _build_one(
     kind: str = "digest",
 ) -> int:
     label = f" [{slot_name or kind}]"
-    bounds = selection.BOUNDS_FOR_KIND.get(kind, selection.day_bounds)
-    start_iso, end_iso = bounds(event_day, tz_name)
-    profile = selection.PROFILES.get(kind, selection.DEFAULT_PROFILE)
-    period = selection.period_key(kind, event_day, tz_name)
-    log.info(
-        "building %s carousel for %s%s, posting %s (%s .. %s)",
-        kind, event_day, label, day, start_iso, end_iso,
-    )
+    # For 'weekly', slot_name IS the pillar (see _WEEKLY_PILLAR_SLOTS) — kept
+    # as one variable through the loop above for the label, split out here
+    # only for what actually needs the distinction: the row filter below, the
+    # ig_posts.pillar column, and the cover/caption copy lookup.
+    pillar = slot_name if kind == "weekly" else None
+    editor_report: Optional[editor_mod.EditorReport] = None
+    period: Optional[str] = None
+    hype_twins: list[str] = []
 
-    rows = await storage.query_events_for_range(CITY, start_iso, end_iso)
-    log.info("%d approved El Paso event(s) in window%s", len(rows), label)
-    if not rows:
-        return await _skip(storage, day, "no events in this window", dry_run, slot_name, kind)
+    if kind == "hype":
+        # Not a window/rank kind at all: find at most one not-yet-spotlighted
+        # event the council has judged hype-worthy, soonest first, and reuse
+        # everything downstream of "picked" as if it were a 1-item roundup.
+        # See social/hype.py for the judging itself.
+        now_local = datetime.now(ZoneInfo(tz_name))
+        floor_iso = now_local.astimezone(timezone.utc).isoformat()
+        ceiling_iso = (now_local + timedelta(days=_HYPE_LOOKAHEAD_DAYS)).astimezone(timezone.utc).isoformat()
+        pool = await storage.query_events_for_range(CITY, floor_iso, ceiling_iso)
+        async with HttpClient() as http:
+            await hype_mod.fill_hype(storage, http, pool)
+        candidates = await storage.query_hype_candidates(
+            CITY, limit=1, lookahead_days=_HYPE_LOOKAHEAD_DAYS
+        )
+        if not candidates:
+            log.info("no hype-worthy event pending%s", label)
+            return 0
+        candidate_row = candidates[0]
+        # Other stored rows for the same real show: marked posted along with it (below), so a
+        # second source's copy cannot be spotlighted again on the next scrape.
+        hype_twins = hype_mod.twin_ids(candidate_row, pool)
+        # local_day, not a raw parse: start_time is stored UTC (per Postgres),
+        # and every other kind's start_iso/end_iso already comes out of
+        # _local_midnight already event-local — _period_label's date math
+        # assumes that. A raw UTC string here showed the WRONG calendar date
+        # for any evening show (8pm Mountain is already past midnight UTC).
+        candidate_local = local_day(candidate_row.get("start_time"))
+        start_iso = end_iso = candidate_local.isoformat() if candidate_local else ""
+        log.info("building hype carousel for %r%s", candidate_row.get("title"), label)
+        ranked = selection.candidates_from_rows([candidate_row], tz_name)
+    else:
+        bounds = selection.BOUNDS_FOR_KIND.get(kind, selection.day_bounds)
+        start_iso, end_iso = bounds(event_day, tz_name)
+        profile = selection.PROFILES.get(kind, selection.DEFAULT_PROFILE)
+        period = selection.period_key(kind, event_day, tz_name)
+        log.info(
+            "building %s carousel for %s%s, posting %s (%s .. %s)",
+            kind, event_day, label, day, start_iso, end_iso,
+        )
 
-    # Recurrence suppression spans this window regardless of slot, so a later
-    # slot the same day naturally down-ranks whatever an earlier slot already
-    # published — no slot-aware selection logic needed.
-    # Suppression is scoped to this kind's own history: a monthly roundup
-    # SHOULD repeat what the daily posts covered, which is what makes it a
-    # roundup. The lookback is longer for the slower formats, since "we
-    # already showed this" means a different span for a weekly post.
-    lookback = {"digest": 14, "breaking": 14, "weekend": 35, "monthly": 120, "horizon": 200}
-    recent_keys = await storage.recent_slide_keys(
-        (day - timedelta(days=lookback.get(kind, 14))).isoformat(), kinds=(kind,)
-    )
+        rows = await storage.query_events_for_range(CITY, start_iso, end_iso)
+        # A weekly post is a roundup pre-filtered to one pillar, not a
+        # different window shape — the content_tags check belongs here,
+        # before anything else touches `rows`.
+        if kind == "weekly" and pillar:
+            rows = [r for r in rows if pillar in (r.get("content_tags") or [])]
+        log.info("%d approved El Paso event(s) in window%s", len(rows), label)
+        if not rows:
+            return await _skip(storage, day, "no events in this window", dry_run, slot_name, kind)
 
-    # Must run BEFORE choose(): score_event's chain_venue_penalty reads
-    # venues.chain_scope while ranking, and a build only ever sees what is
-    # already cached — this is what fills that cache in. Best-effort and a
-    # no-op unless the council is on; see social/localness.py.
-    async with HttpClient() as http:
-        await localness_mod.fill_localness(storage, http, rows)
+        # Recurrence suppression spans this window regardless of slot, so a later
+        # slot the same day naturally down-ranks whatever an earlier slot already
+        # published — no slot-aware selection logic needed.
+        # Suppression is scoped to this kind's own history: a monthly roundup
+        # SHOULD repeat what the daily posts covered, which is what makes it a
+        # roundup. The lookback is longer for the slower formats, since "we
+        # already showed this" means a different span for a weekly post.
+        recent_keys = await storage.recent_slide_keys(
+            (day - timedelta(days=_RECENCY_LOOKBACK_DAYS.get(kind, 14))).isoformat(), kinds=(kind,)
+        )
 
-    # Rank first, then fetch photos in rank order — so we only pay for
-    # downloads we're likely to use. A dead/missing photo no longer drops the
-    # event: render_event_slide has a text-only layout for exactly this case,
-    # so the event keeps its slot with photo=None rather than losing it to a
-    # lower-ranked candidate purely for lacking a source image.
-    ranked = selection.choose(
-        rows, tz_name=tz_name, recent_keys=recent_keys, max_slides=len(rows), profile=profile
-    )
+        # Must run BEFORE choose(): score_event's chain_venue_penalty reads
+        # venues.chain_scope while ranking, and a build only ever sees what is
+        # already cached — this is what fills that cache in. Best-effort and a
+        # no-op unless the council is on; see social/localness.py.
+        async with HttpClient() as http:
+            await localness_mod.fill_localness(storage, http, rows)
 
-    # The editor's one judgment call over the WHOLE diversity-capped pool —
-    # see social/editor.py for why that pool depth is what makes an exclusion
-    # here free. Runs before the photo-fetch loop so a dropped event never
-    # costs a download.
-    async with HttpClient() as http:
-        editor_report = await editor_mod.run_editor(http, ranked, tz_name=tz_name)
-    ranked = editor_report.ranked
+        # Rank first, then fetch photos in rank order — so we only pay for
+        # downloads we're likely to use. A dead/missing photo no longer drops the
+        # event: render_event_slide has a text-only layout for exactly this case,
+        # so the event keeps its slot with photo=None rather than losing it to a
+        # lower-ranked candidate purely for lacking a source image.
+        # fill_to leaves the editor a bench two deep beyond a full post (its own
+        # floor, see editor.py) even on a day the diversity caps would thin out.
+        ranked = selection.choose(
+            rows,
+            tz_name=tz_name,
+            recent_keys=recent_keys,
+            max_slides=len(rows),
+            profile=profile,
+            fill_to=settings.ig_max_slides + 2,
+        )
+
+        # The editor's one judgment call over the WHOLE diversity-capped pool —
+        # see social/editor.py for why that pool depth is what makes an exclusion
+        # here free. Runs before the photo-fetch loop so a dropped event never
+        # costs a download.
+        async with HttpClient() as http:
+            editor_report = await editor_mod.run_editor(http, ranked, tz_name=tz_name)
+        ranked = editor_report.ranked
 
     picked: list[selection.Candidate] = []
     photos: list[Any] = []
@@ -201,7 +292,9 @@ async def _build_one(
 
     with_photo = sum(1 for p in photos if p is not None)
     log.info("%d event(s) picked, %d with a photo%s", len(picked), with_photo, label)
-    if len(picked) < settings.ig_min_slides:
+    # A hype post is cover + exactly one event slide by design, not a "did we
+    # find enough content" signal — IG_MIN_SLIDES doesn't apply to it.
+    if kind != "hype" and len(picked) < settings.ig_min_slides:
         return await _skip(
             storage,
             day,
@@ -221,30 +314,53 @@ async def _build_one(
     photos = [p for _, p in paired]
 
     period_label = _period_label(kind, start_iso, end_iso)
-    total = len(picked) + 1
-    jpegs = [
-        render.render_cover(
-            event_day, len(picked), settings.ig_handle, kind=kind, period_label=period_label
-        )
-    ]
-    for i, (cand, photo) in enumerate(zip(picked, photos, strict=True), start=2):
-        jpegs.append(
-            render.render_event_slide(i, total, cand.row, photo, cand.start_local, kind=kind)
-        )
 
-    text = caption_mod.build_caption(
-        event_day, picked, site=settings.ig_handle, kind=kind, period_label=period_label
-    )
-    log.info("rendered %d slide(s), caption %d chars%s", len(jpegs), len(text), label)
+    def assemble() -> tuple[list[bytes], str]:
+        total = len(picked) + 1
+        slides = [
+            render.render_cover(
+                event_day, len(picked), settings.ig_handle,
+                kind=kind, period_label=period_label, pillar=pillar,
+            )
+        ]
+        for i, (cand, photo) in enumerate(zip(picked, photos, strict=True), start=2):
+            slides.append(
+                render.render_event_slide(i, total, cand.row, photo, cand.start_local, kind=kind)
+            )
+        caption = caption_mod.build_caption(
+            event_day, picked, site=settings.ig_handle,
+            kind=kind, period_label=period_label, pillar=pillar,
+        )
+        log.info("rendered %d slide(s), caption %d chars%s", len(slides), len(caption), label)
+        return slides, caption
+
+    jpegs, text = assemble()
 
     # A last look at the FINISHED carousel, after rendering — best-effort and
-    # a no-op unless the council is on. Never blocks; see social/critic.py.
+    # a no-op unless the council is on. It never holds the post, but it does
+    # repair what it can (drop a duplicate, strip a bad blurb) before a human
+    # sees it; see social/critic.py.
     async with HttpClient() as http:
         critic_report = await critic_mod.run_critic(http, picked, text)
-    council_verdicts = {
-        "editor": editor_mod.to_jsonable(editor_report),
-        "critic": critic_mod.to_jsonable(critic_report),
-    }
+        plan = critic_mod.plan_fixes(critic_report, picked)
+        if plan.drop or plan.clear_blurb:
+            picked, photos = await _apply_critic_fixes(
+                storage, http, plan, picked, photos, ranked, tz_name=tz_name, dry_run=dry_run
+            )
+            # A hype post has no bench to backfill from (ranked is its own
+            # single candidate) — if the critic drops it, there is nothing
+            # left to post, so treat this exactly like "no candidate found."
+            if kind == "hype" and not picked:
+                log.info("critic dropped the only hype candidate%s; nothing to post", label)
+                return 0
+            log.info("critic fixed%s: %s", label, "; ".join(plan.notes))
+            jpegs, text = assemble()
+            # Once more, report-only: fixes are never chained, so a model that
+            # disagrees with its own last answer cannot keep churning the post.
+            critic_report = await critic_mod.run_critic(http, picked, text)
+    council_verdicts: dict[str, Any] = {"critic": critic_mod.to_jsonable(critic_report, fixed=plan.notes)}
+    if editor_report is not None:
+        council_verdicts["editor"] = editor_mod.to_jsonable(editor_report)
 
     if out_dir:
         target = Path(out_dir) / (slot_name or ".")
@@ -263,13 +379,20 @@ async def _build_one(
     # clamp: a draft built late (a re-run, a slow scrape) gets a deadline of
     # "now" and ships on the next sweep, rather than sitting until tomorrow
     # when the staleness guard would expire it unpublished.
-    auto_approve_at = _suggested_schedule(day, tz_name, settings.ig_auto_approve_hour)
+    # Weekly drafts are meant to go out staggered through the day. One shared deadline
+    # (17:00) would approve all six at once and the sweep would publish the early slots in
+    # a burst, so each approves an hour before its own slot instead.
+    auto_approve_at = _suggested_schedule(day, tz_name, _approve_hour(kind, slot_hour))
     draft = await storage.create_ig_draft(
         {
             "post_date": day.isoformat(),
             "status": "draft",
             "kind": kind,
-            "slot": slot_name,
+            # For 'weekly', the pillar column carries what slot_name means for
+            # digest — see the live unique index, which keys on pillar, not
+            # slot, for every kind other than digest.
+            "slot": None if kind == "weekly" else slot_name,
+            "pillar": pillar,
             "period_key": period,
             "event_ids": [str(c.row["id"]) for c in picked],
             "slide_keys": [c.key for c in picked],
@@ -297,6 +420,28 @@ async def _build_one(
         return 1
 
     await storage.update_ig_post(post_id, {"slide_paths": paths})
+
+    if kind == "hype":
+        # The de-dup guard, written only once the draft is real (a failed upload leaves the
+        # event free to be tried again next scrape) and checked: without it the same event
+        # qualifies again tomorrow and, with auto-approve on, goes out twice. If the write
+        # cannot be made even after a retry, fail the draft rather than risk the duplicate.
+        stamp = {"hype_posted_at": datetime.now(timezone.utc).isoformat()}
+        marked = False
+        for _ in range(2):
+            marked = await storage.cache_event_editorial(str(candidate_row["id"]), stamp)
+            if marked:
+                break
+        if not marked:
+            log.error("could not record hype_posted_at for %s; failing draft %s",
+                      candidate_row.get("id"), post_id)
+            await storage.update_ig_post(
+                post_id, {"status": "failed", "error": "could not record hype_posted_at"}
+            )
+            return 1
+        for twin_id in hype_twins:
+            await storage.cache_event_editorial(twin_id, stamp)
+
     log.info("draft %s ready for review (%d slides)%s", post_id, len(paths), label)
 
     if not settings.ig_autopost:
@@ -322,6 +467,114 @@ async def _build_one(
         await storage.update_ig_post(post_id, {"status": "approved"})
         return await publish(day, dry_run=False)
     return 0
+
+
+async def _apply_critic_fixes(
+    storage: Storage,
+    http: HttpClient,
+    plan: critic_mod.FixPlan,
+    picked: list[selection.Candidate],
+    photos: list[Any],
+    ranked: list[selection.Candidate],
+    *,
+    tz_name: str,
+    dry_run: bool,
+) -> tuple[list[selection.Candidate], list[Any]]:
+    """Apply a critic FixPlan and backfill every dropped slot from the bench.
+
+    `ranked` is the editor's whole diversity-capped pool, so the next-ranked
+    event not already on the carousel takes a dropped event's place — same as
+    an editor exclusion, a drop never shrinks the post unless the bench is
+    genuinely empty. A cleared blurb is cleared on this build's copy of the
+    row only; the cached value in the database is left alone.
+    """
+    kept: list[tuple[selection.Candidate, Any]] = []
+    for i, (cand, photo) in enumerate(zip(picked, photos, strict=True)):
+        if i in plan.drop:
+            continue
+        if i in plan.clear_blurb:
+            cand = dataclasses.replace(cand, row={**cand.row, "blurb": None})
+        kept.append((cand, photo))
+
+    taken = {str(c.row.get("id")) for c in picked}
+    added: list[selection.Candidate] = []
+    # By score, not by `ranked`'s own order: that list is only score-sorted
+    # when the editor ran, and is choose()'s chronological order otherwise.
+    for cand in sorted(ranked, key=lambda c: -c.score):
+        if len(kept) + len(added) >= len(picked):
+            break
+        if str(cand.row.get("id")) in taken:
+            continue
+        added.append(cand)
+    if added:
+        rows_added = [c.row for c in added]
+        await clarify_mod.fill_pillars(storage, http, rows_added, dry_run=dry_run)
+        await clarify_mod.fill_blurbs(storage, http, rows_added, dry_run=dry_run)
+        for cand in added:
+            kept.append((cand, await fetch_photo(http, cand.row.get("image_url"))))
+
+    kept.sort(key=lambda pair: pair[0].start_local or datetime.max.replace(tzinfo=ZoneInfo(tz_name)))
+    return [c for c, _ in kept], [p for _, p in kept]
+
+
+async def _backfill_for_edit(
+    storage: Storage,
+    post: dict[str, Any],
+    kept: list[selection.Candidate],
+    *,
+    exclude_ids: frozenset[str] = frozenset(),
+    tz_name: str,
+) -> list[selection.Candidate]:
+    """The Telegram-edit counterpart to `_apply_critic_fixes`'s bench backfill,
+    for a human's own drop_event tap.
+
+    A build-time drop has `ranked` — the editor's whole scored pool — sitting
+    right there. An edit days later has none of that in memory, so this
+    re-derives an equivalent pool from the post's own stored window/kind
+    (`window_start`/`window_end`, `IG_MIN_SLIDES` migration onward) and scores
+    it exactly as a fresh build would, `fill_to` fully relaxing the diversity
+    caps since they already did their job in the original build. Best-effort:
+    an older post or a test double missing those columns gets no backfill
+    rather than an error, which is exactly last resort — "drop the duplicate"
+    leaving a shorter post — not a bug.
+
+    `exclude_ids` is the id(s) this edit just dropped: they are still real,
+    still-approved events sitting in the very same window query, so without
+    excluding them by id a backfill with nothing better available would just
+    hand the human their own drop right back.
+    """
+    start_iso, end_iso = post.get("window_start"), post.get("window_end")
+    if not start_iso or not end_iso:
+        return []
+    kind = str(post.get("kind") or "digest")
+    day = date.fromisoformat(str(post["post_date"]))
+    recent_keys = await storage.recent_slide_keys(
+        (day - timedelta(days=_RECENCY_LOOKBACK_DAYS.get(kind, 14))).isoformat(), kinds=(kind,)
+    )
+    rows = await storage.query_events_for_range(CITY, str(start_iso), str(end_iso))
+    profile = selection.PROFILES.get(kind, selection.DEFAULT_PROFILE)
+    pool = selection.choose(
+        rows, tz_name=tz_name, recent_keys=recent_keys, max_slides=len(rows),
+        profile=profile, fill_to=len(rows),
+    )
+
+    skip_ids = {str(c.row.get("id")) for c in kept} | set(exclude_ids)
+    combined = list(kept)
+    added: list[selection.Candidate] = []
+    for cand in sorted(pool, key=lambda c: -c.score):
+        if len(combined) >= settings.ig_max_slides:
+            break
+        if str(cand.row.get("id")) in skip_ids:
+            continue
+        venue = selection.venue_key(cand.row) or "?"
+        # A stale duplicate could already be sitting in `kept` from a post
+        # drafted before selection.choose() started collapsing same-venue
+        # duplicates; guard here rather than trust the older draft.
+        if venue != "?" and selection._duplicates_a_pick(cand, venue, combined):
+            continue
+        combined.append(cand)
+        added.append(cand)
+    return added
 
 
 async def _skip(
@@ -360,7 +613,7 @@ def _period_label(kind: str, start_iso: str, end_iso: str) -> Optional[str]:
     start = datetime.fromisoformat(start_iso).date()
     # end is exclusive; the last day actually covered is the one before it.
     last = datetime.fromisoformat(end_iso).date() - timedelta(days=1)
-    if kind == "weekend":
+    if kind in ("weekend", "weekly"):
         if start.month == last.month:
             return f"{start.strftime('%b')} {start.day}-{last.day}".upper()
         return f"{start.strftime('%b')} {start.day} - {last.strftime('%b')} {last.day}".upper()
@@ -368,6 +621,14 @@ def _period_label(kind: str, start_iso: str, end_iso: str) -> Optional[str]:
         return start.strftime("%B").upper()
     if kind == "horizon":
         return f"{start.strftime('%B')} {start.year}".upper()
+    if kind == "hype":
+        # Without this, the header falls back to _date_label(day) — the BUILD
+        # date, not the event's — which reads as "don't miss this... today"
+        # for a show that's actually weeks out. No weekday: "WEDNESDAY,
+        # SEPTEMBER 23" overran the cover's safe width and collided with the
+        # halftone circle and the count line below it; "SEPTEMBER 23" is the
+        # same length class as horizon's "SEPTEMBER 2026", already proven to fit.
+        return f"{start.strftime('%B')} {start.day}".upper()
     return None
 
 
@@ -434,6 +695,7 @@ async def _apply_edits_to_post(
     overrides = dict(post.get("photo_overrides") or {})
 
     # Apply intents in request order, against the stored id list.
+    dropped_ids: set[str] = set()
     for edit in edits:
         op = edit["op"]
         payload = edit.get("payload") or {}
@@ -441,6 +703,7 @@ async def _apply_edits_to_post(
             idx = int(payload.get("index", -1))
             if 0 <= idx < len(event_ids):
                 dropped = event_ids.pop(idx)
+                dropped_ids.add(dropped)
                 log.info("dropping event %s (index %d) from %s", dropped, idx, post_id)
             else:
                 log.warning("drop_event index %s out of range for %s", idx, post_id)
@@ -453,9 +716,45 @@ async def _apply_edits_to_post(
                 overrides[str(event_id)] = path
                 log.info("photo override stored for event %s", event_id)
 
-    if len(event_ids) < settings.ig_min_slides:
+    # Re-query the source events over the post's own stored window, then put
+    # them back into the post's order — events_by_ids does not preserve it.
+    rows = await storage.events_by_ids(event_ids)
+    by_id = {str(r["id"]): r for r in rows}
+    ordered = [by_id[i] for i in event_ids if i in by_id]
+    if len(ordered) < min(len(event_ids), settings.ig_min_slides):
+        reason = f"only {len(ordered)} of {len(event_ids)} events could be re-read"
+        await storage.mark_edits_applied(ids, reason)
+        return 1
+
+    candidates = selection.candidates_from_rows(ordered, tz_name)
+
+    # A drop leaves an open slot; refill it from the same window this post was
+    # built from, the same bench the build-time council's own drops get (see
+    # _apply_critic_fixes) — so "drop the duplicate" doesn't quietly ship a
+    # shorter carousel than the day actually supports. `dropped_ids` is passed
+    # through explicitly: the event just removed is still sitting in that same
+    # window/query, and without excluding it by id, a backfill with nothing
+    # better available would just hand the human their own drop right back.
+    if dropped_ids and len(candidates) < settings.ig_max_slides:
+        added = await _backfill_for_edit(
+            storage, post, candidates, exclude_ids=dropped_ids, tz_name=tz_name
+        )
+        if added:
+            rows_added = [c.row for c in added]
+            await clarify_mod.fill_pillars(storage, http, rows_added, dry_run=dry_run)
+            await clarify_mod.fill_blurbs(storage, http, rows_added, dry_run=dry_run)
+            candidates = candidates + added
+            candidates.sort(
+                key=lambda c: c.start_local or datetime.max.replace(tzinfo=ZoneInfo(tz_name))
+            )
+            notes = ", ".join(f'"{c.row.get("title")}"' for c in added)
+            log.info("backfilled %d slot(s) for %s: %s", len(added), post_id, notes)
+
+    event_ids = [str(c.row["id"]) for c in candidates]
+
+    if len(candidates) < settings.ig_min_slides:
         reason = (
-            f"that would leave {len(event_ids)} slide(s), below the minimum of "
+            f"that would leave {len(candidates)} slide(s), below the minimum of "
             f"{settings.ig_min_slides}"
         )
         log.error("refusing to rebuild %s: %s", post_id, reason)
@@ -465,17 +764,6 @@ async def _apply_edits_to_post(
         )
         return 0
 
-    # Re-query the source events over the post's own stored window, then put
-    # them back into the post's order — events_by_ids does not preserve it.
-    rows = await storage.events_by_ids(event_ids)
-    by_id = {str(r["id"]): r for r in rows}
-    ordered = [by_id[i] for i in event_ids if i in by_id]
-    if len(ordered) < settings.ig_min_slides:
-        reason = f"only {len(ordered)} of {len(event_ids)} events could be re-read"
-        await storage.mark_edits_applied(ids, reason)
-        return 1
-
-    candidates = selection.candidates_from_rows(ordered, tz_name)
     photos = []
     for cand in candidates:
         override = overrides.get(str(cand.row["id"]))
@@ -1152,7 +1440,9 @@ def main() -> int:
     b.add_argument(
         "--kind",
         default="digest",
-        choices=sorted(selection.BOUNDS_FOR_KIND),
+        # 'hype' isn't a window kind (see BOUNDS_FOR_KIND's docstring context
+        # in selection.py), so it isn't in that dict and has to be added here.
+        choices=sorted(set(selection.BOUNDS_FOR_KIND) | {"hype"}),
         help="which format to build (default: the daily digest)",
     )
 

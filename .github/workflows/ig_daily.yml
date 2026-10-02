@@ -36,6 +36,12 @@ on:
     # whole afternoon left to review it before the 17:00 auto-approve.
     - cron: "0 18 * * 4"    # Thursday -> the weekend ahead
     - cron: "0 18 1 * *"    # the 1st   -> the month ahead
+    # Sunday, early enough to sit well before the first pillar post's own
+    # posting hour (10:00 local) — see _WEEKLY_PILLAR_SLOTS in __main__.py.
+    # One build fires all six pillar drafts at once; the publish sweep above
+    # is what actually staggers them through the day via their own
+    # scheduled_for, the same mechanism IG_DIGEST_SLOTS already uses.
+    - cron: "7 13 * * 0"    # Sunday    -> the six pillar posts for the week ahead
   workflow_dispatch:
     inputs:
       job:
@@ -47,7 +53,7 @@ on:
         description: "Which format to build"
         default: "digest"
         type: choice
-        options: ["digest", "weekend", "monthly", "horizon"]
+        options: ["digest", "weekend", "monthly", "horizon", "weekly", "hype"]
       post_id:
         description: "Post to rebuild (only used by job=rebuild)"
         required: false
@@ -131,7 +137,8 @@ jobs:
         github.event.inputs.job != 'publish' && github.event.inputs.job != 'rebuild' ||
       github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' ||
       github.event_name == 'schedule' &&
-        (github.event.schedule == '0 18 * * 4' || github.event.schedule == '0 18 1 * *')
+        (github.event.schedule == '0 18 * * 4' || github.event.schedule == '0 18 1 * *' ||
+         github.event.schedule == '7 13 * * 0')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -168,8 +175,19 @@ jobs:
           KIND: >-
             ${{ github.event.schedule == '0 18 * * 4' && 'weekend'
              || github.event.schedule == '0 18 1 * *' && 'monthly'
+             || github.event.schedule == '7 13 * * 0' && 'weekly'
              || github.event.inputs.kind || 'digest' }}
         run: python -m scraper.social build --kind "$KIND"
+
+      # Checked once per scrape, alongside (not instead of) the daily digest:
+      # is there a not-yet-spotlighted event the council judges hype-worthy
+      # within the lookahead window? The app itself decides whether anything
+      # actually gets posted (social/hype.py) — most days this logs "nothing
+      # pending" and writes nothing, so no extra YAML conditional is needed
+      # beyond "this was the scrape chain, not a scheduled/manual run."
+      - name: Build hype carousel
+        if: github.event_name == 'workflow_run'
+        run: python -m scraper.social build --kind hype
 
   # Fired by the Telegram webhook the moment someone drops an event or sends a
   # replacement photo, so the rebuilt carousel comes back in a minute rather
@@ -194,7 +212,8 @@ jobs:
   publish:
     if: >-
       github.event_name == 'schedule' &&
-        github.event.schedule != '0 18 * * 4' && github.event.schedule != '0 18 1 * *' ||
+        github.event.schedule != '0 18 * * 4' && github.event.schedule != '0 18 1 * *' &&
+        github.event.schedule != '7 13 * * 0' ||
       github.event_name == 'workflow_dispatch' &&
         github.event.inputs.job != 'build' && github.event.inputs.job != 'rebuild'
     runs-on: ubuntu-latest

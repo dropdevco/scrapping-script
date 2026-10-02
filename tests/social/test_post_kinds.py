@@ -85,6 +85,35 @@ def test_monthly_period_key_is_the_month():
     assert selection.period_key("monthly", date(2026, 10, 1), TZ) == "2026-10"
 
 
+@pytest.mark.parametrize(
+    "day, expect_monday",
+    [
+        (date(2026, 9, 22), date(2026, 9, 28)),  # Tuesday -> next Monday
+        (date(2026, 9, 24), date(2026, 9, 28)),  # Thursday -> next Monday
+        (date(2026, 9, 28), date(2026, 9, 28)),  # Monday -> itself, not next week
+        (date(2026, 9, 27), date(2026, 9, 28)),  # Sunday -> the week about to start
+    ],
+)
+def test_week_bounds_target_the_week_on_or_after_the_day(day, expect_monday):
+    start, end = _dates(selection.week_bounds(day, TZ))
+    assert start == expect_monday
+    assert (end - start).days == 7
+
+
+def test_weekly_period_key_matches_weekends_bucket_shape():
+    a = selection.period_key("weekly", date(2026, 9, 22), TZ)
+    assert a.startswith("2026-W")
+
+
+def test_a_building_sunday_and_the_thursday_before_it_share_no_forced_relationship():
+    """weekly and weekend buckets are independent axes (kind is part of the
+    key) — nothing here asserts they agree or disagree, only that each is
+    internally consistent with its own window."""
+    weekly = selection.period_key("weekly", date(2026, 9, 27), TZ)
+    weekend = selection.period_key("weekend", date(2026, 9, 24), TZ)
+    assert weekly is not None and weekend is not None
+
+
 # ── profiles ──────────────────────────────────────────────────────────────────
 def _row(**kw):
     base = {"title": "A show", "categories": ["Music"], "venue": "The Venue"}
@@ -127,6 +156,19 @@ def test_horizon_drops_events_with_no_ticket_link():
     assert [c.row["title"] for c in picked] == ["Show 0"]
 
 
+def test_weekly_profile_effectively_disables_the_category_cap():
+    """Every row in a real weekly build already shares the target pillar, so
+    the ordinary category diversity cap would otherwise throttle the post to
+    a handful of slides for no editorial reason."""
+    rows = [
+        _row(id=f"{i}", title=f"Show {i}", venue=f"Venue {i}", categories=["Live Music"],
+             start_time="2026-09-28T19:00:00-06:00")
+        for i in range(8)
+    ]
+    picked = selection.choose(rows, tz_name=TZ, profile=selection.PROFILES["weekly"])
+    assert len(picked) == 8
+
+
 def test_the_digest_keeps_events_without_tickets():
     rows = [
         _row(id=f"{i}", title=f"Show {i}", start_time="2026-09-03T19:00:00+00:00")
@@ -160,6 +202,26 @@ def test_covers_render_for_every_kind():
         assert blob.startswith(b"\xff\xd8"), f"{kind} cover is not a JPEG"
 
 
+def test_weekly_cover_names_the_actual_pillar():
+    blob = render.render_cover(
+        date(2026, 9, 28), 6, "epchisme.com", kind="weekly", pillar="Live Music"
+    )
+    assert blob.startswith(b"\xff\xd8")
+
+
+def test_weekly_cover_without_a_pillar_falls_back_gracefully():
+    """Every kind in BOUNDS_FOR_KIND is smoke-rendered with no extra kwargs
+    (test_covers_render_for_every_kind) — weekly must not need `pillar` to
+    avoid crashing, even though every real build always supplies one."""
+    blob = render.render_cover(date(2026, 9, 28), 6, "epchisme.com", kind="weekly")
+    assert blob.startswith(b"\xff\xd8")
+
+
+def test_hype_cover_renders():
+    blob = render.render_cover(date(2026, 9, 22), 1, "epchisme.com", kind="hype")
+    assert blob.startswith(b"\xff\xd8")
+
+
 def test_a_long_period_label_still_fits():
     """"SEP 28 - OCT 4" is far wider than the single date the line was
     originally sized for; wrap_to_fit has to shrink rather than overflow."""
@@ -187,9 +249,24 @@ def test_each_kind_gets_its_own_voice():
     day, picked = date(2026, 9, 3), [_Cand()]
     heads = {
         k: caption_mod.build_caption(day, picked, kind=k).splitlines()[0]
-        for k in ("digest", "weekend", "monthly", "horizon")
+        for k in ("digest", "weekend", "monthly", "horizon", "hype")
     }
-    assert len(set(heads.values())) == 4
+    assert len(set(heads.values())) == 5
+
+
+def test_weekly_caption_names_the_pillar_in_the_opener_and_subhead():
+    text = caption_mod.build_caption(
+        date(2026, 9, 28), [_Cand()], kind="weekly", pillar="Live Music"
+    )
+    assert "LIVE MUSIC" in text.splitlines()[0]
+    assert "Live Music" in text or "LIVE MUSIC" in text
+
+
+def test_weekly_without_a_pillar_falls_back_to_the_generic_opener_list():
+    """No real build ever calls this without a pillar, but nothing should
+    crash if it does — {pillar} substitution is skipped entirely."""
+    text = caption_mod.build_caption(date(2026, 9, 28), [_Cand()], kind="weekly")
+    assert "{pillar}" not in text
 
 
 def test_every_kind_stays_under_the_caption_limit_with_a_full_carousel():

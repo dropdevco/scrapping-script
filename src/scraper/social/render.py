@@ -26,6 +26,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 
+from ..core.content_tags import PILLARS
 from ..core.eventtime import local_day
 from .imaging import SourcePhoto
 
@@ -823,6 +824,15 @@ _COVER_SPECS: dict[str, tuple[str, str, tuple[int, int, int]]] = {
     "weekend": ("THIS WEEKEND", "IN EL PASO", POP_YELLOW),
     "monthly": ("THIS MONTH IN", "EL PASO", COSMO),
     "horizon": ("SAVE THE DATE", "EL PASO", POP_YELLOW),
+    # Generic fallback only — render_cover overrides this with the actual
+    # pillar name whenever one is supplied, which every real weekly build does.
+    "weekly": ("THIS WEEK IN", "EL PASO", COSMO),
+    # Static v1 copy — a hype post is always exactly one event, so unlike the
+    # other kinds this kicker doesn't need to vary by anything about the post.
+    # Naming the actual event on the cover is a natural fast-follow, not this
+    # pass: it would need this signature to accept event-specific text, which
+    # no other kind needs.
+    "hype": ("DON'T MISS THIS", "EL PASO", POP_YELLOW),
 }
 
 
@@ -846,10 +856,19 @@ def render_cover(
     *,
     kind: str = "digest",
     period_label: Optional[str] = None,
+    pillar: Optional[str] = None,
 ) -> bytes:
     from PIL import Image, ImageDraw
 
-    kicker_top, kicker_bottom, halo = _COVER_SPECS.get(kind, _COVER_SPECS["digest"])
+    if kind == "weekly" and pillar:
+        # No lookup table needed — the pillar's own display string IS the
+        # kicker's bottom line. Accent alternates by the pillar's position in
+        # the fixed PILLARS tuple, same spirit as event slides alternating
+        # layout/accent by seed, purely so six pillar covers aren't identical.
+        kicker_top, kicker_bottom = "THIS WEEK IN", pillar.upper()
+        halo = POP_YELLOW if PILLARS.index(pillar) % 2 == 0 else COSMO
+    else:
+        kicker_top, kicker_bottom, halo = _COVER_SPECS.get(kind, _COVER_SPECS["digest"])
     big_label = period_label or _default_period_label(kind, day)
     # The weekday only means something for a single-day post: a weekend or a
     # month spans several, and printing one of them would be a lie. Non-daily
@@ -908,7 +927,7 @@ def render_cover(
     label = "thing happening" if event_count == 1 else "things happening"
     if kind == "horizon":
         label = "on sale now" if event_count == 1 else "on sale now"
-    elif kind in ("weekend", "monthly"):
+    elif kind in ("weekend", "monthly", "weekly"):
         label = "thing to do" if event_count == 1 else "things to do"
     draw.text((dot_x + 10, y), f"{event_count} {label}", font=count_font, fill=PAPER)
 
@@ -1240,6 +1259,10 @@ _BUILDERS_BY_KIND: dict[str, tuple] = {
     "weekend": (_slide_full_bleed, _slide_bold_block, _slide_split_panel),
     "monthly": (_slide_split_panel, _slide_bold_block, _slide_full_bleed),
     "horizon": (_slide_full_bleed, _slide_split_panel, _slide_bold_block),
+    "weekly": (_slide_bold_block, _slide_split_panel, _slide_full_bleed),
+    # Only ever renders one slide, but every kind gets an explicit entry
+    # rather than relying on the digest fallback.
+    "hype": (_slide_split_panel, _slide_full_bleed, _slide_bold_block),
 }
 
 

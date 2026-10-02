@@ -15,7 +15,7 @@ something, add it.
 
 ### Nothing in CI runs tests, lint, or the web build
 
-239 tests exist and none execute in CI. Neither does `ruff check`, `npm run lint`, or `npm run build`.
+443 tests exist and none execute in CI. Neither does `ruff check`, `npm run lint`, or `npm run build`.
 A commit that breaks an import reaches the 11:00 UTC scrape directly.
 
 Most pointedly: `tests/social/test_scheduling.py` parses `ig_daily.yml` to catch a scheduling regression
@@ -70,15 +70,20 @@ updates. If the repo variable is unset, CI silently falls back to the broken val
 - **Refs:** `src/scraper/core/config.py:193`, `.env.example:98-102`,
   [configuration.md](operations/configuration.md#the-empty-string-trap).
 
-### Nothing pins the three-way `address_hash` parity
+### Nothing pins the Python/TypeScript `address_hash` parity
 
-`sha1(lower(trim(address)) + "|" + lower(trim(venue_name)))` is implemented in Python, SQL **and**
-TypeScript, and all three must stay byte-identical or the browser's submit form creates duplicate venue
-rows. All three files warn about it. **No test checks it.**
+`sha1(lower(trim(address)) + "|" + lower(trim(venue_name)))`, computed over the output of the address
+normalizer (`core/address.py::venue_identity`, ported line-for-line to `web/src/lib/hash.ts`), is
+implemented in both Python and TypeScript, and both must stay byte-identical or the browser's submit
+form creates duplicate venue rows. Parity across 12 hand-picked real-world cases (accents, ZIP+4,
+number-words, suite markers) **was** manually verified during the 2026-09-20 normalizer rollout, which
+narrows this gap — but **no committed automated test pins the two implementations going forward**, so a
+future edit to either side can silently drift without anything catching it.
 
-- **Fix:** a parity test. Cheap, high value — a good first task.
-- **Refs:** `src/scraper/core/storage.py:39-45`, `supabase/migrations/0002_venues.sql:9-12`,
-  `web/src/lib/hash.ts:12-15`.
+- **Fix:** a parity test, ideally property-based or fixture-driven from a shared JSON case list both
+  runtimes read. Cheap, high value — a good first task.
+- **Refs:** `src/scraper/core/address.py`, `web/src/lib/hash.ts`,
+  [scraper-engine.md](components/scraper-engine.md#venue-identity-coreaddresspy).
 
 ---
 
@@ -107,7 +112,22 @@ inventory is in [configuration.md](operations/configuration.md).
 ### No migration-tracking table
 
 Which migrations have been applied to the live project is tracked by humans and by filename prefix only.
-Adding a `schema_migrations` table and backfilling it with 0001–0011 would be small and high-value.
+Adding a `schema_migrations` table and backfilling it with 0001–0012 would be small and high-value.
+
+**This is not hypothetical — it already happened once.** Before migration `0018_weekly_and_hype_posts`
+existed, `ig_posts.kind`'s CHECK constraint, an `ig_posts.pillar` column, and a live unique index were
+all already applied directly against the production database, with zero rows using any of it and zero
+application code anywhere in the repo referencing it. Caught only by manually diffing the live schema
+against every committed migration file before starting related work, and formalized into 0018 rather
+than left silent. A `schema_migrations` table with a CI check would have caught this automatically.
+
+### `ig_post_reviews` is a live table with no migration and no code
+
+Discovered during the same 0018 drift audit: `ig_post_reviews` (`id`, `post_id`, `kind`, `pillar`,
+`metrics` jsonb, `review` jsonb, `created_at`) exists on the live database, empty, with no migration
+file and no reference anywhere in `src/` or `web/src/`. Shape suggests a planned post-performance
+review feature (metrics + a review verdict, keyed by kind/pillar), but its purpose hasn't been
+confirmed with anyone, so nothing here builds on or assumes it. Left alone rather than guessed at.
 
 ### Storage buckets are not in version control
 
@@ -136,17 +156,12 @@ schedule. The failure is detected and alerted *when a dispatch is attempted*, no
 
 ### Untested, load-bearing code
 
-`core/orchestrator.py`, `core/dedupe.py`, `core/storage.py`, `core/geocode.py`, `sources/registry.py`,
-every directory parser, `slides_store.py`, and `publish_carousel`'s child-skip / `min_children` logic.
-See [testing.md](engineering/testing.md#coverage-gaps) for a ranked list of where to start.
-
-### Duplicate venue rows
-
-The same building holds two or three `venue_id`s when sources punctuate its address differently. There
-are **two independent read-side defences** — `selection.venue_key` keys on the venue *name*, and the map
-groups pins by *coordinate*. The comment naming the real fix is explicit: *"the duplicate venue rows
-themselves are a storage-side problem and want a real address normalizer; this is the read-side
-defense."*
+`core/orchestrator.py`, `core/geocode.py`, `sources/registry.py`, every directory parser,
+`slides_store.py`, and `publish_carousel`'s child-skip / `min_children` logic. `core/dedupe.py` and
+`core/storage.py` gained targeted tests (`tests/core/`) for venue identity, hash stability and the
+cross-venue duplicate predicate during the 2026-09-20 dedupe hardening, but that is coverage of the new
+surfaces specifically, not full coverage of either module. See
+[testing.md](engineering/testing.md#coverage-gaps) for a ranked list of where to start.
 
 ### Hardcoded constants that will surprise someone
 
@@ -188,6 +203,11 @@ These are recorded decisions. Do not "fix" them without reading the reasoning.
 | **`THREADS_ACCESS_TOKEN` / `THREADS_USER_ID`** | Read by config, exposed by a helper, used by nothing. Scaffolding for a surface that does not exist |
 | **pgvector semantic search** | Scoped in `0001_init.sql:78-81`, left commented out |
 | **Juárez coverage is "real but modest"** | Most Juárez sites need bespoke HTML parsers rather than generic JSON-LD. Two were added 2026-09-06 |
+| **A hype post's cover/caption copy is static, not event-specific** | **Deliberate, v1.** `("DON'T MISS THIS", "EL PASO")` and a fixed opener list, the same shape every other kind's cover/caption already uses. Printing the actual artist/event name on the cover itself is a natural fast-follow — it would need `render_cover`'s signature to accept event-specific text, which no other kind needs today |
+| **Hype judgments are not build-to-build reproducible** | **Deliberate**, same posture as the editor/critic council roles: `hype_from_rules` only ever returns `False` or defers to the model — "major enough to deserve its own post" is a judgment call, not a rule, so two judging passes over a borderline event could disagree. Determinism lives only in the deterministic pre-pass (no tickets + not a major venue ⇒ definite no), never in the model's yes |
+| **Editorial council verdicts are not build-to-build reproducible** | **Deliberate.** Editor/critic are model judgment, not a pure function of input — `temperature` is unavailable on current models, so determinism is enforced only at the referee's bounds (exclude caps, floors, discard-on-mass-exclusion, clamped score deltas), never at the content. Two builds of the same pool can legitimately disagree on which events the editor excludes |
+| **A "Deals" content pillar** | Explicitly low-priority, deferred as a content-strategy decision (promote chain venues to build reach, then de-emphasize and monetize local) rather than a code change. `venues.chain_scope` is the data groundwork it would need; the "drop chains once reach grows" lever, `ScoreProfile.chain_venue_penalty`, is already tunable without a deploy |
+| **Junk values in `events.categories`** (`accessible_forward`, `paid`, a stray `Friendly`) | Deferred — website-facing cleanup, out of scope for the pillar/council work. `categories` is union-only on write (never shrinks), so these persist until a dedicated backfill targets them directly |
 
 ### The one genuinely open external problem
 
@@ -233,4 +253,4 @@ Small, well-bounded, and each improves something real:
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-17.*
+*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-22.*

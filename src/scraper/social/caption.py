@@ -111,7 +111,20 @@ _OPENERS_BY_KIND: dict[str, list[tuple[str, str]]] = {
         ("TICKETS ARE OUT", "🎫"),
         ("PLAN AHEAD, EL PASO", "🔭"),
     ],
+    "hype": [
+        ("DON'T MISS THIS", "🚨"),
+        ("THIS ONE'S BIG", "🔥"),
+        ("MARK YOUR CALENDAR NOW", "📌"),
+    ],
 }
+
+# Weekly pillar posts need the pillar's own name IN the opener, which a static
+# per-kind list can't hold — {pillar} is substituted in build_caption.
+_WEEKLY_OPENERS: list[tuple[str, str]] = [
+    ("YOUR WEEK IN {pillar}", "🌵"),
+    ("{pillar}, THIS WEEK", "🎉"),
+    ("EL PASO {pillar}, THIS WEEK", "📣"),
+]
 
 # The line under the header. "worth leaving the couch for" reads wrong on a
 # post about a concert six months out.
@@ -121,12 +134,18 @@ _SUBHEADS: dict[str, str] = {
     "weekend": "{n} thing{s} to get you out of the house this weekend:",
     "monthly": "{n} thing{s} worth planning around this month:",
     "horizon": "{n} thing{s} already on sale — get in early:",
+    "weekly": "{n} thing{s} happening in {pillar} this week:",
+    # n is always 1 for a hype post, so the template deliberately doesn't
+    # reference a count.
+    "hype": "The one thing you need to know about:",
 }
 
 _KIND_HASHTAGS: dict[str, list[str]] = {
     "weekend": ["#elpasoweekend", "#weekendplans"],
     "monthly": ["#elpasothismonth", "#elpasoevents"],
     "horizon": ["#savethedate", "#elpasotickets"],
+    "weekly": ["#elpasothisweek"],
+    "hype": ["#dontmissthis"],
 }
 
 
@@ -211,25 +230,33 @@ def build_caption(
     max_caption: int = MAX_CAPTION,
     kind: str = "digest",
     period_label: Optional[str] = None,
+    pillar: Optional[str] = None,
 ) -> str:
     """Assemble the caption, degrading gracefully if it runs long.
 
     `picked` is a list of selection.Candidate, already in chronological order.
     `kind` defaults to "digest", so every existing call site produces exactly
-    the caption it did before formats existed.
+    the caption it did before formats existed. `pillar` only matters for
+    kind == "weekly", where it fills the {pillar} placeholder in the opener
+    and subhead — every other kind's templates simply don't contain one.
     """
-    openers = _OPENERS_BY_KIND.get(kind, _OPENERS)
+    # A weekly post's opener needs the pillar's own name in it, which no
+    # static per-kind list can hold.
+    openers = _WEEKLY_OPENERS if (kind == "weekly" and pillar) else _OPENERS_BY_KIND.get(kind, _OPENERS)
     # Keyed on the ordinal rather than randomised, so re-rendering the same
     # post yields the same caption — which is what lets a rebuild after a
     # dropped event stay stable instead of rewriting the opener too.
     opener, flourish = openers[day.toordinal() % len(openers)]
+    pillar_display = pillar.upper() if pillar else ""
+    if pillar:
+        opener = opener.format(pillar=pillar_display)
     header = f"{opener} {flourish} — {period_label or _date_label(day)}"
     n = len(picked)
     if n == 0:
         subhead = "Nothing on the radar right now — check back later."
     else:
         template = _SUBHEADS.get(kind, _SUBHEADS["digest"])
-        subhead = template.format(n=n, s="s" if n != 1 else "")
+        subhead = template.format(n=n, s="s" if n != 1 else "", pillar=pillar_display)
     footer = f"\n\nFull list + map → {site}"
     tags = _hashtags([c.row for c in picked], kind=kind)
 

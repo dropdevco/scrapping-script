@@ -1,8 +1,9 @@
 # Migrations
 
-Eleven migrations, `0001_init` through `0011_internal_table_rls`, applied by hand. There is no
+Eighteen migrations, `0001_init` through `0018_weekly_and_hype_posts`, applied by hand. There is no
 migration framework, no tracking table, and no automation — **which is exactly why the discipline
-below matters.**
+below matters, and exactly how 0018 ended up needing to catch up real, already-applied drift** (see
+its own entry below and [known-gaps.md](../known-gaps.md)).
 
 ---
 
@@ -13,8 +14,9 @@ Stated in `0002_venues.sql:1-2` and restated in 0003 through 0006:
 > No drops, no deletes, no alterations of existing columns. Safe to run against a live database with
 > data.
 
-In eleven migrations there is exactly **one** drop, and it is of an *index*, replaced in the same file by
-a superset — behaviour-preserving by construction because every existing row collapsed to the old key.
+In eighteen migrations there are exactly **two** drops, and both are of an *index*, each replaced in the
+same file by a superset — behaviour-preserving by construction because every existing row collapsed to
+the old key (0006), or because the old index's own predicate is a strict subset of the new one's (0018).
 
 Every new column gets a default or is nullable, so pre-existing rows keep behaving exactly as before.
 Several migrations say so explicitly in a comment; copy that habit.
@@ -36,12 +38,14 @@ Several migrations say so explicitly in a comment; copy that habit.
 | 0009 | `ig_post_edits` | The table + pending index; `photo_overrides`, `caption_is_custom`. **Does not enable RLS** | Telegram-driven edits, shaped by the serverless/Pillow split |
 | 0010 | `ig_post_kinds` | Widens the `kind` CHECK to five values; `period_key`; the live-period index | Four formats over one renderer |
 | 0011 | `internal_table_rls` | RLS, no policies, on `runs` and `ig_post_edits`. Applied 2026-09-17 | Closes the anon-key gap open since 0001/0009; matches the 0004/0008 posture |
-| 0013 | `border_waits` | `border_ports` (seeded with the six bridges), `border_readings` (append-only, `content_hash` UNIQUE), `border_runs`; RLS, no policies | Border wait times ([component](../components/border-wait-times.md)). Added by PR #8, applied to production 2026-09-29. (0012 is the editorial migration, documented elsewhere) |
-| 0014 | `border_retention` | A retention function for `border_readings` | Keeps the history table bounded; run daily by `border-poll --prune`. The file's header comment still says `0002`, a staging leftover |
-| 0015 | `border_alerts_crossings_typical` | `border_alerts`, `border_crossings`, the "normal for this hour" view, one retention job for all of it | Alerts survive a restart. Header comment says `0003` |
+| 0012 | `editorial` | `events.content_tags/content_tags_source/blurb/blurb_source/blurb_checked_at`; `venues.chain_scope/is_local/localness_reason/localness_source/localness_checked_at`; `ig_posts.council_verdicts`. GIN index on `content_tags` | The editorial council and Instagram-only content pillars arrive as pure additive state — no existing RLS policy needed changing, since all three tables already had the right posture |
+| 0013 | `border_waits` | `border_ports` (seeded with the six bridges), `border_readings` (append-only, `content_hash` UNIQUE), `border_runs`; RLS, no policies | Border wait times ([component](../components/border-wait-times.md)). Added by PR #8, applied to production 2026-09-29 |
+| 0014 | `border_retention` | A retention function for `border_readings` | Keeps the history table bounded; run daily by `border-poll --prune`. (The file's header comment still says `0002`, a staging leftover) |
+| 0015 | `border_alerts_crossings_typical` | `border_alerts`, `border_crossings`, the "normal for this hour" view, one retention job for all | Alerts survive a restart; header comment says `0003` |
 | 0016 | `border_current_waits` | `border_current_waits` (PK `port_number, lane`; text columns never blank); RLS, no policies | The table the knowledge-base tab is built from; rewritten every poll |
-| 0017 | `border_current_waits_known_as` | A `known_as` column | The names people call each bridge ("Centro", "Puente Libre") |
-| 0019 | `border_poll_dispatch` | `pg_cron`, `pg_net`; `dispatch_border_poll(job)`; three cron jobs (poll every 10 min, daily 10:20 UTC, housekeeping). **Inert until a GitHub token is in Vault** | GitHub's own cron proved unreliable (~1 run per 3 hours), so Postgres keeps the clock and dispatches `border-poll` through the GitHub API. (0018 is the weekly/hype migration, in a separate PR) |
+| 0017 | `border_current_waits_known_as` | `known_as` column | The names people call each bridge ("Centro", "Puente Libre") |
+| 0018 | `weekly_and_hype_posts` | Widens `kind` CHECK to seven values; `ig_posts.pillar`; **drops** `ig_posts_live_period_idx` for a `(kind, period_key, pillar)` superset; `events.is_hype/hype_reason/hype_source/hype_checked_at/hype_posted_at` | Two new post kinds — six pillar-specific weekly posts and a standalone spotlight for a single hype-worthy event. **Written to formalize schema already applied by hand against the live database** before this file existed (`kind` CHECK, `pillar`, and the new index were all live with zero migration backing it) — caught during this rollout rather than left silent |
+| 0019 | `border_poll_dispatch` | `pg_cron`, `pg_net`; `dispatch_border_poll(job)`; three cron jobs (poll every 10 min, daily 10:20 UTC, housekeeping). **Inert until a GitHub token is in Vault** | GitHub's own cron proved unreliable (~1 run per 3 hours), so Postgres keeps the clock and dispatches `border-poll` through the GitHub API. (0018 is the weekly/hype migration) |
 
 ---
 
@@ -141,4 +145,4 @@ All tracked in [known-gaps.md](../known-gaps.md).
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-17.*
+*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-22.*

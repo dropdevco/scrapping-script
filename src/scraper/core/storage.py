@@ -325,6 +325,46 @@ class Storage:
 
         return await asyncio.to_thread(_q)
 
+    async def query_hype_candidates(
+        self, location: str, limit: int = 1, lookahead_days: int = 45, min_lead_hours: int = 24
+    ) -> list[dict[str, Any]]:
+        """The soonest approved, not-yet-spotlighted event judged hype-worthy.
+
+        Not a window query like query_events_for_range: a hype post isn't tied
+        to a period, so this reaches ahead lookahead_days from right now and
+        takes whatever qualifies, soonest first — a hype post should always be
+        "the next big thing," not the biggest thing three months out.
+        hype_posted_at is the de-dup guard so an event already spotlighted
+        never surfaces here again.
+
+        The floor is now + min_lead_hours, not now: the post is scheduled for later
+        that day, so an event starting this morning would be announced after it is over.
+        """
+        if not self.enabled:
+            return []
+        now = datetime.now(timezone.utc)
+        floor_iso = (now + timedelta(hours=min_lead_hours)).isoformat()
+        ceiling_iso = (now + timedelta(days=lookahead_days)).isoformat()
+
+        def _q() -> list[dict[str, Any]]:
+            return (
+                self._client.table("events")
+                .select("*, venues(*)")
+                .eq("status", "approved")
+                .eq("is_hype", True)
+                .is_("hype_posted_at", "null")
+                .ilike("location", f"%{location}%")
+                .gte("start_time", floor_iso)
+                .lt("start_time", ceiling_iso)
+                .order("start_time", desc=False)
+                .limit(limit)
+                .execute()
+                .data
+                or []
+            )
+
+        return await asyncio.to_thread(_q)
+
     # ── knowledge-base export (scraper.kb) ────────────────────────────────────
     async def query_upcoming_events(
         self,
@@ -582,7 +622,10 @@ class Storage:
         columns. Everything else on an event row is scraped fact, and a model
         has no business rewriting a title or a start time.
         """
-        allowed = {"blurb", "blurb_source", "blurb_checked_at", "content_tags", "content_tags_source"}
+        allowed = {
+            "blurb", "blurb_source", "blurb_checked_at", "content_tags", "content_tags_source",
+            "is_hype", "hype_reason", "hype_source", "hype_checked_at", "hype_posted_at",
+        }
         patch = {k: v for k, v in patch.items() if k in allowed}
         if not self.enabled or not patch:
             return False

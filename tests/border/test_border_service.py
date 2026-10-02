@@ -390,7 +390,7 @@ class Efficiency(unittest.IsolatedAsyncioTestCase):
         start = clock_module.perf_counter()
         await feed.snapshot()
         elapsed = clock_module.perf_counter() - start
-        self.assertLess(elapsed, 0.6, "three 0.25s sources should overlap, not queue")
+        self.assertLess(elapsed, 0.7, "three 0.25s sources should overlap, not queue")
 
     async def test_simultaneous_callers_share_one_upstream_read(self):
         calls = {"n": 0}

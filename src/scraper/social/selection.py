@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 from ..core.address import normalize_address, normalize_venue_name
 from ..core.content_tags import FITNESS, FOOD
-from ..core.dedupe import _norm
+from ..core.dedupe import _norm, is_same_stored_event
 
 # Category buckets come from core/categorize.py::_RULES, plus whatever a source
 # supplies verbatim (Ticketmaster ships its own segment/genre names; the City of
@@ -154,6 +154,13 @@ PROFILES: dict[str, ScoreProfile] = {
         recently_posted_penalty=0.0,
         require_ticket_links=True,
     ),
+    # A single pillar's week: the pool is already filtered to one category
+    # before this profile ever sees it (see __main__._build_one), so the
+    # category diversity cap has nothing left to diversify against — left
+    # switched on it would just throttle the post to a handful of slides for
+    # no editorial reason. max_per_venue is loosened vs weekend's 1 for the
+    # same reason: a single-pillar week draws from fewer venues.
+    "weekly": ScoreProfile(evening_bonus=1.5, max_per_venue=2, max_per_category=999),
 }
 
 DEFAULT_PROFILE = PROFILES["digest"]
@@ -218,6 +225,21 @@ def weekend_bounds(day: date, tz_name: str) -> tuple[str, str]:
     return _iso_pair(start, end)
 
 
+def week_bounds(day: date, tz_name: str) -> tuple[str, str]:
+    """Monday 00:00 -> the following Monday 00:00 local, for the week starting
+    the Monday on/after `day`.
+
+    Same "on or after" shape as weekend_bounds, just anchored to Monday and
+    spanning all 7 days instead of 3: a Sunday build should cover the week
+    about to start, not the week already half over.
+    """
+    ahead = (0 - day.weekday()) % 7  # 0 = Monday
+    monday = day + timedelta(days=ahead)
+    start = _local_midnight(monday, tz_name)
+    end = _local_midnight(monday + timedelta(days=7), tz_name)
+    return _iso_pair(start, end)
+
+
 def month_bounds(day: date, tz_name: str) -> tuple[str, str]:
     """`day`'s own local calendar month, half-open."""
     first = day.replace(day=1)
@@ -250,6 +272,7 @@ BOUNDS_FOR_KIND = {
     "weekend": weekend_bounds,
     "monthly": month_bounds,
     "horizon": horizon_bounds,
+    "weekly": week_bounds,
 }
 
 
@@ -259,11 +282,11 @@ def period_key(kind: str, day: date, tz_name: str) -> Optional[str]:
     Derived from the WINDOW, not from post_date: a weekend digest built on
     Thursday belongs to that weekend's bucket, not to Thursday's.
     """
-    if kind in ("digest", "breaking"):
-        return None  # the daily post has its own (post_date, slot) index
+    if kind in ("digest", "breaking", "hype"):
+        return None  # daily has its own (post_date, slot) index; hype isn't periodic at all
     start_iso, _ = BOUNDS_FOR_KIND[kind](day, tz_name)
     start = datetime.fromisoformat(start_iso).date()
-    if kind == "weekend":
+    if kind in ("weekend", "weekly"):
         year, week, _ = start.isocalendar()
         return f"{year}-W{week:02d}"
     return f"{start.year}-{start.month:02d}"
@@ -436,12 +459,19 @@ def choose(
     max_per_category: Optional[int] = None,
     image_sizes: Optional[dict[str, int]] = None,
     profile: Optional[ScoreProfile] = None,
+    fill_to: int = 0,
 ) -> list[Candidate]:
     """Rank, collapse repeats, apply diversity caps, return in TIME order.
 
     Chronological output is deliberate: a carousel that reads 9am -> 10pm is a
     schedule someone can act on, whereas score order is a ranked list nobody
     asked for.
+
+    The caps are a preference, never a reason to ship a short post. When they
+    leave fewer than `fill_to` picks, the events they skipped are added back
+    in score order until the post is full — same-happening duplicates are
+    still refused. 2026-09-23 had ten distinct events and posted seven, because
+    three museum exhibitions tripped the Arts & Culture cap.
     """
     recent_keys = recent_keys or set()
     image_sizes = image_sizes or {}
@@ -494,19 +524,51 @@ def choose(
     picked: list[Candidate] = []
     venue_counts: dict[str, int] = {}
     category_counts: dict[str, int] = {}
+    capped: list[Candidate] = []
     for cand in scored:
         if len(picked) >= max_slides:
             break
         venue = venue_key(cand.row) or "?"
+        if venue != "?" and _duplicates_a_pick(cand, venue, picked):
+            continue
         if venue != "?" and venue_counts.get(venue, 0) >= max_per_venue:
+            capped.append(cand)
             continue
         cats = _categories(cand.row)
         if cats and all(category_counts.get(c, 0) >= max_per_category for c in cats):
+            capped.append(cand)
             continue
         picked.append(cand)
         venue_counts[venue] = venue_counts.get(venue, 0) + 1
         for c in cats:
             category_counts[c] = category_counts.get(c, 0) + 1
 
+    for cand in capped:  # already in score order
+        if len(picked) >= min(fill_to, max_slides):
+            break
+        venue = venue_key(cand.row) or "?"
+        if venue != "?" and _duplicates_a_pick(cand, venue, picked):
+            continue
+        picked.append(cand)
+
     picked.sort(key=lambda c: c.start_local or datetime.max.replace(tzinfo=ZoneInfo(tz_name)))
     return picked
+
+
+def _duplicates_a_pick(cand: Candidate, venue: str, picked: list[Candidate]) -> bool:
+    """Is this the same real happening as something already picked?
+
+    dedupe_key needs the exact (normalized) title, so it cannot see the same
+    show listed by two sources under two wordings — "DISNEY ON ICE: Jump In!"
+    and "Disney On Ice presents Jump In!" made the 2026-09-23 carousel twice.
+    Storage's merge should have caught that pair and did not, because its lane
+    is keyed on venue_id and the two sources' addresses ("4100 East Paisano
+    Street" vs "4100 E Paisano Dr") forked two venue rows. Here the venue is
+    matched by NAME (venue_key), which is what lets the same venue-confirmed
+    title test storage uses finally run on the pair. Candidates arrive in
+    score order, so the higher-scored listing is the one that stays.
+    """
+    return any(
+        (venue_key(other.row) or "?") == venue and is_same_stored_event(cand.row, other.row)
+        for other in picked
+    )

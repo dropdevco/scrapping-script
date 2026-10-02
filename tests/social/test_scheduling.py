@@ -116,6 +116,44 @@ def test_deadline_falls_inside_the_sweep_window_year_round(day, label):
     )
 
 
+@pytest.mark.parametrize(
+    "day, label",
+    [(date(2027, 1, 17), "MST (winter)"), (date(2027, 7, 18), "MDT (summer)")],
+)
+def test_every_weekly_pillar_slot_falls_inside_the_sweep_window(day, label):
+    """A slot that opens after the last publish sweep is never published: the row
+    waits until the next day and is expired as stale."""
+    from scraper.social.__main__ import _WEEKLY_PILLAR_SLOTS
+
+    for pillar, hour in _WEEKLY_PILLAR_SLOTS:
+        iso = _suggested_schedule(day, TZ, hour)
+        utc = datetime.fromisoformat(iso).astimezone(timezone.utc)
+        assert utc.hour in SWEEP_HOURS, f"{pillar} at {hour}:00 in {label} is {utc:%H:%M} UTC, past the last sweep"
+
+
+def test_the_weekly_cron_does_not_share_a_minute_with_the_publish_sweep():
+    """Both runs would land in the same concurrency group at the same instant, and
+    GitHub keeps only one pending run, so a third arrival could drop the weekly build."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    weekly = re.search(r'- cron: "(\d+) 13 \* \* 0"', text)
+    assert weekly and int(weekly.group(1)) not in (0, 30)
+
+
+def test_the_weekly_cron_maps_to_the_weekly_kind():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "- cron: \"7 13 * * 0\"" in text
+    assert "github.event.schedule == '7 13 * * 0' && 'weekly'" in text
+
+
+def test_a_hype_check_is_chained_off_every_scrape():
+    """Not a separate cron: the hype build runs once per scrape (workflow_run),
+    alongside the digest build in the same job — the app itself, not the YAML,
+    decides whether anything actually gets posted."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "build --kind hype" in text
+    assert "if: github.event_name == 'workflow_run'" in text
+
+
 def test_the_two_halves_of_the_year_really_do_differ():
     """Guards the test above from becoming vacuous.
 

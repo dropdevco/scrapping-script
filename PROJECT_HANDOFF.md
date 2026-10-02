@@ -15,6 +15,26 @@ Last updated: 2026-08-06
 > **The authoritative record for everything after 2026-08-06 is the git commit bodies**, which are
 > unusually detailed, plus `docs/`. The Change Log below remains worth reading for context on how the
 > project got here, and `docs/architecture/adr/` distils its decisions.
+>
+> **2026-09-20 update, for anyone landing here first:** four workstreams from a meeting-notes review
+> shipped this session — full detail in `docs/`, not here.
+> - **Dedupe hardening.** A real address normalizer (`src/scraper/core/address.py`) now backs
+>   `venues.address_hash`, plus a stable `content_hash` (`min()` over a merge cluster) and a second,
+>   cross-venue duplicate-merge lane in `storage.py`/`dedupe.py`. See
+>   [`docs/components/scraper-engine.md`](docs/components/scraper-engine.md#venue-identity-coreaddresspy).
+> - **Instagram-only content pillars.** Six new labels (`events.content_tags`) drive carousel chips,
+>   hashtags and diversity caps — explicitly **not** a replacement for the website's `categories`
+>   taxonomy. See
+>   [`docs/components/social-pipeline.md`](docs/components/social-pipeline.md#content-pillars-corecontent_tagspy).
+> - **Post quality.** A quiet date line at the bottom of every slide, and a generated on-slide blurb
+>   for titles that don't explain themselves (e.g. "Libre para Volar"), backed by `events.blurb`.
+> - **A 5-role editorial council** (localness auditor, curator, clarifier, editor, critic) —
+>   OpenRouter-backed, cache-first, referee-bounded, and designed to **never block a post**. Ships
+>   behind `COUNCIL_ENABLED` (off by default). See
+>   [`docs/components/social-pipeline.md`](docs/components/social-pipeline.md#editorial-council-localnesspy-editorpy-clarifypy-criticpy).
+>
+> New migration `0012_editorial`; 400 tests now pass locally (`tests/core/` went from ~0 to 68).
+> `docs/known-gaps.md` and `docs/data/migrations.md` have the full inventory.
 
 This file is the durable context document for this repo, meant to replace re-exploration. Read this file FIRST, before grepping the codebase, when starting a new session/harness on this repo — it should answer "what is this, how is it built, what's the current state" without needing to re-derive it from source. Update it every time you make a meaningful change, especially when changing architecture, data contracts, setup steps, UI style, source behavior, migrations, or testing expectations.
 

@@ -32,7 +32,17 @@ The central table. Scraped rows land `approved`; user submissions land `pending`
 | `title` | text | no | — | Event name as published |
 | `description` | text | yes | — | Source blurb; truncated to 400 chars in the KB export |
 | `start_time` | timestamptz | yes | — | **Aware and event-local** — see [ADR-0002](../architecture/adr/0002-local-timestamp-invariant.md) |
-| `end_time` | timestamptz | yes | — | Rarely populated |
+| `end_time` | timestamptz | yes | — | Better populated than it looks — measured at 72% of all rows, and the social pipeline now reads it for multi-day/one-time framing |
+| `content_tags` | text[] | no | `'{}'` | **Instagram-only** editorial pillar (one of six) — never a replacement for `categories`, see [social-pipeline.md](../components/social-pipeline.md#content-pillars-corecontent_tagspy) |
+| `content_tags_source` | text | yes | — | `rule` / `council` / `manual`. A `council`/`manual` value is never overwritten by a `rule` one |
+| `blurb` | text | yes | — | A generated plain-language line for a title that doesn't explain itself, rendered on the carousel slide and in the caption |
+| `blurb_source` | text | yes | — | `council` / `manual` |
+| `blurb_checked_at` | timestamptz | yes | — | When the blurb (or the `self_explanatory: true` verdict) was last computed |
+| `is_hype` | boolean | yes | — | Tri-state, same convention as `venues.is_local`: NULL means unjudged and must behave exactly as today (never spotlighted) |
+| `hype_reason` | text | yes | — | Short justification from whichever source set `is_hype` |
+| `hype_source` | text | yes | — | `rule` (the deterministic pre-pass) / `council` / `manual`. `manual` is never re-judged |
+| `hype_checked_at` | timestamptz | yes | — | When `is_hype` was last computed |
+| `hype_posted_at` | timestamptz | yes | — | Set once a `hype` post is actually built for this event — the de-dup guard so the same show is never spotlighted twice |
 | `venue` | text | yes | — | Raw venue name; part of the venue natural key |
 | `location` | text | yes | — | Raw full address; part of the venue natural key, and what the region filters match on |
 | `url` | text | yes | — | Canonical source URL; **also the primary dedupe key** |
@@ -47,7 +57,8 @@ The central table. Scraped rows land `approved`; user submissions land `pending`
 | `submitted_by` | uuid | yes | — | An `auth.users` id. **No FK declared** |
 | `ticket_links` | jsonb | no | `'[]'` | `[{source, label, url}]` — one merged event, many purchase links |
 
-**Indexes:** GIN full-text on `location`; btree on `start_time`, `last_seen`, `status`, `venue_id`.
+**Indexes:** GIN full-text on `location`; GIN on `content_tags`; btree on `start_time`, `last_seen`,
+`status`, `venue_id`.
 
 **Trigger `events_touch_last_seen`** (BEFORE INSERT OR UPDATE):
 
@@ -74,6 +85,11 @@ event was still listed at the source as of T" — which is exactly what the fres
 | `lat`, `lng` | double precision | yes | — | Map pins and region gating |
 | `address_hash` | text | no **UNIQUE** | — | The natural key — see below |
 | `created_at` | timestamptz | yes | `now()` | |
+| `chain_scope` | text | yes | — | `local` / `regional` / `national` / `unknown` — judged once, cached forever |
+| `is_local` | boolean | yes | — | Tri-state on purpose: `NULL` means unjudged and must behave exactly like today |
+| `localness_reason` | text | yes | — | Short justification from whichever source set `is_local` |
+| `localness_source` | text | yes | — | `rule` (the `_KNOWN_CHAINS` pre-pass) / `council` / `manual`. `manual` is never re-judged |
+| `localness_checked_at` | timestamptz | yes | — | |
 
 **Indexes:** `city`, and a composite on `(lat, lng)`. Requires the `pgcrypto` extension for `digest()`.
 
@@ -122,23 +138,30 @@ One row per rendered carousel.
 | `error` | text | yes | — | Last error, **secret-redacted before write** |
 | `created_at` / `published_at` | timestamptz | | | |
 | `scheduled_for` | timestamptz | yes | — | Best-effort publish time. NULL = no restriction |
-| `kind` | text | no | `'digest'` | CHECK: `digest`, `breaking`, `weekend`, `monthly`, `horizon` |
-| `slot` | text | yes | — | Which digest, when several run per day. NULL = the single unnamed one |
+| `kind` | text | no | `'digest'` | CHECK: `digest`, `breaking`, `weekend`, `monthly`, `horizon`, `weekly`, `hype` |
+| `slot` | text | yes | — | Which digest, when several run per day. NULL = the single unnamed one. NULL for every `weekly` row too — see `pillar` below |
 | `auto_approve_at` | timestamptz | yes | — | When an untouched draft approves itself. **NULL = never** |
 | `approved_by` | text | yes | — | CHECK: `human` / `auto` — editorial intent vs opt-out shipping |
 | `window_start` / `window_end` | timestamptz | yes | — | The event window this was built from; cannot be re-derived from `post_date` for weekend or monthly |
 | `photo_overrides` | jsonb | no | `'{}'` | Accepted photo swaps, keyed by **event uuid, not slide index** |
 | `caption_is_custom` | boolean | no | `false` | Stops a rebuild overwriting a human's caption |
-| `period_key` | text | yes | — | `YYYY-Www` / `YYYY-MM` bucket for non-daily posts |
+| `period_key` | text | yes | — | `YYYY-Www` / `YYYY-MM` bucket for non-daily posts. NULL for `hype` — it isn't periodic at all |
+| `council_verdicts` | jsonb | no | `'{}'` | Output from the editor/critic/curator/clarifier/localness roles for this build, written once. Surfaced as an addendum block in the Telegram notification |
+| `pillar` | text | yes | — | Which content pillar a `weekly` post covers (one of the six `content_tags.PILLARS` strings). NULL for every other kind |
 
 ### The partial unique indexes — the load-bearing constraints
 
 | Index | Definition | Purpose |
 |---|---|---|
 | `ig_posts_live_digest_slot_idx` | `(post_date, coalesce(slot,''))` where status is live **and** `kind='digest'` | At most one live daily digest per date and slot |
-| `ig_posts_live_period_idx` | `(kind, period_key)` where status is live, `kind <> 'digest'`, `period_key` not null | One live post per kind and period |
+| `ig_posts_live_period_pillar_idx` | `(kind, period_key, coalesce(pillar,''))` where status is live, `kind <> 'digest'`, `period_key` not null | One live post per kind, period **and pillar** — six weekly posts for the same ISO week don't collide with each other. Strict superset of migration 0010's original `(kind, period_key)` index: weekend/monthly/horizon always pass `pillar=NULL`, so their behavior is unchanged |
 | `ig_posts_auto_approve_idx` | `(auto_approve_at)` where `status='draft'` | Keeps the 30-minute sweep off a sequential scan |
 | `ig_posts_status_idx` | `(status, post_date)` | General queue reads |
+
+> **A note on how this shipped**: `pillar`, the widened `kind` CHECK, and this index were applied
+> directly against the live database before migration `0018_weekly_and_hype_posts.sql` existed —
+> caught and formalized into a real migration file rather than left as silent drift. See
+> [migrations.md](migrations.md) and [known-gaps.md](../known-gaps.md).
 
 "Live" means `('draft','approved','publishing','published')`. **Terminal-but-discarded states are
 excluded on purpose**, so a rejected, skipped or expired row never blocks rebuilding that date.
@@ -204,23 +227,42 @@ content_hash  = sha1(_event_key)
 **A URL is the identity when present.** Two genuinely different events sharing one listing URL collapse
 into one row; a source that changes its URL scheme re-inserts its whole catalogue as new rows.
 
+For a same-day cluster of records describing the same real event, `_merge_into` sets `content_hash`
+to the **`min()`** of the candidates' hashes rather than keeping whichever record arrived richer — this
+makes the stored hash stable across arrival order and which source happened to succeed on a given run.
+See [scraper-engine.md](../components/scraper-engine.md#dedupepy--identity-and-near-duplicate-collapse)
+for the incident that motivated it and the limits of what `min()` alone can guarantee.
+
 ### `venues.address_hash`
 
 ```
 sha1( lower(trim(coalesce(address,''))) || '|' || lower(trim(coalesce(venue_name,''))) )
 ```
 
-where "address" is `events.location` and "venue_name" is `events.venue`. **Implemented three times** —
-Python, SQL, TypeScript — and all three must stay byte-identical. There is **no test pinning their
-equivalence**; that is a known gap.
+where "address" and "venue_name" are **normalized** first — `core/address.py::venue_identity()` does
+NFKD accent-folding, drops a trailing country token, maps number-words to digits, canonicalizes street
+abbreviations, and strips ZIP+4 — not the raw `events.location`/`events.venue` strings. See
+[scraper-engine.md](../components/scraper-engine.md#venue-identity-coreaddresspy) for the full
+normalizer and the real "One Civic Center Plaza" vs "1 Civic Center Plaza" case it fixes.
+
+**Implemented three times** — Python (`core/address.py`, delegated to by `core/storage.py`), SQL
+(`0002_venues.sql`, the raw pre-normalization formula only — the SQL side does not run the Python
+normalizer), and TypeScript (`web/src/lib/hash.ts`, ported line-for-line). All three must stay
+byte-identical for the Python and TypeScript sides; parity across 12 hand-picked real-world cases
+(accents, ZIP+4, number-words, suite markers) was verified manually during the normalizer rollout, but
+**no committed automated test pins Python/TypeScript equivalence going forward** — narrowed but not
+closed, see [known-gaps.md](../known-gaps.md).
 
 ### The two-stage merge
 
 1. **In-batch** (`dedupe.dedupe_events`) — the same concert from Ticketmaster and Eventbrite in one
    scrape.
-2. **Cross-run** (`Storage._merge_with_existing`) — the same event appearing on a *new* ticketing site
-   next week. Without it, every new site a venue's event lands on would create a second card instead of
-   adding a ticket link.
+2. **Cross-run**, now **two lanes** (`Storage._merge_with_existing`) — lane 1 matches on exact
+   `venue_id`; lane 2 (`_find_cross_venue_duplicate`) catches the same event under two *different*
+   stored venue ids, using the shared `is_same_stored_event()` predicate from `dedupe.py`. Without
+   either lane, every new site a venue's event lands on would create a second card instead of adding a
+   ticket link. See [scraper-engine.md](../components/scraper-engine.md#storagepy--persistence-and-the-cache)
+   for the full gate list.
 
 ---
 
@@ -304,4 +346,4 @@ Worth knowing before you assume the database is validating something:
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-17.*
+*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-22.*

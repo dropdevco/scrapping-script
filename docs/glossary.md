@@ -36,14 +36,45 @@ event it is `sha1(url)` when a URL exists, otherwise `sha1(title|date|venue)`
 listing URL collapse into one row.
 
 **address_hash** — the identity of a venue:
-`sha1(lower(trim(address)) + "|" + lower(trim(venue_name)))`. Implemented **three times** — in
-Python (`core/storage.py:39-45`), in SQL (`0002_venues.sql:9-12`), and in TypeScript
-(`web/src/lib/hash.ts:12-15`). All three must stay byte-identical.
+`sha1(lower(trim(address)) + "|" + lower(trim(venue_name)))`, computed over
+**normalized** address/name (`core/address.py::venue_identity`) — see below. Implemented in Python
+(`core/storage.py` delegates to `core/address.py`), SQL (`0002_venues.sql:9-12`, the raw
+pre-normalization formula), and TypeScript (`web/src/lib/hash.ts`, ported line-for-line). The Python
+and TypeScript sides must stay byte-identical; verified manually, not yet by a committed test.
+
+**venue_identity / address normalizer** (`core/address.py`) — folds a venue's raw name and address
+onto a canonical form before hashing: accent-stripping, dropping a trailing country token, mapping
+number-words to digits ("One Civic Center Plaza" → "1 civic center plaza"), canonicalizing street
+abbreviations, and stripping ZIP+4. What makes two sources describing the same building converge on one
+`venues` row instead of drifting into near-duplicate rows.
 
 **Cross-run merge** — the logic that recognises an event scraped today as the same event stored
 yesterday from a different ticketing site, and unions their ticket links rather than creating a
-second card (`core/storage.py:722-781`). Its counterpart, the *in-batch* merge, does the same
-within a single scrape (`core/dedupe.py:163-185`).
+second card (`core/storage.py`). Two lanes: exact `venue_id` match, and a **cross-venue** lane for the
+same event stored under two different venue rows (gated by `DEDUPE_CROSS_VENUE`). Its counterpart, the
+*in-batch* merge, does the same within a single scrape (`core/dedupe.py`).
+
+**Content pillar** — one of six Instagram-only editorial labels (Arts & Culture, Live Music, Sports,
+Fitness & Activities, Family, Food & Drink) stored in `events.content_tags`. Drives slide chips,
+hashtags, score weighting and the carousel diversity cap. **Not** a replacement for the website's
+`categories` taxonomy — see [social-pipeline.md](components/social-pipeline.md#content-pillars-corecontent_tagspy).
+
+**The editorial council** — five model-backed roles (localness auditor, curator, clarifier, editor,
+critic) that add judgment on top of `selection.py`'s deterministic scoring — assigning a pillar,
+writing a blurb, judging whether a venue is a local business or a national chain, reordering/excluding
+candidates, and reviewing the finished post. Governed by `COUNCIL_ENABLED`; **never blocks a post** —
+every failure mode leaves the pipeline behaving as if the council didn't exist. Full description in
+[social-pipeline.md](components/social-pipeline.md#editorial-council-localnesspy-editorpy-clarifypy-criticpy).
+
+**chain_scope** — a venue's `local` / `regional` / `national` / `unknown` classification, judged once
+by the localness auditor (or a zero-cost known-chain rule pass) and cached forever on `venues`. Feeds
+`ScoreProfile.chain_venue_penalty`, applied narrowly — only for a national chain in the Food & Drink or
+Fitness & Activities pillar.
+
+**blurb** — a generated, ≤90-char plain-language line explaining a title that doesn't explain itself
+(e.g. "Libre para Volar"), written by the clarifier role only for titles that fail a deterministic
+self-explanatory check, and rendered both on the carousel slide and in the caption. Cached on
+`events.blurb`, so a recurring series is paid for once.
 
 **last_seen** — refreshed by a database trigger on every write to an event row
 (`0001_init.sql:62-76`). It means "this event was still listed at the source as of T", which is
@@ -62,7 +93,7 @@ constraint.
 
 ## The Instagram pipeline
 
-**Post kind** — the *format* of a carousel. Five exist (`selection.py:232-238`):
+**Post kind** — the *format* of a carousel. Seven exist (`selection.py`):
 
 | Kind | Window | Voice |
 |---|---|---|
@@ -71,9 +102,20 @@ constraint.
 | `monthly` | the calendar month | "THIS MONTH IN EL PASO" — built on the 1st |
 | `horizon` | a 60-day span starting ~6 months out | "SAVE THE DATE" — ticketed events only |
 | `breaking` | one local day | "JUST IN" — **implemented but never scheduled**; reachable only from the CLI |
+| `weekly` | Mon 00:00 → the following Mon 00:00 | "THIS WEEK IN {PILLAR}" — six posts built every Sunday, one per content pillar |
+| `hype` | not a window — the soonest not-yet-spotlighted hype-worthy event | "DON'T MISS THIS" — cover + exactly one event slide, checked once per scrape |
 
 **Slot** — when more than one digest runs in a day, the slot names it (`morning`, `evening`),
-configured by `IG_DIGEST_SLOTS`. `NULL` means the single unnamed digest, which is the default.
+configured by `IG_DIGEST_SLOTS`. `NULL` means the single unnamed digest, which is the default. A
+`weekly` post reuses the same mechanism to fire six drafts from one build, but names the pillar in the
+dedicated `ig_posts.pillar` column rather than `slot` (which stays `NULL` for `weekly` rows) — the live
+unique index keys on `pillar`, not `slot`, for every kind but `digest`.
+
+**Hype post** — a standalone spotlight carousel for one event judged to deserve its own post rather
+than a roundup slot: a headline touring artist, a major convention, a championship-level local game.
+Judged by `social/hype.py` (`events.is_hype`, cached once per event, tri-state like `is_local`) — a
+free deterministic pre-pass (no ticket link and not a major venue ⇒ definite no) gates which events even
+reach one batched model call. Checked once per scrape; most days posts nothing.
 
 **period_key** — the bucket a non-daily post belongs to: `YYYY-Www` for a weekend, `YYYY-MM` for a
 month or horizon target. It exists as a stored column rather than a derived expression because
@@ -174,4 +216,4 @@ scoped subgraph; use it before grepping, and run `graphify update .` after code 
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-10.*
+*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-22.*

@@ -132,4 +132,4 @@ stays a reliable way to orient. It is AST-only and costs nothing.
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-10.*
+*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-20.*

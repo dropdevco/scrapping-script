@@ -132,6 +132,10 @@ def _council_block(council_verdicts: Optional[dict[str, Any]]) -> str:
         lines.append("🧭 Editor: " + "; ".join(shown) + suffix)
 
     critic = council_verdicts.get("critic") or {}
+    # Already repaired before this message was built — the slides and caption
+    # above reflect it. What follows (if anything) is still open.
+    for note in (critic.get("fixed") or [])[:3]:
+        lines.append(f"🛠 Fixed: {note}")
     for issue in (critic.get("issues") or [])[:3]:
         icon = "⛔" if issue.get("severity") == "block" else "⚠️"
         where = f"Slide {issue['slide']}" if issue.get("slide") else "Caption"

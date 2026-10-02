@@ -14,7 +14,7 @@ the approval loop spans both runtimes and is not describable without both.
 | **Runs on** | GitHub Actions (`ig-daily`): build chained off the scrape; publish sweep every 30 min |
 | **Writes** | `ig_posts`, `ig_post_edits`, `ig_post_metrics`, the `ig-slides` storage bucket, Instagram |
 | **Requires** | Supabase + `IG_ACCESS_TOKEN` + `IG_BUSINESS_ACCOUNT_ID`; Pillow (`[social]` extra) |
-| **Tests** | `tests/social/` — 209 tests, the best-covered part of the codebase |
+| **Tests** | `tests/social/` — 331 tests, the best-covered part of the codebase |
 
 **The defining property:** all third-party I/O happens at **build** time. By publish time every slide
 is a JPEG we own, at the right dimensions, on infrastructure we control — so the publisher can only
@@ -42,22 +42,37 @@ stateDiagram-v2
     published --> [*]: metrics at t24 / t72
 ```
 
-`build` in order (`social/__main__.py:113-276`):
+`build` in order (`social/__main__.py::_build_one`), now with the five council roles woven in at the
+points where they can act on the data actually available to them (see
+[Editorial council](#editorial-council-localnesspy-editorpy-clarifypy-criticpy) below):
 
 1. Resolve the window for this `kind`, the score profile, and the period key.
 2. Read approved events for the window — `storage.query_events_for_range(CITY, …)`.
 3. Look up recently-posted slide keys for suppression, with a per-kind lookback.
-4. `selection.choose(...)` ranks everything; **the slide cap is applied later**, during the photo loop.
-5. Fetch photos in rank order until `IG_MAX_SLIDES` is reached. A dead photo no longer drops the event
+4. **Localness auditor** runs first, before ranking — `chain_scope`/`is_local` must already be on the
+   row for `selection.choose`'s `chain_venue_penalty` to have anything to read.
+5. `selection.choose(...)` ranks everything; **the slide cap is applied later**, during the photo loop.
+6. **Editor** reviews the ranked pool and returns bounded excludes/reorders/score nudges — still before
+   the photo loop, so an excluded event never costs a download.
+7. Fetch photos in rank order until `IG_MAX_SLIDES` is reached. A dead photo no longer drops the event
    — there is a text-only layout for exactly this case.
-6. Below `IG_MIN_SLIDES` → write a `skipped` row and stop.
-7. Re-sort **chronologically**, keeping each photo paired with its event.
-8. Render cover + event slides; build the caption.
-9. `--dry-run` returns here; `--out` also writes JPEGs and `caption.txt` locally.
-10. Insert the draft. A `None` return means the partial unique index rejected it because a live post
-    already exists — a normal re-run outcome, not an error.
-11. Upload slides, record their paths, notify Telegram (and email).
-12. If `IG_AUTOPOST`: approve and publish immediately, in the same process.
+8. Below `IG_MIN_SLIDES` → write a `skipped` row and stop.
+9. **Curator** assigns a content pillar to any surviving candidate the rule-based baseline left empty;
+   **clarifier** generates a blurb for any title that fails the deterministic self-explanatory check.
+   Both are cache-first — most builds call neither for a title/venue pair already judged once.
+10. Re-sort **chronologically**, keeping each photo paired with its event.
+11. Render cover + event slides (pillar chip, date footer, on-slide blurb); build the caption (blurb,
+    multi-day/recurring framing).
+12. **Critic** reviews the finished set + caption text and returns warn/block-severity notes. A block
+    may carry a fix (`drop` / `clear_blurb`); those are applied, dropped slots are backfilled from the
+    bench, the carousel is re-rendered and the critic runs once more, report-only. It never withholds
+    the post.
+13. `--dry-run` returns here; `--out` also writes JPEGs and `caption.txt` locally.
+14. Insert the draft, with `council_verdicts` attached. A `None` return means the partial unique index
+    rejected it because a live post already exists — a normal re-run outcome, not an error.
+15. Upload slides, record their paths, notify Telegram (and email) — the notification appends a council
+    block when any role produced output.
+16. If `IG_AUTOPOST`: approve and publish immediately, in the same process.
 
 ---
 
@@ -104,10 +119,33 @@ selection, rendering or captions.
 | `weekend` | Fri 00:00 → Mon 00:00, on or after `day` | "THIS WEEKEND / IN EL PASO" | "N things to do" | 35 d |
 | `monthly` | the calendar month | "THIS MONTH IN / EL PASO" | "N things to do" | 120 d |
 | `horizon` | 60 days starting ~6 months out | "SAVE THE DATE / EL PASO" | "N on sale now" | 200 d |
+| `weekly` | Mon 00:00 → the following Mon 00:00, on or after `day` — **six posts, one per content pillar** | "THIS WEEK IN / {PILLAR}" | "N things to do" | 35 d |
+| `hype` | Not a window — the soonest not-yet-spotlighted event judged hype-worthy within 45 days | "DON'T MISS THIS / EL PASO" | "1 thing happening" | n/a — de-duped via `events.hype_posted_at`, not slide-key suppression |
 
-One renderer serves all five — see [ADR-0008](../architecture/adr/0008-one-parameterised-renderer.md).
+One renderer serves all seven — see [ADR-0008](../architecture/adr/0008-one-parameterised-renderer.md).
 Recurrence suppression is scoped **by kind**: a monthly roundup is supposed to repeat what the dailies
 covered.
+
+**`weekly` and `hype` are structurally different from the other five.** `weekly` reuses the exact same
+multi-slot mechanism `IG_DIGEST_SLOTS` already gives the daily post (`_WEEKLY_PILLAR_SLOTS` in
+`__main__.py`) — one Sunday build files six drafts, each staggered to its own posting hour via the
+existing `scheduled_for`/publish-sweep machinery, no new publish cron needed. Each draft is a normal
+roundup pre-filtered to rows whose `content_tags` contains that pillar, with `PROFILES["weekly"]`
+neutralizing the category diversity cap (every row already shares the one pillar, so the ordinary cap
+would otherwise throttle the post for no reason).
+
+`hype` isn't a window/rank kind at all — no `ScoreProfile`, no `selection.choose()`. `_build_one`
+branches early: `storage.query_hype_candidates()` picks the soonest approved event with
+`is_hype = true` and `hype_posted_at is null`, wraps it as a single `Candidate` via the existing
+`selection.candidates_from_rows()` rebuild helper, and reuses everything downstream (render, caption,
+critic, insert) as if it were a 1-item carousel. `IG_MIN_SLIDES` doesn't apply to it — cover + one
+event slide is the whole format by design. Whether an event even qualifies is judged by
+`social/hype.py`, the same cache-once, model-judged, never-blocks shape `social/localness.py` already
+established: a free deterministic pre-pass (no ticket link and not a major venue ⇒ definite no) gates
+which events even reach one batched model call asking whether this is a headline touring artist, a
+major convention, or a championship-level local game — most events, even ticketed ones, are expected to
+get "no." Chained off the scrape (`workflow_run`, same trigger as the daily digest) as an extra step in
+the same `build` job, not its own cron — most days it logs "nothing pending" and posts nothing.
 
 **The digest ships a day ahead of the events it covers.** `build()` computes an `event_day = day + 1`
 for `kind == "digest"` and threads it through `day_bounds`, `render_cover` and `build_caption`, while
@@ -146,6 +184,18 @@ categories, so one strong category lifts the event. Two subtleties: an unmapped 
 default *"so a new source never silently scores zero"*, and `"Community"` is also the fallback
 category, so weighting it 0.25 deliberately down-weights **unclassified** events too.
 
+`_categories()` prefers `events.content_tags` (the six Instagram-only pillars — see
+[Content pillars](#content-pillars-corecontent_tagspy)) over `categories`, falling back
+to `categories` for any row a pillar hasn't reached yet, so behaviour for un-pillared rows is unchanged.
+The venue/category diversity caps run against pillars once present, since six clean buckets are a far
+better diversity axis than the ~95 free-text `categories` values.
+
+`ScoreProfile` also carries `chain_venue_penalty` (default `0.0`, so every profile is a behavioural
+no-op until deliberately raised). `score_event` applies it only when `venues.chain_scope == "national"`
+**and** the pillar is Food & Drink or Fitness & Activities — narrow on purpose, since an unqualified
+localness filter would also dock a Ticketmaster arena show, which is exactly the kind of thing worth
+posting regardless of who owns the building.
+
 There is an image-quality term in the formula, but `_build_one` never passes `image_sizes`, so **it
 contributes nothing in production**. Photo quality affects a slide's *availability*, not its rank.
 
@@ -160,8 +210,12 @@ contributes nothing in production**. Photo quality affects a slide's *availabili
 **Identity keys.** `venue_key` deliberately keys on the venue **name**, not `venue_id`, with a war
 story attached: the Abraham Chavez Theatre holds three ids because sources punctuate its address
 differently, *"so keying on the id put the same concert on the carousel three times and defeated the
-per-venue diversity cap at the same time."* The comment also names the real fix it is deferring — an
-address normaliser.
+per-venue diversity cap at the same time."* The address normaliser the old comment deferred now
+exists — `core/address.py::venue_identity` — and `storage._address_hash` delegates to it on the write
+side, so new venue rows converge on one id instead of drifting. `venue_key` here keeps its
+name-first read-side behaviour regardless, because a promoter brand like "El Paso Live" legitimately
+covers more than one building and name-keying is the only thing that catches that case. See
+[scraper-engine.md](scraper-engine.md#venue-identity-coreaddresspy) for the normaliser itself.
 
 `dedupe_key` strips date and occurrence tails from the title before hashing, because recurring events
 are stored as **one row per date with a fresh uuid**, so event ids cannot answer "did we post this last
@@ -212,6 +266,141 @@ gets this wrong in both directions: it rejects Visit El Paso's 930×560 derivati
 role and falls back to Pillow's bitmap font, so slides publish off-brand. A **variable** font is worse:
 it silently renders Regular with no error at all.
 
+**Date footer.** All three builders draw a small, quiet date line at the **bottom** of the slide, below
+the content block (`_date_footer_text` / `_draw_date_footer`), never beside the time. The cover already
+establishes the day for a `weekend`/`monthly` post, so the date here is a confirmation, not a headline —
+the clock time stays the prominent temporal fact. It also makes a run of same-titled recurring slides
+(24 "El Paso Rhinos" home games, say) visibly distinct from one another. Deliberately plain text: no perforated edge, ticket stub, or other physical affordance a static JPEG
+can't back up — same standing rule that keeps the torn-paper/tape idiom nearby purely decorative. See
+[invariants §5](../architecture/invariants.md#5-rendering).
+
+**On-slide blurb.** When `events.blurb` is set, `_blurb_text` / `_draw_blurb` render it as a standfirst
+line under the title, on the flyer itself — not just in the caption. Height-budgeted the same way the
+title is, so a long blurb degrades gracefully rather than overflowing. See
+[Editorial council](#editorial-council-localnesspy-editorpy-clarifypy-criticpy) for how a blurb gets
+written in the first place.
+
+---
+
+## Content pillars (`core/content_tags.py`)
+
+Six Instagram-only editorial labels — **Arts & Culture, Live Music, Sports, Fitness & Activities,
+Family, Food & Drink** — used for slide chips, hashtags/emoji, score weighting and the per-post
+diversity cap. `content_tags` is **not** a replacement for the website's `categories` taxonomy: the
+filter rail, the event-card, the submission form, and the knowledge-base export all keep reading
+`categories` exactly as before. `content_tags`/`content_tags_source` (`rule`/`council`/`manual`) are
+additive columns on `events` (migration `0012_editorial`, see
+[migrations.md](../data/migrations.md)) that sit alongside it.
+
+Why a separate column rather than cleaning `categories` in place: `categories` is union-only on
+write — it can only grow, never shrink, so a bad tag from a scrape artifact never self-heals. Pillars
+are written fresh and can be corrected.
+
+`pillars_for(title, categories, venue)` is a cheap, deterministic **baseline**, run in the orchestrator
+alongside `_localize_times` so every row gets a first pass with no model call. It returns `[]` — no
+catch-all bucket — for anything genuinely ambiguous, rather than guessing. Two cases worth knowing
+because they were wrong once in production and are now regression-tested
+(`tests/core/test_content_tags.py`):
+
+- **Sports is spectator-only.** A bare team name like `"utep"` is not enough — "Voice Area Alumni
+  Ensemble" mentioning UTEP is not a sports event. The `_SPECTATOR` regex requires a versus-marker
+  (`vs`/`v.` followed by more text) or a named spectator activity (`lucha libre`, `boxeo`, `rodeo`, …).
+  A Roman-numeral title like "Devious Maids Season V" does not match, since nothing follows the `v`.
+- **Fitness requires a qualified phrase.** Bare `"barre"` tagged a UTEP dance production (a
+  ballet-barre pun) as Fitness; it now needs `"barre class"`, `"pure barre"`, `"barre fitness"` or
+  `"barre workout"`.
+
+Anything the rule stage leaves at `[]` — "Baby Yoga and Sound Bath" at a children's museum, say, which
+is Family, not Fitness, and no keyword table can tell the difference — is exactly what the **curator**
+role (below) exists to judge. `backfill_content_tags.py` runs the baseline over existing rows;
+`_merge_into`/`_apply_merge` **replace** `content_tags` on write (the opposite of `categories`'
+union-only rule) but never overwrite a `council`/`manual` value with a `rule` one.
+
+---
+
+## Editorial council (`localness.py`, `editor.py`, `clarify.py`, `critic.py`)
+
+Five model-backed roles that add judgment the deterministic scoring in `selection.py` can't — "decide
+better what goes where" was the explicit ask. All five share one contract, enforced by
+`core/llm.py::complete_json` and a bounded Python referee around each role: **never block a post.**
+Any failure — model down, malformed JSON, missing key, budget exhausted — leaves the pipeline's
+behaviour identical to `COUNCIL_ENABLED=false`. This is pinned by tests, not just documented.
+
+| Role | Module | When it runs | Judges | Cache |
+|---|---|---|---|---|
+| Localness auditor | `localness.py` | Before `selection.choose` | Is this venue local, regional, or a national chain? | `venues.chain_scope`/`is_local`, forever |
+| Curator | `clarify.py::assign_pillars` | After the photo loop, per surviving candidate | Which content pillar, when the rule baseline returned `[]` | `events.content_tags` |
+| Clarifier | `clarify.py::generate_blurb` | After the photo loop, per surviving candidate | Does the title need a plain-language line, and if so what | `events.blurb` |
+| Editor | `editor.py` | After `selection.choose`, before the photo loop | Reorder/exclude/nudge the ranked pool | None — per-build |
+| Critic | `critic.py` | After the caption is built | Anything off about the final set + caption text | None — per-build |
+
+**Localness auditor.** A deterministic `_KNOWN_CHAINS` pre-pass (Flix Brewhouse, Topgolf, Dave &
+Buster's, Cinemark, …) resolves the obvious chains with **zero API calls**; the folded-name match
+(`_smash`) strips whitespace after folding because `fold()` turns an apostrophe into a space, not
+nothing — `"Lowe's"` → `"lowe s"` — and a naive compare would miss it. Anything left goes to the model
+in a batch, cached on the venue row forever, so cost does not scale with rebuilds.
+
+**Curator / clarifier.** Both cache-first, both idempotent, both **skip a real deterministic gate**
+before ever calling a model: the clarifier only runs for a title that fails
+`clarify.needs_clarifier()` (already matches a versus-marker, a known team, `"(Touring)"`, or reads as
+plain-language on its own). The prompt asks *what the description adds beyond the title*, not *whether
+the title is clear* — the original self-explanatory framing caused real under-writing (it skipped a
+useful blurb for the El Paso Margarita Festival, whose description names a tasting contest, a DJ and a
+beer garden, because "you can guess it's about margaritas"). Reframing doubled useful-blurb yield in
+direct measurement against the same events (0/3 → 4/4). Blurbs are truncated at a clause boundary
+(comma/semicolon), not mid-word, and never invented from an empty `description` — the anti-invention
+guard skips the call entirely rather than let the model fill a gap with a guess.
+
+**Editor and critic — the referee's bounds** (pure Python, no network, applied after every call):
+
+1. Excludes capped at `max(2, len(ranked) // 4)`, applied in rank order.
+2. Never reduce the pool below `IG_MAX_SLIDES + 2`.
+3. **More than half excluded → the entire response is discarded**, logged as an error.
+4. `score_delta` clamped to ±2.0 — enough to reshuffle neighbours, not enough to invert the ranking.
+5. A pillar outside the six, or a blurb over its character cap, is rejected rather than stored.
+6. A verdict for an id not in the current pool is dropped silently.
+7. A hard per-build call budget, `COUNCIL_MAX_CALLS`.
+
+The critic's `"block"`-severity notes never hold the post and get no button of their own (ADR-0003),
+but the critic *does* repair what it can before the human sees the carousel. A block tied to one
+event may carry `fix: "drop"` (with `duplicate_of` for a same-happening pair) or `fix: "clear_blurb"`.
+`critic.plan_fixes()` enforces the bounds in Python: only blocks on a specific slide are acted on; a
+duplicate pair drops the **lower-scored** listing whichever slide the model named, and only once even
+when reported on both slides; at most `_MAX_DROPS` (2) events per build. `_apply_critic_fixes` in
+`__main__.py` backfills each dropped slot from the editor's pool by score, re-renders, and runs the
+critic a second time, report-only — fixes are never chained. Telegram shows what was repaired as
+`🛠 Fixed:` lines, and only the second pass's issues as ⛔/⚠️. A cleared blurb is cleared on that
+build's copy of the row only.
+
+The diversity caps (`max_per_venue`, `max_per_category`) are a preference, not a reason to ship a
+short post: `choose(fill_to=IG_MAX_SLIDES + 2)` adds cap-skipped events back, in score order, until
+the pool can fill a full post plus the editor's two-deep bench (duplicates still refused). Without it,
+2026-09-23 had ten distinct events and posted seven — three museum exhibitions tripped the
+Arts & Culture cap.
+
+Same-venue duplicates under different titles are also collapsed deterministically in
+`selection.choose` (`_duplicates_a_pick`): venue matched by **name**, then storage's
+venue-confirmed `is_same_stored_event` test. This catches the pair storage's venue_id-keyed merge
+misses when two sources' addresses fork two venue rows (2026-09-23: Disney On Ice at the Coliseum,
+"4100 East Paisano Street" vs "4100 E Paisano Dr").
+
+**Config** (`core/config.py`; full reference in
+[configuration.md](../operations/configuration.md#editorial-council)): `OPENROUTER_API_KEY`,
+`COUNCIL_ENABLED` (default off), `COUNCIL_MODEL` (default `anthropic/claude-haiku-4.5`, chosen after an
+empirical bake-off against pricier models), `COUNCIL_MAX_CALLS`, `COUNCIL_TIMEOUT_SECONDS`. Calls go
+through OpenRouter rather than a vendor SDK directly, via `core/llm.py::complete_json`.
+
+**Cost**, measured empirically from live `usage` fields on real production events (not estimated) —
+well under $0.01 per post and well under $0.35/month at current volume on `claude-haiku-4.5`. Cache-first
+roles (localness, curator, clarifier) are one-time-ish per venue/event; only editor and critic run on
+every single build.
+
+**Surfacing.** `ig_posts.council_verdicts` (jsonb) is written once by the build process, so the
+lost-update problem [ADR-0009](../architecture/adr/0009-edit-intents-as-rows.md) exists for doesn't
+apply here. `notify.py` appends a short council block to the Telegram message when any role produced
+output — no new buttons, since the existing drop/caption/swap actions already cover what a human can do
+about it.
+
 ---
 
 ## Human-in-the-loop approval
@@ -250,6 +439,9 @@ quiet'."*
 | Cancel | Reject; accepted while `draft` **or** `approved` |
 | Full preview | The HMAC review page, when a token was minted |
 
+When `council_verdicts` is non-empty, a short addendum block (`_council_block`) is appended after the
+buttons — editor/critic notes, in plain language, with no button of its own.
+
 `parse_mode` is deliberately omitted — event titles routinely contain `_ * [ ]`, any of which breaks
 Telegram's Markdown parser and drops the message entirely.
 
@@ -261,6 +453,25 @@ post that ships unless you stop it, announced by a button saying "Approve", trai
 Recorded as intents in `ig_post_edits` and applied by `apply-edits` —
 [ADR-0009](../architecture/adr/0009-edit-intents-as-rows.md) covers the reasoning and the full list of
 rebuild rules.
+
+**A `drop_event` backfills the slot it opened**, the same way the critic's own drops do at build time
+(`_backfill_for_edit`, the edit-time counterpart to `_apply_critic_fixes`). Since an edit runs long
+after the original build, there is no `ranked` pool sitting in memory to draw on — it re-derives an
+equivalent one from the post's own stored `window_start`/`window_end`/`kind`, scores it exactly as a
+fresh build would, and relaxes the diversity caps entirely (`fill_to=len(rows)`, since they already did
+their job in the original build) so it can pull in anything the day supports, not just enough to clear
+`IG_MIN_SLIDES`. Two things it will never do:
+
+- **Hand the human their own drop back.** The dropped id is still a real, approved event sitting in
+  that same window query, so it is excluded by id explicitly — without that, a bench with nothing
+  better available would just re-add it.
+- **Re-admit a duplicate of something still on the post**, via the same `selection._duplicates_a_pick`
+  check `choose()` itself uses — a guard against an older draft (built before that dedup existed)
+  already carrying a stale duplicate.
+
+Best-effort only: an older post's row (or a caller) missing `window_start`/`window_end` gets no
+backfill rather than an error — a shorter post, not a crash. `swap_photo` alone never triggers this
+(it doesn't change the slide count), and it activates only when a drop actually removed an id.
 
 ### The auto-approve sweep
 
@@ -382,7 +593,13 @@ retry against.
    [glossary](../glossary.md#ig_autopost-vs-ig_auto_approve).
 7. **Postponing must move both timestamps** — the sharpest edge in the opt-out design.
 8. **Never regenerate the caption or slides at publish time.**
+9. **The council never blocks.** If a build looks stuck or a post looks off, the cause is somewhere
+   else — check `COUNCIL_ENABLED`/`OPENROUTER_API_KEY` and the referee bounds in
+   [Editorial council](#editorial-council-localnesspy-editorpy-clarifypy-criticpy) before suspecting it.
+10. **Editor/critic verdicts are not reproducible build-to-build.** They're model judgment, not a pure
+    function of the input — determinism is enforced only at the referee's bounds, not the content. Two
+    builds of the same pool can legitimately disagree on which events the editor excludes.
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-10.*
+*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-22.*

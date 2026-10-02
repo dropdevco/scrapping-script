@@ -88,6 +88,7 @@ and serves nothing from cache. The social pipeline, by contrast, exits 1 on ever
 | `EVENT_TIMEZONE` | → `IG_TIMEZONE` → `America/Denver` | V (kb step only) | The timestamp invariant's zone. **Absent from `.env.example`** |
 | `GEOCODE_VENUES` | `true` | — | **Absent from `.env.example`** |
 | `GEOCODE_MAX_PER_RUN` | 25 | — | Nominatim is ~1 req/s. Leftovers are picked up next run |
+| `DEDUPE_CROSS_VENUE` | `true` | — | Kill switch for the cross-venue duplicate-merge lane in `storage.py`/`dedupe.py`. Off reverts to venue-id-exact matching only |
 
 > **Two wiring gaps here.** `ENABLED_SOURCES` / `DISABLED_SOURCES` are not plumbed into CI, so **there
 > is no way to disable a misbehaving source in CI without a commit.** And `EVENT_TIMEZONE` is passed to
@@ -143,6 +144,32 @@ Provider: a Meta Developer app plus a linked Business/Creator Instagram account.
 
 ---
 
+## Editorial council
+
+Provider: [OpenRouter](https://openrouter.ai) — not the Anthropic SDK directly, so a single key and
+client cover whichever model is configured. Full role-by-role description in
+[social-pipeline.md](../components/social-pipeline.md#editorial-council-localnesspy-editorpy-clarifypy-criticpy).
+
+| Var | Default | CI | Notes |
+|---|---|---|---|
+| `OPENROUTER_API_KEY` | none | S | Unset ⇒ `settings.council_available` is `False` and the council is a total no-op, same as `COUNCIL_ENABLED=false` |
+| `COUNCIL_ENABLED` | `false` | V | Master switch. Ships inert; flip on only once the rest of the pipeline is stable |
+| `COUNCIL_MODEL` | `anthropic/claude-haiku-4.5` | V | Chosen after an empirical bake-off against pricier models — see cost note below |
+| `COUNCIL_MAX_CALLS` | 4 | V | Hard per-build call budget for the per-build roles (editor, critic); the referee's last line of defense |
+| `COUNCIL_TIMEOUT_SECONDS` | — | — | Per-call timeout; **not currently wired into `ig_daily.yml`**, so it only takes effect if set locally or added to the workflow. A timeout is treated the same as any other model failure — `applied=False`, pipeline continues unaffected |
+
+**Cost**, measured directly from live `usage` fields on real production builds (not estimated): well
+under $0.01 per Instagram post, and well under $0.35/month at current volume. Cache-first roles
+(localness, curator, clarifier) are effectively one-time per venue/event; only the editor and critic run
+on every single build, which is why `COUNCIL_MAX_CALLS` bounds those two specifically.
+
+`settings.council_enabled` and `settings.council_available` are two different checks — the latter also
+requires `openrouter_api_key` to be set — and `_build_one` only calls into the council modules when
+`council_available` is true, so a missing key behaves identically to the switch being off rather than
+raising at call time.
+
+---
+
 ## Instagram carousel behaviour
 
 All repo **variables**.
@@ -152,7 +179,7 @@ All repo **variables**.
 | `IG_TIMEZONE` | `America/Denver` | "Today" must be the local calendar day, not the runner's UTC one |
 | `IG_HANDLE` | `epchisme.com` | Cover footer and caption link. Display-only |
 | `IG_SLIDES_BUCKET` | `ig-slides` | The private Supabase bucket |
-| `IG_MIN_SLIDES` | 4 | A hard **floor**, not a target — below it the build writes a `skipped` row and posts nothing |
+| `IG_MIN_SLIDES` | 4 | A hard **floor**, not a target — below it the build writes a `skipped` row and posts nothing. Does **not** apply to `kind=hype`, which is cover + exactly one event slide by design |
 | `IG_MAX_SLIDES` | 9 | Plus the cover = Instagram's 10-item cap |
 | `IG_SLIDE_RETENTION_DAYS` | 7 | `prune` cutoff |
 | `IG_SUGGESTED_PUBLISH_HOUR` | 17 | Local hour proposed for `scheduled_for` |
@@ -272,4 +299,4 @@ When fixing env vars under pressure (`docs/social-automation-onboarding.md:62-87
 
 ---
 
-*Verified against commit `9157646` (2026-09-06). Last updated 2026-09-10.*
+*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-22.*

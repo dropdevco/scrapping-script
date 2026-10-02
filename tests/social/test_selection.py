@@ -223,3 +223,65 @@ def test_parse_start_converts_to_local_zone():
     local = selection.parse_start(row, TZ)
     assert local is not None
     assert (local.year, local.month, local.day, local.hour) == (2026, 8, 5, 19)
+
+
+def test_choose_collapses_one_show_listed_by_two_sources_under_two_titles():
+    """The 2026-09-23 digest carried Disney On Ice twice: two sources, two
+    wordings, and two venue_ids for the same Coliseum, so neither dedupe_key
+    nor storage's venue_id-keyed merge could see the pair."""
+    rows = [
+        _event(id="tm", title="Disney On Ice presents Jump In!", venue="El Paso County Coliseum",
+               venue_id="v1", start_time="2026-09-23T19:00:00-06:00", categories=["Family"]),
+        _event(id="web", title="DISNEY ON ICE: Jump In!", venue="El Paso County Coliseum",
+               venue_id="v2", start_time="2026-09-23T19:00:00-06:00", categories=["Family"]),
+    ]
+    picked = selection.choose(rows, tz_name=TZ, max_slides=9, max_per_venue=5)
+    assert len(picked) == 1
+
+
+def test_choose_keeps_two_different_shows_at_one_venue():
+    rows = [
+        _event(id="a", title="Disney On Ice presents Jump In!", venue="El Paso County Coliseum",
+               start_time="2026-09-23T19:00:00-06:00"),
+        _event(id="b", title="El Paso Rhinos vs Amarillo", venue="El Paso County Coliseum",
+               start_time="2026-09-23T19:00:00-06:00"),
+    ]
+    picked = selection.choose(rows, tz_name=TZ, max_slides=9, max_per_venue=5)
+    assert {c.row["id"] for c in picked} == {"a", "b"}
+
+
+def _museum_day() -> list[dict]:
+    rows = [
+        _event(id=f"art{i}", title=f"Exhibition {name}", venue=f"Museum {i}",
+               categories=["Arts & Culture"], start_time=f"2026-09-23T{10 + i}:00:00-06:00")
+        for i, name in enumerate(["Blast", "Mountain of Gold", "Shared Memories", "Trancazos", "Frida"])
+    ]
+    rows.append(_event(id="gig", title="Local Band", venue="Bar", categories=["Live Music"],
+                       start_time="2026-09-23T21:00:00-06:00"))
+    return rows
+
+
+def test_the_category_cap_still_applies_without_fill_to():
+    picked = selection.choose(_museum_day(), tz_name=TZ, max_slides=9, max_per_category=3)
+    assert sum(1 for c in picked if c.row["id"].startswith("art")) == 3
+
+
+def test_fill_to_backfills_what_the_caps_skipped_so_the_post_is_full():
+    """2026-09-23: ten distinct events, a seven-slide post, because three
+    exhibitions tripped the Arts & Culture cap."""
+    picked = selection.choose(
+        _museum_day(), tz_name=TZ, max_slides=9, max_per_category=3, fill_to=9
+    )
+    assert len(picked) == 6  # every distinct event, since fewer than 9 exist
+
+
+def test_fill_to_never_readmits_a_duplicate():
+    rows = [
+        _event(id="tm", title="Disney On Ice presents Jump In!", venue="El Paso County Coliseum",
+               start_time="2026-09-23T19:00:00-06:00", categories=["Family"]),
+        _event(id="web", title="DISNEY ON ICE: Jump In!", venue="El Paso County Coliseum",
+               start_time="2026-09-23T19:00:00-06:00", categories=["Family"]),
+        _event(id="x", title="Something Else", venue="Elsewhere", categories=["Family"]),
+    ]
+    picked = selection.choose(rows, tz_name=TZ, max_slides=9, max_per_category=1, fill_to=9)
+    assert {c.row["id"] for c in picked} in ({"tm", "x"}, {"web", "x"})

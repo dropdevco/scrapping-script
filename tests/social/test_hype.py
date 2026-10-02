@@ -199,3 +199,34 @@ async def test_hype_candidates_start_after_the_post_will_have_gone_out():
     await storage.query_hype_candidates("El Paso", min_lead_hours=24)
     floor = datetime.fromisoformat(seen["gte"])
     assert floor >= before + timedelta(hours=23, minutes=59)
+
+
+def _stored(id_, title, venue="Plaza Theatre", day="2026-10-10T20:00:00-06:00", **extra):
+    return {"id": id_, "title": title, "start_time": day, "venue": venue, **extra}
+
+
+def test_twin_ids_finds_the_same_show_listed_by_a_second_source():
+    mine = _stored("a", "Los Lobos Live at the Plaza")
+    pool = [
+        mine,
+        _stored("b", "Los Lobos Live at the Plaza", day="2026-10-10T20:00:00-06:00"),   # twin
+        _stored("c", "Los Lobos Live at the Plaza", day="2026-10-11T20:00:00-06:00"),   # next night
+        _stored("d", "Los Lobos Live at the Plaza", venue="Some Other Hall"),           # other venue
+        _stored("e", "Pizza Night"),                                                    # unrelated
+    ]
+    assert hype_mod.twin_ids(mine, pool) == ["b"]
+
+
+def test_twin_ids_never_returns_the_candidate_itself():
+    mine = _stored("a", "Los Lobos Live at the Plaza")
+    assert hype_mod.twin_ids(mine, [mine]) == []
+
+
+def test_weekly_drafts_approve_an_hour_before_their_own_slot_so_they_stay_staggered():
+    from scraper.social import __main__ as social
+
+    hours = [social._approve_hour("weekly", h) for _, h in social._WEEKLY_PILLAR_SLOTS]
+    assert hours == [h - 1 for _, h in social._WEEKLY_PILLAR_SLOTS]
+    assert len(set(hours)) == len(hours), "six drafts must not share one approval instant"
+    assert social._approve_hour("digest", 11) == social.settings.ig_auto_approve_hour
+    assert social._approve_hour("hype", 11) == social.settings.ig_auto_approve_hour

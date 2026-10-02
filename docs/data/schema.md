@@ -42,7 +42,7 @@ The central table. Scraped rows land `approved`; user submissions land `pending`
 | `hype_reason` | text | yes | — | Short justification from whichever source set `is_hype` |
 | `hype_source` | text | yes | — | `rule` (the deterministic pre-pass) / `council` / `manual`. `manual` is never re-judged |
 | `hype_checked_at` | timestamptz | yes | — | When `is_hype` was last computed |
-| `hype_posted_at` | timestamptz | yes | — | Set once a `hype` post is actually built for this event — the de-dup guard so the same show is never spotlighted twice |
+| `hype_posted_at` | timestamptz | yes | — | Set once a `hype` post is built and uploaded for this event (and for stored rows that are the same real show) — the de-dup guard so the same show is never spotlighted twice |
 | `venue` | text | yes | — | Raw venue name; part of the venue natural key |
 | `location` | text | yes | — | Raw full address; part of the venue natural key, and what the region filters match on |
 | `url` | text | yes | — | Canonical source URL; **also the primary dedupe key** |

@@ -78,6 +78,12 @@ def _suggested_schedule(day: date, tz_name: str, hour: int) -> str:
     return suggested.astimezone(timezone.utc).isoformat()
 
 
+def _approve_hour(kind: str, slot_hour: int) -> int:
+    """Local hour at which silence becomes consent. Weekly drafts approve an hour before
+    their own slot so the six publish staggered; every other kind keeps the shared deadline."""
+    return max(slot_hour - 1, 0) if kind == "weekly" else settings.ig_auto_approve_hour
+
+
 def _parse_slots(raw: str, default_hour: int) -> list[tuple[Optional[str], int]]:
     """`"morning:11,evening:18"` -> `[("morning", 11), ("evening", 18)]`.
 
@@ -172,6 +178,7 @@ async def _build_one(
     pillar = slot_name if kind == "weekly" else None
     editor_report: Optional[editor_mod.EditorReport] = None
     period: Optional[str] = None
+    hype_twins: list[str] = []
 
     if kind == "hype":
         # Not a window/rank kind at all: find at most one not-yet-spotlighted
@@ -191,6 +198,9 @@ async def _build_one(
             log.info("no hype-worthy event pending%s", label)
             return 0
         candidate_row = candidates[0]
+        # Other stored rows for the same real show: marked posted along with it (below), so a
+        # second source's copy cannot be spotlighted again on the next scrape.
+        hype_twins = hype_mod.twin_ids(candidate_row, pool)
         # local_day, not a raw parse: start_time is stored UTC (per Postgres),
         # and every other kind's start_iso/end_iso already comes out of
         # _local_midnight already event-local — _period_label's date math
@@ -369,7 +379,10 @@ async def _build_one(
     # clamp: a draft built late (a re-run, a slow scrape) gets a deadline of
     # "now" and ships on the next sweep, rather than sitting until tomorrow
     # when the staleness guard would expire it unpublished.
-    auto_approve_at = _suggested_schedule(day, tz_name, settings.ig_auto_approve_hour)
+    # Weekly drafts are meant to go out staggered through the day. One shared deadline
+    # (17:00) would approve all six at once and the sweep would publish the early slots in
+    # a burst, so each approves an hour before its own slot instead.
+    auto_approve_at = _suggested_schedule(day, tz_name, _approve_hour(kind, slot_hour))
     draft = await storage.create_ig_draft(
         {
             "post_date": day.isoformat(),
@@ -396,13 +409,6 @@ async def _build_one(
         return 0
 
     post_id = str(draft["id"])
-    if kind == "hype":
-        # The de-dup guard: without this, the same event would qualify again
-        # on tomorrow's check and get spotlighted twice.
-        await storage.cache_event_editorial(
-            str(candidate_row["id"]),
-            {"hype_posted_at": datetime.now(timezone.utc).isoformat()},
-        )
     paths = [
         slides_store.object_path(day, post_id, i) for i in range(len(jpegs))
     ]
@@ -414,6 +420,28 @@ async def _build_one(
         return 1
 
     await storage.update_ig_post(post_id, {"slide_paths": paths})
+
+    if kind == "hype":
+        # The de-dup guard, written only once the draft is real (a failed upload leaves the
+        # event free to be tried again next scrape) and checked: without it the same event
+        # qualifies again tomorrow and, with auto-approve on, goes out twice. If the write
+        # cannot be made even after a retry, fail the draft rather than risk the duplicate.
+        stamp = {"hype_posted_at": datetime.now(timezone.utc).isoformat()}
+        marked = False
+        for _ in range(2):
+            marked = await storage.cache_event_editorial(str(candidate_row["id"]), stamp)
+            if marked:
+                break
+        if not marked:
+            log.error("could not record hype_posted_at for %s; failing draft %s",
+                      candidate_row.get("id"), post_id)
+            await storage.update_ig_post(
+                post_id, {"status": "failed", "error": "could not record hype_posted_at"}
+            )
+            return 1
+        for twin_id in hype_twins:
+            await storage.cache_event_editorial(twin_id, stamp)
+
     log.info("draft %s ready for review (%d slides)%s", post_id, len(paths), label)
 
     if not settings.ig_autopost:

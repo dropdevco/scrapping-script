@@ -27,9 +27,10 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..core.config import settings
-from ..core.dedupe import fold
+from ..core.dedupe import fold, is_same_stored_event
 from ..core.http import HttpClient
 from ..core.llm import LLMUnavailable, complete_json
+from . import selection
 
 log = logging.getLogger("scraper.social.hype")
 
@@ -96,6 +97,26 @@ def _venue_of(row: dict[str, Any]) -> Optional[dict[str, Any]]:
     if isinstance(venues, list):
         venues = venues[0] if venues else None
     return venues if isinstance(venues, dict) else None
+
+
+def twin_ids(candidate: dict[str, Any], pool: list[dict[str, Any]]) -> list[str]:
+    """Ids of OTHER stored rows that are the same real happening as `candidate`.
+
+    The same show reaches the table from two sources (an aggregator and the venue itself),
+    sometimes under forked venue rows, and each copy is judged hype on its own. Marking
+    only the one that got spotlighted would let its twin qualify on the next scrape and be
+    posted again. Same test selection.py uses to keep a duplicate off one carousel: venue
+    matched by name, then the stored-event title/day comparison.
+    """
+    mine = selection.venue_key(candidate) or "?"
+    out = []
+    for row in pool:
+        rid = row.get("id")
+        if not rid or rid == candidate.get("id"):
+            continue
+        if (selection.venue_key(row) or "?") == mine and is_same_stored_event(candidate, row):
+            out.append(str(rid))
+    return out
 
 
 def _unjudged(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

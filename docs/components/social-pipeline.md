@@ -139,7 +139,14 @@ branches early: `storage.query_hype_candidates()` picks the soonest approved eve
 `is_hype = true` and `hype_posted_at is null`, wraps it as a single `Candidate` via the existing
 `selection.candidates_from_rows()` rebuild helper, and reuses everything downstream (render, caption,
 critic, insert) as if it were a 1-item carousel. `IG_MIN_SLIDES` doesn't apply to it — cover + one
-event slide is the whole format by design. Whether an event even qualifies is judged by
+event slide is the whole format by design. Candidates must start at least 24 hours out (the post goes
+out later that day, so a nearer event could be announced after it is over). `hype_posted_at` is
+written only after the draft and its slides exist, is checked, and is also stamped on other stored rows
+that are the same real show (`hype.twin_ids`, the venue-name + stored-event match `selection.py`
+uses), so a second source's copy is not spotlighted tomorrow; if the write fails twice the draft is
+failed rather than risk a double post. A failed upload leaves the event free to retry; a draft a human
+cancels keeps it spent. Weekly drafts auto-approve an hour before their own slot (not at the shared
+17:00 deadline), so the six publish staggered. Whether an event even qualifies is judged by
 `social/hype.py`, the same cache-once, model-judged, never-blocks shape `social/localness.py` already
 established: a free deterministic pre-pass (no ticket link and not a major venue ⇒ definite no) gates
 which events even reach one batched model call asking whether this is a headline touring artist, a

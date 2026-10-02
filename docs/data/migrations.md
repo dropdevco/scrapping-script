@@ -45,6 +45,7 @@ Several migrations say so explicitly in a comment; copy that habit.
 | 0016 | `border_current_waits` | `border_current_waits` (PK `port_number, lane`; text columns never blank); RLS, no policies | The table the knowledge-base tab is built from; rewritten every poll |
 | 0017 | `border_current_waits_known_as` | `known_as` column | The names people call each bridge ("Centro", "Puente Libre") |
 | 0018 | `weekly_and_hype_posts` | Widens `kind` CHECK to seven values; `ig_posts.pillar`; **drops** `ig_posts_live_period_idx` for a `(kind, period_key, pillar)` superset; `events.is_hype/hype_reason/hype_source/hype_checked_at/hype_posted_at` | Two new post kinds — six pillar-specific weekly posts and a standalone spotlight for a single hype-worthy event. **Written to formalize schema already applied by hand against the live database** before this file existed (`kind` CHECK, `pillar`, and the new index were all live with zero migration backing it) — caught during this rollout rather than left silent |
+| 0019 | `border_poll_dispatch` | `pg_cron`, `pg_net`; `dispatch_border_poll(job)`; three cron jobs (poll every 10 min, daily 10:20 UTC, housekeeping). **Inert until a GitHub token is in Vault** | GitHub's own cron proved unreliable (~1 run per 3 hours), so Postgres keeps the clock and dispatches `border-poll` through the GitHub API. (0018 is the weekly/hype migration) |
 
 ---
 

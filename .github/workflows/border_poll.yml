@@ -10,6 +10,10 @@ name: border-poll
 # poller exits 3, and this workflow goes red — deliberately, rather than running green
 # while recording nothing (ADR-0011).
 on:
+  # These crons are the BACKUP clock. GitHub's schedule is best-effort and fired roughly
+  # every 3 hours in practice (4 runs in the first 17 hours, and never the daily one), so
+  # the on-time clock is pg_cron in Supabase, which calls this workflow's workflow_dispatch
+  # every 10 minutes (migration 0019). Both feed the same concurrency group below.
   schedule:
     # Every 10 minutes, as agreed with Carlos (2026-09-29). CBP republishes about once
     # an hour, but pasosfronterizos refreshes every few minutes and

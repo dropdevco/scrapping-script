@@ -150,6 +150,11 @@ UTC daily it also prunes and runs a live check that CBP still parses (`selfcheck
 Own concurrency group (`border-poll`, no cancel), so it never queues behind the scrape. A failed write
 exits 3 and turns the run red rather than passing silently.
 
+**The on-time clock is Supabase, not GitHub.** The `schedule:` crons here fired about once
+every 3 hours, so migration 0019 has `pg_cron` dispatch this workflow through `workflow_dispatch`
+every 10 minutes; the YAML crons remain as a backup. Setup and checks are in
+[border-wait-times.md](../components/border-wait-times.md#the-clock-pg_cron-with-githubs-cron-as-backup).
+
 The final step, `python -m scraper.border sheet`, publishes the crossing times to their own tab of the
 knowledge-base sheet. It is **off until the repo variable `BORDER_KB_TAB` is set**, and
 `continue-on-error` — a Sheets outage must not fail a reading that already landed. Rollback: Actions →

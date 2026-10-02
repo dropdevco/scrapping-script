@@ -15,7 +15,7 @@ from scraper.core.config import settings
 from scraper.social import __main__ as social
 from scraper.social import selection
 
-TODAY = date.today()
+TODAY = social._today("America/Denver")  # the code's clock, not the runner's: UTC on CI is a day ahead each evening
 POST = "11111111-1111-1111-1111-111111111111"
 
 

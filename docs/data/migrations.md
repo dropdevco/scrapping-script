@@ -1,6 +1,6 @@
 # Migrations
 
-Eighteen migrations, `0001_init` through `0018_weekly_and_hype_posts`, applied by hand. There is no
+Nineteen migrations, `0001_init` through `0019_border_poll_dispatch`, applied by hand. **0019 is committed but NOT applied to production as of 2026-10-11** (needs a GitHub token in Vault — see known-gaps P0). There is no
 migration framework, no tracking table, and no automation — **which is exactly why the discipline
 below matters, and exactly how 0018 ended up needing to catch up real, already-applied drift** (see
 its own entry below and [known-gaps.md](../known-gaps.md)).
@@ -14,7 +14,7 @@ Stated in `0002_venues.sql:1-2` and restated in 0003 through 0006:
 > No drops, no deletes, no alterations of existing columns. Safe to run against a live database with
 > data.
 
-In eighteen migrations there are exactly **two** drops, and both are of an *index*, each replaced in the
+In nineteen migrations there are exactly **two** drops, and both are of an *index*, each replaced in the
 same file by a superset — behaviour-preserving by construction because every existing row collapsed to
 the old key (0006), or because the old index's own predicate is a strict subset of the new one's (0018).
 

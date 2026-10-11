@@ -15,6 +15,7 @@ the doc is a bug (see [Keeping these docs true](#keeping-these-docs-true)).
 
 | If you are… | Read, in order |
 |---|---|
+| **Taking over the project** | [`HANDOFF.md`](../HANDOFF.md) (repo root), then the row below |
 | **New to the team** | [Onboarding](onboarding.md) → [Architecture overview](architecture/overview.md) → [Invariants](architecture/invariants.md) → the component doc for your first task |
 | **Picking up a first task** | [Known gaps](known-gaps.md) — a triaged backlog with file references |
 | **Debugging production** | [Runbooks](operations/runbooks.md) |
@@ -94,7 +95,7 @@ historical record, not as references.
 | File | Status |
 |---|---|
 | `PROJECT_HANDOFF.md` | **Historical.** Its change log (through 2026-08-06) is a genuine record and worth reading for context. Its factual sections are stale — wrong migration count, wrong map library, wrong theme, wrong workflow shape. |
-| `HANDOFF.md` | **Historical.** Written 2026-08-21; wrong about migration count, test scope, the map library, and whether Instagram posting is live. |
+| `HANDOFF.md` | **Current** (rewritten 2026-10-11): the one-page entry point — live status, open P0 items, access checklist, timeline. Links here for depth. |
 | `web/SETUP.md` | **Partially stale.** Its environment-setup steps are still useful; its "Design System", "Key Features", and "Next Steps" sections describe a version of the app that no longer exists. |
 | `README.md` (repo root) | Accurate on the scraper; its Chisme section is thin. Treat this directory as the expansion. |
 
@@ -132,4 +133,4 @@ stays a reliable way to orient. It is AST-only and costs nothing.
 
 ---
 
-*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-20.*
+*Verified against commit `f5aa3b8` (2026-10-01). Last updated 2026-10-11.*

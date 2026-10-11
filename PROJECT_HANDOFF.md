@@ -16,6 +16,8 @@ Last updated: 2026-08-06
 > unusually detailed, plus `docs/`. The Change Log below remains worth reading for context on how the
 > project got here, and `docs/architecture/adr/` distils its decisions.
 >
+> **For the current handoff see [`HANDOFF.md`](HANDOFF.md) (2026-10-11).**
+>
 > **2026-09-20 update, for anyone landing here first:** four workstreams from a meeting-notes review
 > shipped this session — full detail in `docs/`, not here.
 > - **Dedupe hardening.** A real address normalizer (`src/scraper/core/address.py`) now backs

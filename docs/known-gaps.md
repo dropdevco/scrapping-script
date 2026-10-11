@@ -3,7 +3,7 @@
 A triaged backlog of everything known to be broken, missing, unfinished, or unverified — with file
 references so any item can be picked up cold.
 
-This list was produced by a full audit of the codebase at commit `9157646`. Items marked **deliberate**
+This list was produced by a full audit of the codebase at commit `9157646`, then updated through `f5aa3b8` (2026-10-11). Items marked **deliberate**
 are design decisions, not defects; they are here so nobody "fixes" them by accident.
 
 **Keep this file current.** When you fix something, delete the entry in the same commit. When you find
@@ -11,19 +11,63 @@ something, add it.
 
 ---
 
+## P0 — act on these first (verified live 2026-10-11)
+
+### Border wait times are NOT refreshing every 10 minutes — migration 0019 was never applied
+
+GitHub Actions cron is best-effort: after the border feed merged, `border-poll` fired roughly once
+every 3–6 hours (6 `border_runs` in the last 24 h, against 144 expected). PR #12 moved the clock into
+Postgres (`pg_cron` + `pg_net` dispatching `workflow_dispatch`), **but it is inert until manual steps
+are done, and none have been**: on 2026-10-11 the live `data-scrapping` database has neither the
+`pg_cron` nor `pg_net` extension. The agreed freshness (10 min, agreed 2026-09-29) is not met.
+
+1. Create a GitHub fine-grained token for this repo, **Actions: read and write**; calendar its expiry
+   (dispatch stops silently when it lapses).
+2. Run `supabase/migrations/0019_border_poll_dispatch.sql` in the Supabase SQL Editor (it was
+   dry-run-validated in a rolled-back transaction on production).
+3. `select vault.create_secret('<token>', 'github_dispatch_token', 'border-poll dispatch');`
+4. Verify `net._http_response` shows `204`s and `border_current_waits.checked_at` advances every ~10 min.
+
+Full steps and check queries: [border-wait-times.md](components/border-wait-times.md).
+
+### Two data bugs in the border feed (found auditing PR #8, still unfixed)
+
+- **Tornillo is mapped to the wrong CBP port.** `src/scraper/border/cbp.py:57` (and
+  `sources/borderswaittime.py:26`, `text.py:32`) use port `240221`, a generic "El Paso" entry CBP leaves
+  permanently "Update Pending". The real crossing is **`240401`** ("Marcelino Serna / Tornillo"), which
+  reports real lane numbers. Effect: Tornillo always reads "no data" and the chatbot says so. Live check
+  2026-10-11: zero rows for `240401`.
+- **Lanes CBP flips to `N/A` stop updating.** `_lane()` in `cbp.py` returns `None` for `N/A`, so the lane
+  drops out of the snapshot and its row is never rewritten. A lane that was "open, 25 min" and then goes
+  `N/A` would keep showing 25 min with an old `checked_at`. 4 rows were >1 day stale on 2026-10-11.
+  Contradicts the module's "no lane silently drops out" promise.
+
+### Instagram token expires about early December 2026
+
+`IG_ACCESS_TOKEN` was re-minted on 2026-10-07 after the 60-day token lapsed (the daily run failed with
+HTTP 400 on `GET /me`; fix = Generate token in the Meta app, then update `.env` and the GitHub secret —
+Vercel does not read it). **Run `python -m scraper.social refresh-token` and update both places by late
+November**, inside the 60-day window; an expired token cannot be refreshed. The token was pasted into a
+chat transcript — regenerate it if that matters. The `ig_exchange_token` "Session key invalid" problem
+is unchanged (see below).
+
+### Telegram "Postpone" makes a post expire instead of posting later
+
+Since the digest moved to day-ahead posting (2026-09-16), Postpone moves the post to 5 pm tomorrow but
+keeps today's date, so the stale check expires it. Raised 2026-09-17; no fix is committed.
+
 ## P1 — reliability and correctness
 
-### Nothing in CI runs tests, lint, or the web build
+### CI gates tests only — not web lint/build, repo-wide ruff, or branch protection
 
-443 tests exist and none execute in CI. Neither does `ruff check`, `npm run lint`, or `npm run build`.
-A commit that breaks an import reaches the 11:00 UTC scrape directly.
+`ci.yml` (added 2026-10-01, PR #10) runs the ~819 pytest tests and `ruff check` on `src/scraper/border`
+and `tests/border` only. Still ungated: `npm run lint` / `npm run build` for `web/`, repo-wide
+`ruff check` (363 findings at the time), and — most importantly — **`ci` is not a required status
+check**, so it advises rather than blocks. Whether branch protection is on is unverified.
 
-Most pointedly: `tests/social/test_scheduling.py` parses `ig_daily.yml` to catch a scheduling regression
-that would otherwise be invisible for half a year — and it never runs.
-
-- **Fix:** a PR-validation workflow running `pytest`, `ruff check .`, and `cd web && npm run lint &&
-  npm run build`.
-- **Refs:** [ci-cd-and-deployment.md](operations/ci-cd-and-deployment.md), `.github/workflows/`.
+- **Fix:** make `ci` required (Settings → Branches); add a web lint+build job; burn down the ruff
+  backlog and widen the scope.
+- **Refs:** [ci-cd-and-deployment.md](operations/ci-cd-and-deployment.md#ci--the-test-gate).
 
 ### The social pipeline and the KB export are El Paso-only
 
@@ -206,6 +250,8 @@ These are recorded decisions. Do not "fix" them without reading the reasoning.
 | **A hype post's cover/caption copy is static, not event-specific** | **Deliberate, v1.** `("DON'T MISS THIS", "EL PASO")` and a fixed opener list, the same shape every other kind's cover/caption already uses. Printing the actual artist/event name on the cover itself is a natural fast-follow — it would need `render_cover`'s signature to accept event-specific text, which no other kind needs today |
 | **Hype judgments are not build-to-build reproducible** | **Deliberate**, same posture as the editor/critic council roles: `hype_from_rules` only ever returns `False` or defers to the model — "major enough to deserve its own post" is a judgment call, not a rule, so two judging passes over a borderline event could disagree. Determinism lives only in the deterministic pre-pass (no tickets + not a major venue ⇒ definite no), never in the model's yes |
 | **Editorial council verdicts are not build-to-build reproducible** | **Deliberate.** Editor/critic are model judgment, not a pure function of input — `temperature` is unavailable on current models, so determinism is enforced only at the referee's bounds (exclude caps, floors, discard-on-mass-exclusion, clamped score deltas), never at the content. Two builds of the same pool can legitimately disagree on which events the editor excludes |
+| **Weekly + hype first runs not yet observed** | Merged 2026-10-01 (PR #11). The first Sunday build (13:07 UTC) should produce six pillar drafts that approve at 9/11/12/14/15/17 local and publish at 10/12/13/15/16/18; hype runs after each scrape and should yield few drafts. Confirm in Telegram and `ig_posts`. Cancelled hype drafts keep their event spent (deliberate). Review items left open: manual hype override not protected from re-judging; skipped weekly rows write the pillar into `slot`; one event can land in two same-day weekly posts; `--dry-run` still spends model calls; hype step has no `continue-on-error`; 0018's header says "additive only" but drops an index |
+| **`BORDER_KB_TAB` is unset** | Deliberate: the crossing-times tab is not published to the GoHighLevel sheet until someone is ready. Must differ from `KB_SHEET_TAB` (the code refuses equal names) |
 | **A "Deals" content pillar** | Explicitly low-priority, deferred as a content-strategy decision (promote chain venues to build reach, then de-emphasize and monetize local) rather than a code change. `venues.chain_scope` is the data groundwork it would need; the "drop chains once reach grows" lever, `ScoreProfile.chain_venue_penalty`, is already tunable without a deploy |
 | **Junk values in `events.categories`** (`accessible_forward`, `paid`, a stray `Friendly`) | Deferred — website-facing cleanup, out of scope for the pillar/council work. `categories` is union-only on write (never shrinks), so these persist until a dedicated backfill targets them directly |
 
@@ -231,7 +277,7 @@ None of these are inspectable from the repository. Each is worth five minutes fr
 |---|---|
 | Is `NEXT_PUBLIC_SITE_URL` set in Vercel Production? | `curl https://www.epchisme.com/robots.txt` and look at the `Sitemap:` host |
 | Which Actions secrets and variables are populated, and to what? | Repo settings. Note `SITE_BASE_URL`, `SCHEDULE_DAYS`, `SCHEDULE_LOCATIONS` and `SCHEDULE_LOCATION` in particular |
-| Is `IG_AUTO_APPROVE` / `IG_AUTOPOST` on? | Repo variables. Both default `false`; the docs are written as though opt-out is the intended steady state |
+| Is `IG_AUTO_APPROVE` / `IG_AUTOPOST` on? | `IG_AUTO_APPROVE=true` (hour 17, Denver) is set as a repo variable as of 2026-10-11; `IG_AUTOPOST` is not set |
 | Is the Instagram pipeline currently posting daily? | The account, and the `ig_posts` table |
 | Which migrations have been applied to the live project? | Compare the live schema against `supabase/migrations/`. There is no tracking table |
 | Are PRs / branch protection / code review used in practice? | GitHub settings. No PR template, CODEOWNERS or protection is visible from the repo |
@@ -253,4 +299,4 @@ Small, well-bounded, and each improves something real:
 
 ---
 
-*Verified against commit `7629204` (2026-09-20). Last updated 2026-09-22.*
+*Verified against commit `f5aa3b8` (2026-10-01); live state checked 2026-10-11. Last updated 2026-10-11.*

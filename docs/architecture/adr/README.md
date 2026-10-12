@@ -24,6 +24,7 @@ disagree, the commit body is the primary source.
 | [0010](0010-sheet-export-over-crawler.md) | A Google Sheet export replaces crawling our own site | Accepted |
 | [0011](0011-make-swallowed-failures-loud.md) | Swallowed failures are made loud, everywhere | Accepted |
 | [0012](0012-python-rendering-not-satori.md) | Slides render in Python/Pillow, not `next/og` | Accepted |
+| [0013](0013-weighted-fusion-of-wait-signals.md) | Border wait times are a weighted fusion of signals, not the freshest reading | Proposed |
 
 ## Writing a new one
 

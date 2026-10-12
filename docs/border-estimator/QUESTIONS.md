@@ -1,178 +1,79 @@
-# Open Questions
+# Questions and Decisions
 
-Decisions the plan cannot make for you. Each says **why it matters** and **what it blocks**. Where there
-is a recommendation, it is labelled as one; it is not a decision until you answer.
+Every original question (Q-1 to Q-16) was **answered by the product owner on 2026-10-12**. The answers
+are recorded verbatim in spirit below, with what each one changes. New questions that came out of the
+answers are at the bottom (Q-17 onward) and are **open**.
 
-When a question is answered, record the answer inline (`**Answer (date):** …`) and update
-[SPEC.md](SPEC.md) / [ROADMAP.md](ROADMAP.md) in the same commit.
-
----
-
-## A. Decisions that contradict what already exists
-
-### Q-1. Weighted fusion vs. "newest reading wins"
-
-`src/scraper/border/consensus.py:9-11` deliberately picks the **freshest** independent reading and
-never averages. Your plan weights all signals together. Both cannot be true.
-
-- Option 1: **Supersede the rule.** Fusion becomes the shown number. See
-  [ADR-0013](../architecture/adr/0013-weighted-fusion-of-wait-signals.md) (Proposed).
-- Option 2: **Keep the rule, add fusion as a second number** ("CBP says X, our estimate Y").
-- Option 3: Run fusion in **shadow mode** first, logged next to the current answer, and switch only once
-  it beats the freshest rule against real crossings. *(Recommended: this is the plan's default; see
-  Phase 2.)*
-
-**Blocks:** Phase 2 onwards.
-
-### Q-2. Keep the other two consensus rules?
-
-- *"Closures follow CBP"* (`consensus.py:5-7`). Should a camera showing moving cars ever override CBP's
-  "Lanes Closed"? (Live CBP at 3 pm MDT on 2026-10-12 showed Ysleta and Stanton "Lanes Closed" **[V]**.)
-- *"A disputed lane is ranked and shown on its worst case"* (`border-wait-times.md:245-249`). Keep that
-  pessimism, or show the fused number?
-
-**Blocks:** the fusion spec, SPEC §4.4.
-
-### Q-3. "Never build on GitHub Actions only"?
-
-Every job in this repo runs on GitHub Actions (plus pg_cron as its clock). **Video analysis needs an
-always-on process**, which Actions cannot host. Where should it run (a small VM, Fly.io/Render, a box
-you own), and with what monthly budget?
-
-**Blocks:** Phase 6 (cameras).
+When a question is answered, record it here and update [SPEC.md](SPEC.md) and [ROADMAP.md](ROADMAP.md)
+in the same commit.
 
 ---
 
-## B. Scope
+## Decisions (answered 2026-10-12)
 
-### Q-4. Which directions?
+| # | Question | Answer | What it changes |
+|---|---|---|---|
+| Q-1 | Weighted fusion vs. "newest reading wins" | **Show both numbers.** Today's answer (CBP / freshest source) stays, and the Chisme estimate is shown beside it | [ADR-0013](../architecture/adr/0013-weighted-fusion-of-wait-signals.md) is Accepted in this form. `consensus.py` rule 2 is **kept** for the first number, not superseded |
+| Go-live gate | When does the estimate appear and drive ranking? | **Hidden until it meets the Q-6 target.** Ranking keeps today's method until then | SPEC §4.6 |
+| Q-2 | CBP says closed, another signal says moving | **Flag it, don't decide.** Show "CBP says closed, traffic appears to be moving" | SPEC §4.4: a closure conflict is surfaced, never resolved silently |
+| Q-2b | How to rank and show when sources disagree | **Rank on the trust-weighted estimate** (once live), not the worst case | **Supersedes** the "disputed lane is ranked on its worst case" rule (`border-wait-times.md:245-249`) once the estimate is live. Recorded in ADR-0013 |
+| Q-3 | Where the always-on video worker runs | **A machine we own** | Phase 6.2. The worker must report a heartbeat (ADR-0011: loud failures) |
+| Q-4 | Directions | **Both: northbound and southbound** | `direction` is required on every signal. Southbound has **no CBP number**, so it is estimated from cameras, Maps and the crowd only, and graded by southbound timed crossings |
+| Q-5 | Lane types | **All of them**: car, SENTRI, Ready Lane, pedestrian, commercial | Each lane is estimated separately where a signal can tell lanes apart. Maps cannot (SPEC §5.1), so it contributes only where lanes share one approach |
+| Q-5b | Bridges | **All six**: Paso del Norte, BOTA, Ysleta, Stanton, Tornillo, Santa Teresa | Tornillo and Santa Teresa have no known camera, so they rely on CBP, sites, Maps and the crowd |
+| Q-6 | Accuracy target | **Stricter: average error ≤ 5 min, ≥ 80 % within 10 min**, over ≥ 30 timed crossings per bridge | Gate for showing the estimate (SPEC §8) |
+| Q-7 | Camera frames from YouTube | **Use the YouTube streams anyway**, accepting the risk | Product-owner decision, recorded with its risk: YouTube's ToS and API policies forbid automated capture. The likely failures are an IP block of the worker's connection and streams that disappear. The worker must detect a dead stream and alert (SPEC §5.1) |
+| Q-8 | Google Maps budget | **Free tier now; document the paid option** | 5,000 free calls a month ÷ 6 segments ≈ 833 polls a month ≈ **one poll every ~52 min** [A: 6 segments]. The paid option (every 10 min ≈ $209/month) is documented in SPEC §5.1 |
+| Q-8b | Maps terms on storing data | **Accept the risk, but get a legal review first** | Phase 5 waits on the review. Who does it is Q-17 |
+| Q-9 | Which websites | **All of them, after a deep investigation** of who publishes border waits, **including Facebook groups** | New Phase 4.0 (investigation). bordertraffic.com still needs a licence for commercial use. Facebook groups cannot be scraped within Meta's terms, so the investigation looks for a legitimate route (Q-18) |
+| Q-10 | Crowd channels | **All four**, in order: **Telegram bot → website form → Instagram DMs + comments → WhatsApp** | Phase 3 builds them in that order |
+| Q-11 | Instagram inbox shared with GoHighLevel | **Investigate first** whether our webhook and GHL can both subscribe | New step 3.0b |
+| Q-12 | Meta App Review / Business Verification owner | **Prepare everything now; decide the owner later** | New step 3.0a: draft the screencast script and privacy-policy text |
+| Q-13 | Crowd weight | **As proposed** (~30 % of a published site, corroboration, 25 % cap), **plus position reports**: a photo or location tells us where someone is in line, and with our queue speed that gives a deterministic wait for them. A report from near the end of the line also tells us the queue length | New signal kind in SPEC §5.4. **[A, unverified]** Instagram and most chat apps strip photo GPS, so a shared live location (Telegram, WhatsApp) is the likely reliable route (Q-19) |
+| Q-14 | Privacy | **Also keep the message text**: hashed sender id, parsed values and raw text, kept **30 days** | `border_reports.raw_text`, with a 30-day prune |
+| Q-15 | Surfaces | **GHL knowledge-base sheet, DM replies, website.** Instagram posts are not chosen | Phase 7.3 |
+| Q-16 | Who applies migration 0019 | **Claude, via the Supabase connector**: check the live database first, then apply 0019 with an explicit go-ahead. Creating the GitHub token and storing it in Vault stays with a human | Step 0.3 |
 
-CBP publishes **northbound only** (`border-wait-times.md:693-694`). The FPFCH cameras show both
-directions **[V]**. Is southbound (into Juárez) in scope? It would be the only southbound number in the
-region, but it has no published source to grade against and no CBP structure to hang it on.
+### Notes on the original options
 
-### Q-5. Which bridges and lanes?
-
-There are six ports today: PDN, BOTA, Ysleta, Stanton, Tornillo and Santa Teresa. Lane types are car,
-SENTRI, Ready Lane, pedestrian and commercial.
-
-- Must the estimate be **per lane type**? Google Maps cannot separate SENTRI from general lanes
-  **[A, from research]**, and a camera may or may not.
-- Is commercial (truck) traffic in scope?
-- Santa Teresa and Tornillo have **no known camera** **[V, filadepuentes.com 2026-10-12]**. Is CBP plus
-  crowd enough for them?
-
-### Q-6. What is "good enough"?
-
-Pick a target so we know when to stop tuning and when fusion may go live. Suggested starting point,
-**not a decision**: fused estimate mean absolute error **≤ 10 min**, **≥ 70 %** of crossings within
-10 min, and beating the current freshest-wins answer on both, measured over **≥ 30** timed crossings
-per bridge.
-
----
-
-## C. Signal sources
-
-### Q-7. Cameras: YouTube terms forbid frame capture
-
-**[V]** The YouTube ToS forbids access "by any automated means… scrapers" without written permission.
-The API Developer Policies III.E.1, III.I.8 and III.I.14 forbid downloading, isolating video and
-non-API access. Grabbing frames from the FPFCH YouTube stream breaks both.
-
-- Option A: **Ask FPFCH** (Fideicomiso de Puentes Fronterizos de Chihuahua, which runs the cameras,
-  `puentesfronterizos.gob.mx/camaras-en-vivo.php`) and/or **City of El Paso International Bridges** for
-  written permission or a direct RTSP/HLS feed. *(Recommended.)*
-- Option B: Proceed against the ToS and accept the risk of blocking.
-- Option C: Drop cameras and rely on Maps for queue length.
-
-Who would make that contact? **Blocks:** Phase 6.
-
-### Q-8. Google Maps: budget and terms
-
-- **Budget.** Traffic-aware Routes bills at Pro: **$10 / 1,000 after 5,000 free per month [V, Google
-  pricing page 2026-10-08]**. If we poll *every 10 min, 6 approach segments*, that is ≈ 25,920
-  calls/month ≈ **$209/month**. The segment count is **[A]**; the real number depends on the segments
-  chosen. Is that budget approved?
-- **Terms.** Maps terms restrict caching beyond 30 days and **"creating other datasets based on Google
-  Maps Content"** **[V via third-party copies; the official page did not load]**. Calibrating our model on
-  stored Maps durations may breach this. Who signs off on this legally?
-- Which API key? The web app's key is `NEXT_PUBLIC_` (browser-exposed). The estimator needs a
-  **separate, server-only** key. Can you create one?
-
-**Blocks:** Phase 5.
-
-### Q-9. Which websites, and may we scrape them?
-
-The candidates found (2026-10-12) are below; see the research table in [SPEC.md §5.2](SPEC.md#52-published-signals).
-
-- **puentesjuarez.com**: CBP plus FPFCH; has no terms.
-- **cruceya.com**: CBP plus its own estimates.
-- **filadepuentes.com**: estimates plus crowd reports; its terms were **not read**.
-- **alpuente.mx**: photo-backed crowd reports.
-- **bordertraffic.com**: **personal use only; commercial use needs a licence [V]**.
-- **bordertime.us**.
-
-Which are in scope? Is a site with no terms "allowed"? Will you license bordertraffic?
-
-**Blocks:** Phase 3.
-
-### Q-10. Crowd reports: which channels?
-
-"From anywhere" needs a concrete list. Each channel is a separate build:
-
-| Channel | Readable today? | What it takes |
-|---|---|---|
-| Instagram DMs | **No [V]** | `instagram_business_manage_messages`, a webhook, an app set to Live, Advanced Access / App Review, Business Verification **[V Meta docs]** |
-| Instagram comments | **No [V]** | `instagram_business_manage_comments`, same review path |
-| Telegram public bot | Admin-only today **[V]** | A *second* bot (keep the admin bot locked down) |
-| Website form | No | A form on epchisme.com |
-| GoHighLevel | Inbound stays inside GHL **[V]** | GHL API pull or GHL webhook to us |
-| WhatsApp / Facebook groups | No | WhatsApp Business API; FB group scraping is effectively impossible **[A]** |
-
-Which ones, in which order?
-
-### Q-11. GoHighLevel already listens to the Instagram inbox
-
-`docs/ghl-ig-comment-bot-prompt.md` runs a comment-to-DM automation on the same account. Can our
-webhook coexist with GHL's integration on one Instagram account? **Unknown.** Should border reports
-flow *through* GHL to us instead?
-
-### Q-12. Who owns the Meta app and its review?
-
-Adding messaging and comment scopes means App Review and Business Verification. Who does the screencast
-and privacy-policy work, and under which business entity?
-
-### Q-13. How much less seriously should crowd reports count?
-
-The spec proposes caps: one report never moves the estimate alone, crowd weight is capped at a fraction
-of the total, and there is a per-person rate limit. What cap do you want? See SPEC §4.3. Also, should a
-report with a photo (as alpuente.mx requires) count more?
+- Q-1's chosen option, "show both", was listed in the first draft of ADR-0013 as a rejected alternative.
+  ADR-0013 was still *Proposed* at that point, so it was rewritten to record the actual decision, with
+  the original proposal kept as a rejected alternative.
 
 ---
 
-## D. Data, privacy and operations
+## Open questions (raised by the answers)
 
-### Q-14. Storing message text and sender ids
+### Q-17. Who does the legal review of Google Maps terms?
 
-Crowd reports mean storing Instagram/Telegram user ids and free text. `border_crossings.reporter` is
-already an **opaque hash** (`0015`). Should we keep only hashes plus the parsed number (recommended),
-and for how long?
+Phase 5 waits on it (Q-8b). Is there a lawyer or advisor to send it to, or should I prepare a
+one-page summary of the relevant clauses for whoever does it?
 
-### Q-15. Where does the estimate appear?
+### Q-18. Facebook groups: which route?
 
-The candidates are the GHL knowledge-base sheet tab (`BORDER_KB_TAB`, **deliberately unset today**
-per the handoff branch), the website (no border UI exists **[V]**), Instagram posts, and DM replies. In
-what order?
+Scraping groups breaks Meta's terms and the Groups API is effectively gone. The legitimate routes are:
 
-### Q-16. Ops tasks only someone with console access can do
+- the group's admins agree to share or forward reports;
+- members tag or forward reports to our Telegram bot or website;
+- partnering with a group to cross-post our estimate in exchange.
 
-These are prerequisites, not design questions. Who will do them, and when?
+Which groups matter most (for example "Reporte de Puentes")? Is there a relationship with any admin?
 
-1. Apply migration `0019` and store `github_dispatch_token` in Vault. Per
-   `origin/docs/handoff-2026-10-11`, this was **not done**, and polling runs about 6×/day, not
-   144×/day.
-2. Get a Maps server key (Q-8) and Meta scopes (Q-12).
+### Q-19. Position reports: how do people send their position?
+
+**[A]** Photos sent through Instagram and most chat apps lose their GPS data. The options:
+
+- shared live location (Telegram and WhatsApp support it);
+- the website form asking for location permission;
+- a photo that we place by landmark, which is manual and does not scale.
+
+Which do you want? Is asking for location acceptable to the audience?
+
+### Q-20. Southbound ground truth
+
+With no CBP number southbound, the southbound estimate is graded only by southbound timed crossings.
+Should replies invite people heading into Juárez to time their crossing too ("voy a cruzar a Juárez")?
 
 ---
 
-*Written 2026-10-12 against `f5aa3b8`.*
+*Answers recorded 2026-10-12 on branch `chisme-border`.*

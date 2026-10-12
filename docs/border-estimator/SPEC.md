@@ -1,7 +1,11 @@
 # Spec: Border Wait-Time Estimator
 
-Status: **proposal**. Every number marked **[A]** is a starting value to be tuned against real crossings,
-not a claim. Items marked **[Q-n]** wait on [QUESTIONS.md](QUESTIONS.md).
+Status: **approved direction** (Q-1 to Q-16 answered 2026-10-12, see [QUESTIONS.md](QUESTIONS.md)). Every
+number marked **[A]** is a starting value to be tuned against real crossings, not a claim. Items marked
+**[Q-n]** cite the answer that decided them, or wait on an open question (Q-17 onward).
+
+**Scope (Q-4, Q-5):** all six bridges, both directions, all lane types (car, SENTRI, Ready Lane,
+pedestrian, commercial).
 
 ---
 
@@ -52,8 +56,8 @@ its 16 test files depend on it. An adapter turns each `Reading` into a `Signal`.
 |---|---|---|
 | `port_number` | str | CBP port id, e.g. `240202` |
 | `lane` | str | `car`, `car_sentri`, `car_ready`, `walk`, `commercial`, … (existing ids) |
-| `direction` | str | `north` \| `south` **[Q-4]** |
-| `kind` | str | `published` \| `measured` \| `crowd` |
+| `direction` | str | `north` \| `south`. Both are in scope (Q-4); CBP covers only `north` |
+| `kind` | str | `published` \| `measured` \| `crowd` \| `position` (§5.4) |
 | `source` | str | e.g. `cbp`, `pasosfronterizos`, `maps`, `cam:pdn-north`, `ig_dm` |
 | `state` | str | `open` \| `closed` \| `no_data` |
 | `minutes` | int \| None | the signal's own claim |
@@ -82,7 +86,9 @@ w = trust(source) × freshness(age, kind) × kind_factor(kind)
 | `crowd` | 20 min | A person's report describes the line they just left |
 
 **`kind_factor`** [A]: measured 1.0, published 1.0, crowd 0.3. That is the "taken less seriously" in the
-brief **[Q-13]**.
+brief, and it was approved as proposed (Q-13). A `position` report is a measured-style signal computed from
+a crowd input. It uses the crowd guards but a kind factor of 0.6 [A], because its wait comes from our own
+queue-speed measurement rather than the person's guess (§5.4).
 
 ### 4.2 Trust, earned against ground truth
 
@@ -108,7 +114,7 @@ This **is** the "rank websites on how trustworthy they are" requirement. The ran
 
 ### 4.3 Crowd guards
 
-The same idea as the brief's "less seriously", made concrete [A, **Q-13**]:
+The same idea as the brief's "less seriously", made concrete. Approved as proposed (Q-13); the thresholds are [A]:
 
 1. **Corroboration.** A crowd report counts only if a second distinct reporter agrees within tolerance
    (`consensus.tolerance_for`) in the same 20 minutes. **Exception:** a lane with no other live signal may
@@ -120,13 +126,18 @@ The same idea as the brief's "less seriously", made concrete [A, **Q-13**]:
 
 ### 4.4 Combining
 
-- **State.** Closures follow CBP, as the existing rule does **[Q-2]**.
+- **State.** Closures follow CBP for the state field. When a measured signal says traffic is moving on
+  a lane CBP calls closed, the lane carries a `closure_conflict` flag. The reply then says so ("CBP marca
+  cerrado, pero se ve movimiento") instead of picking a side (Q-2: flag it, don't decide).
 - **Minutes.** The **weighted median** of the voting signals, not the weighted mean. One broken scraper
   saying 58 against three signals saying about 20 must not drag the answer to 30. The median also always
   lands on a value some real signal claimed.
 - **Range.** The weighted 10th–90th percentile, combined with the signals' own `low` / `high`.
-- **Ranking and caption.** Ranked on the **high** end when sources conflict, keeping today's pessimism
-  (`border-wait-times.md:245-249`) **[Q-2]**.
+- **Two numbers (Q-1).** Today's freshest-reading number (`consensus.reconcile`) is kept and shown as
+  is. The Chisme estimate is shown beside it once live (§4.6). Southbound has no CBP number, so there
+  the estimate is the only number.
+- **Ranking (Q-2b).** Once the estimate is live, bridges rank on the **trust-weighted estimate**. Until
+  then, ranking keeps today's worst-case rule (`border-wait-times.md:245-249`).
 - **Then** `scoring.score()` applies the existing staleness and trend adjustments, unchanged.
 
 ### 4.5 Confidence
@@ -137,11 +148,12 @@ The same idea as the brief's "less seriously", made concrete [A, **Q-13**]:
 | `medium` | total weight ≥ 0.5, or a single high-trust fresh signal |
 | `low` | everything else, including crowd-only lanes |
 
-### 4.6 Shadow mode
+### 4.6 Hidden until it meets the target
 
-Until **[Q-1]** says otherwise, the fused estimate is **computed and stored but not shown**. The shown
-number stays `consensus.reconcile()`. Each crossing then grades both, and fusion goes live only when it
-beats the current answer on the target set in **[Q-6]**.
+The estimate is **computed and stored on every poll but not shown** (`border_estimates.shown = false`)
+until it meets the Q-6 target for a bridge (§8). Each timed crossing grades both numbers. The switch is
+**per bridge and direction**, because a busy bridge will reach 30 crossings long before Santa Teresa.
+Until a bridge passes, its replies, ranking and sheet rows are exactly what they are today.
 
 ---
 
@@ -177,15 +189,41 @@ advances, which is observed in one of two ways:
 Each measured signal must carry `low` / `high`. The uncertainty comes from `spacing`, the count noise
 and the edge of the visible queue.
 
-**Blocked:** cameras on **[Q-3, Q-7]**, Maps on **[Q-8]**. Legal facts are in QUESTIONS.
+**Cameras (Q-7, Q-3).** The product owner chose to read the bridges' public **YouTube live streams**
+(FPFCH's channel, `youtube.com/@fpfch/streams`), accepting that YouTube's ToS and API policies forbid
+automated capture. The worker runs on **a machine we own**. Consequences the worker must handle:
+
+- **Streams disappear or change id without notice.** Resolve the stream from the channel, not a
+  hard-coded video id, and treat "no frames for N minutes" as a source failure.
+- **An IP block is possible.** It would hit that machine's connection. A blocked or dead stream must be
+  **loud** (ADR-0011): a heartbeat to `/health` and a Telegram alert, never a silent gap.
+- Frames are analysed in memory and **not stored**. Only the derived counts are kept, which limits
+  what is retained.
+
+**Google Maps (Q-8).** Start on the **free tier**. 5,000 calls a month across ~6 segments [A] allows
+≈ 833 polls a month, which is **about one poll every 52 minutes**. At that cadence Maps is a slow,
+coarse signal, and its freshness half-life keeps its weight modest.
+
+- **Paid option, documented, not enabled:** polling every 10 minutes is ≈ 25,920 calls a month, which
+  is **≈ $209/month** at $10 per 1,000 after the free 5,000 (pricing verified 2026-10-08). Enabling it
+  is a config change (poll interval), not a code change.
+- **Terms (Q-8b).** The risk is accepted, but a **legal review comes first**, so Phase 5 waits on it
+  (Q-17). Until then the design keeps Maps results only as long as grading needs them.
 
 ### 5.2 Published signals
 
 Existing: `cbp` (authority, ~1 h), `pasosfronterizos` (independent, ~8 min), `borderswaittime` (mirror,
 never votes).
 
-Candidates found on 2026-10-12, all **[V]** from each site's own page unless noted. Each needs **[Q-9]**
-before any code:
+**Q-9: all of them, after a deep investigation** of every publisher of El Paso–Juárez border waits,
+**including Facebook groups**. The investigation (Roadmap 4.0) records for each publisher where its
+number comes from, how often it updates, whether it is independent of CBP, and its terms. Notes:
+
+- **bordertraffic.com** still needs a licence for commercial use; the investigation covers getting one.
+- **Facebook groups** cannot be scraped within Meta's terms, and the Groups API is effectively gone.
+  They become a source through a legitimate route instead (Q-18).
+
+Candidates found so far (2026-10-12), all **[V]** from each site's own page unless noted:
 
 | Site | Number comes from | Independent? | Notes |
 |---|---|---|---|
@@ -201,7 +239,9 @@ evidence, not hope. A site that copies CBP must be `False`, and it is only usefu
 
 ### 5.3 Crowd signals
 
-**Channels: [Q-10].** Nothing reads follower messages today **[V]**.
+**Channels (Q-10): all four, built in this order:** a public **Telegram bot** (a second bot, separate from the
+admin one) → a **website form** → **Instagram DMs and comments** (after the GHL coexistence check, Q-11,
+and Meta review, Q-12) → **WhatsApp**. Nothing reads follower messages today **[V]**.
 
 **Parsing.** Add an intent `report` to `requests.classify()`, for messages like "tardé 40 min en santa
 fe", "llevo una hora en la fila del libre" and "40 min zaragoza sentri". Hard cases that need tests
@@ -216,7 +256,28 @@ first:
   `border-wait-times.md:349-354`.
 
 **Timed crossings** ("voy a cruzar" → "ya crucé") already parse and are stored. These are the **ground
-truth** of §4.2, not ordinary crowd signals, so they are graded rather than weighted.
+truth** of §4.2, not ordinary crowd signals, so they are graded rather than weighted. Southbound
+crossings ("voy a cruzar a Juárez") are the only ground truth for southbound lanes (Q-20).
+
+### 5.4 Position reports (from Q-13)
+
+A person tells us **where they are in the line**, not how long they think it will take. We turn that
+into a wait with our own measurement:
+
+```
+their_wait ≈ distance_to_booth / v_q        # v_q from cameras or Maps (§5.1)
+```
+
+- It is deterministic, and as accurate as `v_q` and the position.
+- **A report from near the tail measures the queue length `L` itself.** That updates every lane
+  estimate built from `L / v_q`, not just this person's. It is the "there's a user almost at the end of
+  the line" case.
+- It needs a live `v_q`. Without one, the report is stored and used only as a queue-length observation.
+- **Position capture is unverified [A].** Instagram and most chat apps strip GPS from photos, so a
+  shared **live location** (Telegram and WhatsApp support it) or the website form's location permission
+  is the likely route. A photo can be placed by landmark manually, which does not scale (Q-19).
+- Positions are checked against a per-bridge **approach corridor polygon**. A location outside it is
+  not a queue position.
 
 ---
 
@@ -229,10 +290,12 @@ Following the existing `border_*` posture: **RLS on, no policies, service-role o
 | `border_signals` | signal observation | port, lane, direction, kind, source, state, minutes, low, high, observed_at, independent, reporter_hash, evidence jsonb, `content_hash` unique |
 | `border_estimates` | port × lane × direction × computation | minutes, low, high, confidence, method (`fusion_v1`), inputs jsonb (each signal's weight), `shown boolean`, computed_at |
 | `border_source_trust` | source × day | n, mae, bias, within_10, prior, trust |
-| `border_reports` | inbound crowd message | channel, reporter_hash, received_at, parsed jsonb, outcome (`counted` / `uncorroborated` / `rate_limited` / `implausible` / `unparsed`). **Raw text is stored only if [Q-14] allows** |
+| `border_reports` | inbound crowd message | channel, reporter_hash, received_at, raw_text, position (lat/lng, nullable), parsed jsonb, outcome (`counted` / `uncorroborated` / `rate_limited` / `implausible` / `unparsed`) |
 
-Retention follows `border_prune` (`0014`). Signals and reports are kept long enough to recompute trust
-(≥ 30 days [A]).
+**Privacy (Q-14):** the sender is stored only as a hash. The **message text is kept for 30 days**, to
+debug the parser, then pruned by the same mechanism as `border_prune` (`0014`). Parsed values and
+outcomes are kept long enough to recompute trust (≥ 30 days [A]). Location coordinates follow the same
+30-day limit as raw text [A].
 
 ---
 
@@ -240,16 +303,21 @@ Retention follows `border_prune` (`0014`). Signals and reports are kept long eno
 
 | Job | Cadence | Host |
 |---|---|---|
-| Published and Maps polling, plus fusion | Every 10 min (existing `border-poll`) | GitHub Actions, dispatched by pg_cron (**needs migration 0019 applied**, [Q-16]) |
+| Published-site polling, plus fusion | Every 10 min (existing `border-poll`) | GitHub Actions, dispatched by pg_cron (**needs migration 0019 applied**; Claude via the Supabase connector, Q-16) |
 | Trust recomputation | Daily (the existing `job=daily` run) | GitHub Actions |
 | Instagram / Telegram webhooks | On event | Vercel (next to `api/telegram/webhook`) |
-| Camera analysis | Continuous | **Not GitHub Actions**: an always-on worker **[Q-3]** |
+| Google Maps polling | ~Every 52 min on the free tier (Q-8); every 10 min if the paid option is enabled | GitHub Actions |
+| Camera analysis | Continuous | **A machine we own** (Q-3), reporting a heartbeat |
 
 ---
 
 ## 8. Success metrics
 
-Graded against `border_crossings`, per bridge, rolling 30 days. Targets are set by **[Q-6]**.
+Graded against `border_crossings`, per bridge and direction, rolling 30 days.
+
+**Go-live target (Q-6):** mean absolute error **≤ 5 min** and **≥ 80 %** of crossings within 10 min,
+over **≥ 30** timed crossings for that bridge and direction. A bridge that passes starts showing the
+estimate (§4.6).
 
 - MAE, bias and within-10 for `fusion_v1` against the current consensus answer, side by side.
 - Coverage: the share of open lanes with an estimate fresher than 15 min.

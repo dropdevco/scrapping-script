@@ -15,7 +15,13 @@ pytest.importorskip("cv2")
 from camera_scene import FRAME, Scene, camera, queue_fronts
 
 from scraper.border.camera.calibration import Strip
-from scraper.border.camera.measure import LaneWindow, Reference, image_features
+from scraper.border.camera.measure import (
+    LaneEstimate,
+    LaneWindow,
+    Reference,
+    image_features,
+    rolling,
+)
 
 DT = 0.5
 FRAMES = 120
@@ -104,6 +110,32 @@ class Queues(unittest.TestCase):
         est = run(camera(), moving_queue(30, lambda t: 0.6, frames=10))
         self.assertEqual(est.state, "insufficient")
         self.assertIsNone(est.wait_min)
+
+
+class Rolling(unittest.TestCase):
+    def window(self, state, speed, queue=40.0, seconds=60.0, beyond=False):
+        return LaneEstimate(camera="c", lane="l", port_number="p", direction="north",
+                            state=state, frames=120, seconds=seconds, queue_m=queue,
+                            beyond_view=beyond, speed_m_s=speed)
+
+    def test_stop_and_go_windows_average_including_the_stops(self):
+        history = [(0, self.window("stalled", 0.0)), (300, self.window("queue", 0.3)),
+                   (600, self.window("queue", 0.15))]
+        out = rolling(history, now=600, booth_distance_m=100)
+        self.assertAlmostEqual(out["speed_m_s"], 0.15)
+        self.assertAlmostEqual(out["wait_min"], (100 + 40) / 0.15 / 60)
+
+    def test_old_windows_and_empty_lanes_do_not_count(self):
+        history = [(0, self.window("queue", 2.0)), (1000, self.window("no_queue", None)),
+                   (1200, self.window("queue", 0.2))]
+        out = rolling(history, now=1200, booth_distance_m=0)
+        self.assertEqual(out["windows"], 1)
+        self.assertAlmostEqual(out["speed_m_s"], 0.2)
+
+    def test_no_booth_distance_means_speed_but_no_wait(self):
+        out = rolling([(0, self.window("queue", 0.2))], now=0, booth_distance_m=None)
+        self.assertIsNone(out["wait_min"])
+        self.assertAlmostEqual(out["speed_m_s"], 0.2)
 
 
 class Determinism(unittest.TestCase):

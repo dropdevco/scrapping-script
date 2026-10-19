@@ -14,6 +14,7 @@ automated access (QUESTIONS.md, Q-7). Frames are analysed in memory and never wr
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -50,8 +51,13 @@ class StreamLost(StreamError):
 
 def _ytdlp(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
     # Node as the JS runtime: without one YouTube extraction is deprecated and drops formats.
-    return subprocess.run([sys.executable, "-m", "yt_dlp", "--js-runtimes", "node", *args],
-                          capture_output=True, text=True, encoding="utf-8", timeout=timeout,
+    # UTF-8 forced on both ends: on Windows yt-dlp otherwise prints in the console code page,
+    # and the "ó" in "Córdova - Américas" made the whole channel listing undecodable.
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    return subprocess.run([sys.executable, "-m", "yt_dlp", "--encoding", "utf-8",
+                           "--js-runtimes", "node", *args],
+                          capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          env=env, timeout=timeout,
                           check=False)   # a refusal is read from returncode and stderr below
 
 

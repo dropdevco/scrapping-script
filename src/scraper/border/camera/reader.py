@@ -31,7 +31,7 @@ import cv2
 import numpy as np
 
 from .calibration import PX_PER_M, Camera, Strip, live_region, load_cameras
-from .measure import BIN_M, LaneEstimate, LaneWindow, Reference, image_features
+from .measure import BIN_M, LaneEstimate, LaneWindow, Reference, image_features, rolling
 from .stream import StreamError, find, frames, resolve
 
 FPS = 2.0                 # two frames a second: a queued car moves well under a metre between them
@@ -179,7 +179,7 @@ def cmd_list(args, cameras) -> int:
             status = f"DOWN: {exc}"
         lanes = ", ".join(lane.lane for lane in cam.lanes)
         scale = "scale verified" if cam.scale_verified else "scale unverified"
-        print(f"{cam.id:<16} {cam.port_number} {cam.direction:<5} [{lanes}] {scale} — {status}")
+        print(f"{cam.id:<16} {cam.port_number} {cam.direction:<5} [{lanes}] {scale} - {status}")
     return 0
 
 
@@ -213,16 +213,21 @@ def cmd_reference(args, cameras) -> int:
     return 0
 
 
-def _read_once(cam: Camera, source: str | None, seconds: float,
-               debug: str | None = None) -> list[dict]:
-    started = datetime.now(UTC)
+def _estimate(cam: Camera, source: str | None, seconds: float,
+              debug: str | None = None) -> list[LaneEstimate]:
     reader = CameraReader(cam)
     estimates = reader.read(frames(_source(cam, source), FPS, seconds, live_region(cam)),
                             save=source is None)
     if debug:
         cv2.imwrite(debug, debug_image(reader, estimates))
+    return estimates
+
+
+def _read_once(cam: Camera, source: str | None, seconds: float,
+               debug: str | None = None) -> list[dict]:
+    started = datetime.now(UTC)
     lanes = {lane.lane: lane for lane in cam.lanes}
-    return [as_signal(e, lanes[e.lane], started) for e in estimates]
+    return [as_signal(e, lanes[e.lane], started) for e in _estimate(cam, source, seconds, debug)]
 
 
 def cmd_read(args, cameras) -> int:
@@ -263,12 +268,28 @@ def cmd_run(args, cameras) -> int:
     heartbeat = state_dir() / "heartbeat.json"
     heartbeat.parent.mkdir(parents=True, exist_ok=True)
     down: dict[str, str] = {}
+    history: dict[tuple[str, str], list] = {}
     while True:
         started = time.monotonic()
         status = {}
         for cam in chosen:
             try:
-                for sig in _read_once(cam, None, args.seconds):
+                observed = datetime.now(UTC)
+                lanes = {lane.lane: lane for lane in cam.lanes}
+                for est in _estimate(cam, None, args.seconds):
+                    lane = lanes[est.lane]
+                    past = history.setdefault((cam.id, est.lane), [])
+                    past.append((time.monotonic(), est))
+                    past[:] = [(t, e) for t, e in past if time.monotonic() - t <= 3600]
+                    sig = as_signal(est, lane, observed)
+                    # The signal's number is the rolling one: a single window in stop-and-go
+                    # traffic is too noisy to publish. The window's own reading stays in evidence.
+                    roll = rolling(past, time.monotonic(), lane.booth_distance_m)
+                    sig["evidence"]["rolling"] = roll
+                    if est.state in ("queue", "stalled"):
+                        sig["minutes"] = None if roll["wait_min"] is None else round(roll["wait_min"])
+                        sig["low"] = sig["minutes"] if roll.get("lower_bound") else sig["low"]
+                        sig["high"] = None if roll.get("lower_bound") else sig["high"]
                     print(json.dumps(sig, ensure_ascii=False), flush=True)
                 status[cam.id] = "ok"
                 if cam.id in down:

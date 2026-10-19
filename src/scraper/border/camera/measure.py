@@ -292,3 +292,29 @@ class LaneWindow:
         return LaneEstimate(state="queue", wait_min=wait, low_min=min(low, wait),
                             high_min=None if high is None else max(high, wait),
                             lower_bound=beyond, **common)
+
+
+ROLLING_SECONDS = 900    # stop-and-go: a one-minute window can fall entirely inside a stop
+
+
+def rolling(history: list[tuple[float, LaneEstimate]], now: float,
+            booth_distance_m: float | None) -> dict:
+    """Speed and wait over the last ROLLING_SECONDS of windows from one lane.
+
+    At Paso del Norte at 04:36 local on 2026-10-19 the queue sat still for 15 s, advanced a
+    full car length in the next 15, and stopped again; consecutive minute-long windows read
+    anywhere from 0.00 to 0.23 m/s. Each window's speed is weighted by its length, stalled
+    windows count as the zero they measured, and windows with no queue are left out (they
+    say nothing about how fast a queue moves). The queue length is the latest window's."""
+    recent = [(t, e) for t, e in history if now - t <= ROLLING_SECONDS
+              and e.state in ("queue", "stalled") and e.speed_m_s is not None]
+    if not recent:
+        return {"speed_m_s": None, "wait_min": None, "windows": 0}
+    seconds = sum(e.seconds for _, e in recent)
+    speed = max(0.0, sum(e.speed_m_s * e.seconds for _, e in recent) / seconds)
+    latest = max(recent, key=lambda item: item[0])[1]
+    wait = None
+    if booth_distance_m is not None and speed >= MIN_SPEED_M_S:
+        wait = (booth_distance_m + latest.queue_m) / speed / 60
+    return {"speed_m_s": speed, "wait_min": wait, "windows": len(recent),
+            "seconds": seconds, "lower_bound": latest.beyond_view}

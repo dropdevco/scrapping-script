@@ -135,7 +135,7 @@ class Signals(unittest.TestCase):
         sig = as_signal(est, cam.lanes[0], datetime(2026, 10, 19, 13, 0, tzinfo=UTC))
         self.assertIsNone(sig["lane"])
         self.assertEqual((sig["kind"], sig["source"], sig["minutes"]), ("measured", "cam:pdn-north", 12))
-        self.assertEqual(sig["evidence"]["lane"], "left-3")
+        self.assertEqual(sig["evidence"]["lane"], cam.lanes[0].lane)
 
 
 if __name__ == "__main__":

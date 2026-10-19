@@ -13,8 +13,24 @@
     },
     "lanes": [
       {
-        "lane": "left-3",
-        "across": [0.0, 1.0],
+        "lane": "lane-1",
+        "across": [0.0, 0.3333],
+        "along": [-0.1, 2.4],
+        "booth": "far",
+        "booth_distance_m": null,
+        "cbp_lane": null
+      },
+      {
+        "lane": "lane-2",
+        "across": [0.3333, 0.6667],
+        "along": [-0.1, 2.4],
+        "booth": "far",
+        "booth_distance_m": null,
+        "cbp_lane": null
+      },
+      {
+        "lane": "lane-3",
+        "across": [0.6667, 1.0],
         "along": [-0.1, 2.4],
         "booth": "far",
         "booth_distance_m": null,
@@ -22,7 +38,7 @@
       }
     ],
     "mask": [[0, 0, 900, 58], [230, 64, 218, 112], [828, 64, 218, 112], [448, 196, 342, 96], [500, 290, 212, 22]],
-    "notes": "Looks north up the bridge from the Juarez end; the US booths are past the far end, out of view. left-3 is the carriageway between the yellow left curb and the white bollard line (three lanes, width assumed 3 x 3.5 m). The lane between the bollards and the orange barrels, and the one right of them, are not calibrated yet. The Feliz Viaje sign hides the road behind it and is masked.",
+    "notes": "Looks north up the bridge from the Juarez end; the US booths are past the far end, out of view. lane-1..lane-3 (left to right) split the carriageway between the yellow left curb and the white bollard line into equal thirds (width assumed 3 x 3.5 m). They are read separately because they queue separately: at 03:16 local on 2026-10-19 only the middle lane was queued. The lane between the bollards and the orange barrels, and the one right of them, are not calibrated yet. The Feliz Viaje sign hides the road behind it and is masked.",
     "clock": [0, 0, 300, 28]
   },
   "lerdo-north": {

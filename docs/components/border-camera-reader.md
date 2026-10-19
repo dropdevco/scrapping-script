@@ -21,20 +21,42 @@ always give the same answer, so any reading can be reproduced from a recording.
 
 ```
 frame ──► image grey + edges ──► warp each lane into a strip (booth at row 0, 8 px per metre)
+                                  └► grey *structure*: the strip minus a 1 m blur of itself
                                    │
           ┌────────────────────────┴───────────────────────┐
           ▼                                                ▼
    per metre: occupied?                          per 12 m segment: how far did the
-   (differs from the empty-road reference        strip's profile move toward the booth
-    in grey level or edge strength)              since the last frame? (correlation,
+   (structure or edges differ from the           strip's profile move toward the booth
+    empty-road reference)                        since the last frame? (correlation,
                                                   then 1-D Lucas-Kanade for the fraction)
           │                                                │
           └──────────────── over a 60 s window ────────────┘
                                    ▼
-   queue  = run of metres occupied ≥ half the window, from the booth end, gaps ≤ 9 m
+   queue  = run of metres occupied ≥ half the window, from the booth end, gaps ≤ 9 m,
+            at least 60 % of its metres queued
    speed  = time-averaged speed of what is inside the queue, stationary cars included
+            (the worker publishes a 15-minute rolling average of it)
    wait   = (distance from strip to booth + visible queue) ÷ speed
 ```
+
+Three choices in that pipeline were made on real footage, not in advance:
+
+- **Structure, not brightness.** At night the empty road has no single brightness: the
+  headlights of whatever is queued nearby light it. The same empty Paso del Norte (Sur) street
+  measured 86 to 121 grey levels from one 20-minute round to the next. The strip minus a 1 m
+  blur keeps what a vehicle adds (outline, windows, lamps) and drops what light does. The blur
+  is in strip metres: a blur fixed in image pixels was tried and filtered away the body of a car
+  close to the camera.
+- **The empty road is learnt from the emptiest moments.** A median over one clip learnt a
+  waiting queue as road. A median across rounds still learnt cars where the lane was queued
+  three rounds in five. The reference is re-learnt from the samples that differ least from it
+  (three passes). When an hour holds no empty moment, the reference already held is kept.
+- **A queue is dense.** Static clutter (a vendor's cart, people standing in the street) made
+  islands that the gap rule chained together. Every real queue in the labelled rounds was at
+  least 70 % queued metres; every false one was under 50 %.
+
+A photometric correction (matching the scene's brightness outside the lanes) was also built
+and scored. It made the result worse and is not used.
 
 That last line is Little's law for one lane: a car joining the tail covers the queue's length
 at the queue's average speed. Two consequences:
@@ -92,10 +114,13 @@ silently.** Whatever was not verified says so, and travels with every reading.
    to the burned-in date and time box.
 7. Check it: `python -m scraper.border camera snapshot --camera <id> --out check.jpg` draws the
    rectangle (yellow), the lane strips (green, labelled at the booth end) and the masks (red).
-8. Learn the empty road **while the lane is clear** (night is ideal):
-   `python -m scraper.border camera reference --camera <id>`. A median over a standing queue
-   would learn the queue as road. After that the reference drifts toward the live picture only
-   where nothing is detected, which follows dawn and dusk.
+8. Learn the road from **moments spread across time**, including some when the lane is clear:
+   `python -m scraper.border camera reference --camera <id> --rounds 6 --gap 600` takes six
+   live samples ten minutes apart (or pass `--source` once per recorded clip). One moment is
+   refused. The worker then keeps refreshing each reference from an in-memory bank of about an
+   hour of samples, learning only from the emptiest of them. Readings in the first hour after
+   install are the least reliable: the one miss in the evaluation below had a single 45-second
+   clip of history.
 9. **A negative speed means `booth` points the wrong way.** On footage with traffic, the
    reader's signed speed toward the booth is a check on the calibration's direction.
 
@@ -110,8 +135,8 @@ Internacional".
 
 | Video id | Title | Port | Status | What it shows (night frames) | Calibrated |
 |---|---|---|---|---|---|
-| `0Pg3S6s76IE` | Paso del Norte (Norte) | 240202 | live | Northbound bridge carriageways from the Juárez end, booths out of view | `pdn-north` (left 3 lanes) |
-| `IcvugJWPXz8` | Paso del Norte (Sur) | 240202 | live | Seen only as a thumbnail so far | — |
+| `0Pg3S6s76IE` | Paso del Norte (Norte) | 240202 | live | Northbound bridge carriageways from the Juárez end, booths out of view | `pdn-north` (3 lanes) |
+| `IcvugJWPXz8` | Paso del Norte (Sur) | 240202 | live | The Juárez street feeding the bridge; the queue drives toward the camera | `pdn-south-street` (2 columns) |
 | `sOHFG6_3zAs` | Lerdo (Norte) | 240204 | live | Northbound roadway on the Lerdo–Stanton bridge | `lerdo-north` |
 | `CYhISA_wFQ8` | Lerdo (Sur) | 240204 | live | Toll booths and lanes; traffic direction not yet confirmed | — |
 | `RVXhhbkBGbI` | Lerdo (Fila) | 240204 | live | Labelled "queue view"; which lane is the queue is not identifiable at night | — |
@@ -138,12 +163,12 @@ bridge is not administered by FPFCH.
 |---|---|---|
 | Rectification, occupancy, motion, window logic | 12 tests on rendered perspective queues of known length and speed (`tests/border/test_border_camera.py`) | Speed 0.99–1.04× truth from 0.1 to 3 m/s; length within ±5 m; scale cancels |
 | Stream handling | 12 tests against small recorded videos and a mocked channel (`test_border_camera_stream.py`) | Down / frozen / lost all raise |
-| Real footage | Night clips, nearly empty roads | Reads `no_queue` as it should. **Not yet validated on real queues**: see below |
+| Queue vs. no queue on real footage | 45 lane-rounds hand-labelled from nine 20-minute rounds of PDN north (3 lanes) and PDN south (2 columns), 02:16–04:56 local on 2026-10-19, 21 queued. Each round read with a reference learnt only from the rounds before it, as the worker would have it | **39/40 correct** (round 1 has no history). The miss: PDN south, left column, 02:36, with one 45 s clip of history |
+| Speed on real footage | First and last frames of each clip compared by eye | Stalled lanes read 0.00–0.03 m/s; a lane that advanced about one car length (7–10 m) in 44 s read 0.16–0.23 m/s. Absolute metres are nominal until a calibration's scale is verified |
 | Lane types, booth distances, scale | Not verified for any camera | All `null` / `false` in `cameras.json` |
 
 **Not yet done:**
-- Validation on rush-hour footage. The thresholds in `measure.py` are starting values and
-  have not been tuned on real queues.
+- Daylight footage: sharp shadows are structure too, and they move with the sun.
 - Grading against timed crossings (needs Phase 3).
 - Calibrating the remaining live cameras.
 - Measuring booth distances.

@@ -1,0 +1,53 @@
+{
+  "_readme": "Camera calibrations. ground.image: near-left, near-right, far-right, far-left corners of a rectangle on the road, picked at frame_size. width_m/length_m: that rectangle in metres; scale_verified=false means nobody measured it, so absolute metres and speeds are nominal (they cancel out of a wait only when the booth is in view). Lanes: across/along are fractions of the rectangle; along may run past [0,1]. booth_distance_m: metres from the strip's booth-end row to the inspection booth, null = not measured (no wait is produced, only queue and speed). cbp_lane: null until someone confirms which CBP lane type the strip is. mask: x,y,w,h overlays (clock, logos, QR codes, signs that hide the road). Check any change with `camera snapshot`. clock: the burned-in date/time box; a stream whose clock stops changing for 20 s is reported frozen.",
+  "pdn-north": {
+    "title": "Paso del Norte (Norte)",
+    "port_number": "240202",
+    "direction": "north",
+    "frame_size": [1280, 720],
+    "ground": {
+      "image": [[326, 650], [646, 650], [695, 380], [480, 380]],
+      "width_m": 10.5,
+      "length_m": 30.0,
+      "scale_verified": false
+    },
+    "lanes": [
+      {
+        "lane": "left-3",
+        "across": [0.0, 1.0],
+        "along": [-0.1, 2.4],
+        "booth": "far",
+        "booth_distance_m": null,
+        "cbp_lane": null
+      }
+    ],
+    "mask": [[0, 0, 900, 58], [230, 64, 218, 112], [828, 64, 218, 112], [448, 196, 342, 96], [500, 290, 212, 22]],
+    "notes": "Looks north up the bridge from the Juarez end; the US booths are past the far end, out of view. left-3 is the carriageway between the yellow left curb and the white bollard line (three lanes, width assumed 3 x 3.5 m). The lane between the bollards and the orange barrels, and the one right of them, are not calibrated yet. The Feliz Viaje sign hides the road behind it and is masked.",
+    "clock": [0, 0, 300, 28]
+  },
+  "lerdo-north": {
+    "title": "Lerdo (Norte)",
+    "port_number": "240204",
+    "direction": "north",
+    "frame_size": [1280, 720],
+    "ground": {
+      "image": [[478, 380], [798, 380], [775, 200], [650, 200]],
+      "width_m": 7.0,
+      "length_m": 30.0,
+      "scale_verified": false
+    },
+    "lanes": [
+      {
+        "lane": "right-roadway",
+        "across": [0.0, 1.0],
+        "along": [-0.05, 2.2],
+        "booth": "far",
+        "booth_distance_m": null,
+        "cbp_lane": null
+      }
+    ],
+    "mask": [[0, 0, 300, 58], [182, 90, 234, 82], [868, 90, 236, 102], [876, 172, 210, 20]],
+    "notes": "Looks north along the Lerdo-Stanton bridge from the Juarez end. right-roadway is the straight stretch between the bollard line and the orange right curb, with the northbound arrow; width assumed two lanes (7 m). CBP names this port 'Stanton DCL', but which lane type the strip is has not been confirmed. Below y=380 the roadway curves left toward the camera and is not covered by the straight strip.",
+    "clock": [0, 0, 300, 28]
+  }
+}

@@ -33,6 +33,10 @@ social = ["pillow>=10.0"]
 # Google Sheets export feeding the GHL knowledge base. Its own extra so the
 # scrape job only pays for it on the runner that actually publishes.
 kb = ["gspread>=6.0", "google-auth>=2.0"]
+# Border camera reader (src/scraper/border/camera): OpenCV for the image work, yt-dlp to find
+# and open the bridges' live streams. Headless OpenCV: the worker never opens a window. Its
+# own extra because it is heavy and only the always-on camera machine needs it.
+camera = ["opencv-python-headless>=4.9", "numpy>=1.26", "yt-dlp>=2024.10.0"]
 
 [project.scripts]
 scraper-mcp = "scraper.mcp_server:main"

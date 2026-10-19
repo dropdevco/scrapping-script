@@ -25,12 +25,13 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # social brings Pillow (tests/social renders images), kb brings gspread. [trends]
-      # (pandas) is left out: pytrends is imported lazily and its source self-disables.
+      # social brings Pillow (tests/social renders images), kb brings gspread, camera brings
+      # OpenCV for the border camera reader's tests. [trends] (pandas) is left out: pytrends
+      # is imported lazily and its source self-disables.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,social,kb]"
+          pip install -e ".[dev,social,kb,camera]"
 
       # No SUPABASE_* here, on purpose: the suite must pass with storage off, which is
       # also how a contributor's machine runs it.

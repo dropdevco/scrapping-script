@@ -7,6 +7,7 @@
     python -m scraper.border chat                         # the DM experience in a terminal
     python -m scraper.border demo                         # five scripted scenes
     python -m scraper.border simulate                     # a fake Instagram against the feed
+    python -m scraper.border camera ...                   # queue length/speed off bridge cameras
 
 Each command is also its own module (python -m scraper.border.poll, ...). poll, sheet and
 selfcheck are production; serve and the three rehearsal tools are for local use, the
@@ -26,6 +27,7 @@ COMMANDS = {
     "chat": "scraper.border.devtools.chat",
     "demo": "scraper.border.devtools.demo",
     "simulate": "scraper.border.devtools.fake_instagram",
+    "camera": "scraper.border.camera.reader",
 }
 
 

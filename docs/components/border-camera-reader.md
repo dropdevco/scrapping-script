@@ -34,7 +34,14 @@ python -m scraper.border camera list         # every calibrated camera, and whet
 python -m scraper.border camera reference --camera lerdo-south-booths --rounds 6 --gap 600
 ```
 
-Then:
+**Or just open the viewer.** It learns the road by itself for any camera that has none (three
+readings, about six minutes at the default two-minute cadence), then shows every bridge's wait live:
+
+```bash
+python -m scraper.border camera view          # http://127.0.0.1:8090, every calibrated camera
+```
+
+Or from the command line:
 
 ```bash
 python -m scraper.border camera read --camera lerdo-south-booths            # one 60 s reading

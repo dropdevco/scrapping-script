@@ -8,6 +8,8 @@
     python -m scraper.border camera read --camera pdn-north [--seconds 60] [--json]
     python -m scraper.border camera run --cameras pdn-north,lerdo-fila [--every 300]
                                                                # the always-on worker
+    python -m scraper.border camera view [--cameras ...] [--every 120] [--port 8090]
+                                                               # the worker plus a live page
 
 `read` and `reference` take --source FILE to work from a recorded clip instead of the live
 stream, which is how a calibration is tuned and how a reading is reproduced.
@@ -19,7 +21,6 @@ CAMERA_STATE_DIR, by default ~/.chisme/camera.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import os
 import sys
@@ -41,7 +42,6 @@ from .measure import (
     foreground,
     image_features,
     plain,
-    rolling,
     strip_features,
 )
 from .stream import StreamError, find, frames, resolve
@@ -352,57 +352,25 @@ def cmd_read(args, cameras) -> int:
     return 0
 
 
-async def _alert(text: str) -> None:
-    from ...core.http import HttpClient
-    from ...social.notify import notify_alert
-    async with HttpClient() as http:
-        await notify_alert(http, text)
-
-
 def cmd_run(args, cameras) -> int:
-    """The always-on worker: one window per camera, every `--every` seconds, forever.
+    """The always-on worker: every camera read in parallel every `--every` seconds, forever,
+    one JSON signal per lane on stdout. See worker.py."""
+    from .worker import Worker
 
-    A camera that fails is reported once when it goes down and once when it comes back,
-    over Telegram, and keeps being retried; it never takes the others with it."""
     chosen = [_camera(cameras, c.strip()) for c in args.cameras.split(",") if c.strip()]
-    heartbeat = state_dir() / "heartbeat.json"
-    heartbeat.parent.mkdir(parents=True, exist_ok=True)
-    down: dict[str, str] = {}
-    history: dict[tuple[str, str], list] = {}
-    while True:
-        started = time.monotonic()
-        status = {}
-        for cam in chosen:
-            try:
-                observed = datetime.now(UTC)
-                lanes = {lane.lane: lane for lane in cam.lanes}
-                for est in _estimate(cam, None, args.seconds):
-                    lane = lanes[est.lane]
-                    past = history.setdefault((cam.id, est.lane), [])
-                    past.append((time.monotonic(), est))
-                    past[:] = [(t, e) for t, e in past if time.monotonic() - t <= 3600]
-                    sig = as_signal(est, lane, observed, cam.direction_verified)
-                    # The signal's number is the rolling one: a single window in stop-and-go
-                    # traffic is too noisy to publish. The window's own reading stays in evidence.
-                    roll = rolling(past, time.monotonic(), lane.booth_distance_m)
-                    sig["evidence"]["rolling"] = roll
-                    if est.state in ("queue", "stalled"):
-                        sig["minutes"] = None if roll["wait_min"] is None else round(roll["wait_min"])
-                        sig["low"] = sig["minutes"] if roll.get("lower_bound") else sig["low"]
-                        sig["high"] = None if roll.get("lower_bound") else sig["high"]
-                    print(json.dumps(plain(sig), ensure_ascii=False), flush=True)
-                status[cam.id] = "ok"
-                if cam.id in down:
-                    asyncio.run(_alert(f"Border camera {cam.id} is back."))
-                    del down[cam.id]
-            except (StreamError, FileNotFoundError, ValueError) as exc:
-                status[cam.id] = f"{type(exc).__name__}: {exc}"
-                print(json.dumps({"camera": cam.id, "error": status[cam.id]}), flush=True)
-                if cam.id not in down:
-                    asyncio.run(_alert(f"Border camera {cam.id} stopped: {status[cam.id]}"))
-                down[cam.id] = status[cam.id]
-        heartbeat.write_text(json.dumps({"at": datetime.now(UTC).isoformat(), "cameras": status}))
-        time.sleep(max(0.0, args.every - (time.monotonic() - started)))
+    Worker(chosen, seconds=args.seconds, every=args.every,
+           emit=lambda sig: print(json.dumps(sig, ensure_ascii=False), flush=True)).forever()
+    return 0
+
+
+def cmd_view(args, cameras) -> int:
+    from .viewer import cmd_view as view
+
+    if args.cameras:
+        for c in args.cameras.split(","):
+            if c.strip():
+                _camera(cameras, c.strip())
+    return view(args, cameras)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -430,10 +398,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cameras", required=True)
     p.add_argument("--seconds", type=float, default=WINDOW_SECONDS)
     p.add_argument("--every", type=float, default=300)
+    p = sub.add_parser("view", help="the worker plus a live page at http://127.0.0.1:PORT")
+    p.add_argument("--cameras", help="comma-separated; default every calibrated camera")
+    p.add_argument("--seconds", type=float, default=WINDOW_SECONDS)
+    p.add_argument("--every", type=float, default=120)
+    p.add_argument("--port", type=int, default=8090)
+    p.add_argument("--json", action="store_true", help="also print each signal")
     args = parser.parse_args(argv)
     cameras = load_cameras()
     handler = {"list": cmd_list, "snapshot": cmd_snapshot, "reference": cmd_reference,
-               "read": cmd_read, "run": cmd_run}[args.cmd]
+               "read": cmd_read, "run": cmd_run, "view": cmd_view}[args.cmd]
     return handler(args, cameras)
 
 

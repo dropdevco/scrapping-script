@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 import unittest.mock
+import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 
@@ -90,3 +91,49 @@ class Routes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Overlay(unittest.TestCase):
+    """"What it measured" is served from the worker's memory, never from disk."""
+
+    def test_the_latest_picture_comes_from_the_worker_and_unknown_cameras_404(self):
+        server = serve(0)
+        server.worker = unittest.mock.Mock(overlays={"lerdo-south-booths": b"fake-jpeg"})
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        with urllib.request.urlopen(base + "/overlay/lerdo-south-booths.jpg?t=1") as r:
+            self.assertEqual((r.headers["Content-Type"], r.read()), ("image/jpeg", b"fake-jpeg"))
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(base + "/overlay/nope.jpg")
+        self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
+
+
+class OneWorkerPerStateDir(unittest.TestCase):
+    def test_a_second_worker_on_the_same_state_dir_refuses_to_start(self):
+        from scraper.border.camera.calibration import load_cameras
+        from scraper.border.camera.worker import AlreadyRunning, Worker
+
+        with tempfile.TemporaryDirectory() as d,                 unittest.mock.patch.dict(os.environ, {"CAMERA_STATE_DIR": d}):
+            cams = [load_cameras()["lerdo-south-booths"]]
+            first = Worker(cams, seconds=60, every=120, alert=False)
+            with self.assertRaises(AlreadyRunning):
+                Worker(cams, seconds=60, every=120, alert=False)
+            first._held.close()                       # the first one stops
+            Worker(cams, seconds=60, every=120, alert=False)._held.close()
+
+    def test_the_page_shows_its_own_workers_status_not_the_shared_file(self):
+        with tempfile.TemporaryDirectory() as d,                 unittest.mock.patch.dict(os.environ, {"CAMERA_STATE_DIR": d}):
+            with open(os.path.join(d, "status.json"), "w", encoding="utf-8") as f:
+                json.dump({"cameras": {"someone-elses": {}}}, f)
+            server = serve(0)
+            server.worker = unittest.mock.Mock(status={"cameras": {"mine": {"phase": "ok"}}},
+                                               _lock=threading.Lock())
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+            url = f"http://127.0.0.1:{server.server_address[1]}/status.json"
+            with urllib.request.urlopen(url) as r:
+                self.assertEqual(list(json.loads(r.read())["cameras"]), ["mine"])

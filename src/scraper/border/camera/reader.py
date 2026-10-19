@@ -355,11 +355,16 @@ def cmd_read(args, cameras) -> int:
 def cmd_run(args, cameras) -> int:
     """The always-on worker: every camera read in parallel every `--every` seconds, forever,
     one JSON signal per lane on stdout. See worker.py."""
-    from .worker import Worker
+    from .worker import AlreadyRunning, Worker
 
     chosen = [_camera(cameras, c.strip()) for c in args.cameras.split(",") if c.strip()]
-    Worker(chosen, seconds=args.seconds, every=args.every,
-           emit=lambda sig: print(json.dumps(sig, ensure_ascii=False), flush=True)).forever()
+    try:
+        worker = Worker(chosen, seconds=args.seconds, every=args.every,
+                        emit=lambda sig: print(json.dumps(sig, ensure_ascii=False), flush=True))
+    except AlreadyRunning as exc:
+        print(exc)
+        return 1
+    worker.forever()
     return 0
 
 

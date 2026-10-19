@@ -17,17 +17,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
+import cv2
+
 from ..cbp import PORTS
 from .calibration import Camera, live_region
 from .measure import LaneEstimate, image_features, plain, rolling
-from .reader import FPS, CameraReader, _state_path, as_signal, state_dir
-from .stream import StreamError, frames, resolve
+from .reader import FPS, CameraReader, _state_path, as_signal, debug_image, state_dir
+from .stream import StreamError, find, frames, resolve
 
 LEARN_CYCLES = 3          # readings of samples before a camera with no learnt road starts estimating
 OPEN_SECONDS = 15         # finding and opening a stream, on top of the video it reads
@@ -75,14 +78,46 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime) -> dic
     })
 
 
+class AlreadyRunning(RuntimeError):
+    pass
+
+
+def hold_lock(path):
+    """Hold an exclusive lock on `path` for as long as the returned file stays open.
+
+    Two workers on one CAMERA_STATE_DIR overwrite each other's status and learn and save the
+    same cameras' references at once; on 2026-10-19 a test viewer and a real one did exactly
+    that and the page showed both sets of cameras, duplicated. The OS releases the lock if the
+    process dies, so a crash never leaves a stale one behind."""
+    handle = open(path, "a+")  # noqa: SIM115 - held open for the life of the worker on purpose
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise AlreadyRunning(f"another camera worker is already running with {path.parent}; "
+                             "stop it first, or give this one its own CAMERA_STATE_DIR") from None
+    return handle
+
+
 class Worker:
     def __init__(self, cameras: list[Camera], seconds: float, every: float,
                  emit: Callable[[dict], None] | None = None, alert: bool = True):
+        state_dir().mkdir(parents=True, exist_ok=True)
+        self._held = hold_lock(state_dir() / "worker.lock")
         self.cameras, self.seconds, self.every = cameras, seconds, every
         self.emit, self.alert = emit, alert
         self.readers = {c.id: CameraReader(c) for c in cameras}
         self.history: dict[tuple[str, str], list] = {}
         self.learnt: dict[str, int] = {}
+        # The latest "what it measured" picture per camera, JPEG bytes, in memory only:
+        # frames are never written to disk (QUESTIONS.md Q-7), this one included.
+        self.overlays: dict[str, bytes] = {}
         self._lock = threading.Lock()
         self.status = {"started_at": _iso(datetime.now(UTC)), "every_s": every,
                        "reading_s": seconds, "cameras": {c.id: self._initial(c) for c in cameras}}
@@ -140,6 +175,11 @@ class Worker:
         url = resolve(cam.channel, cam.title)
         estimates = reader.read(frames(url, FPS, self.seconds, live_region(cam)), save=True)
         observed = datetime.now(UTC)
+        if reader.last_frame is not None:
+            ok, jpeg = cv2.imencode(".jpg", debug_image(reader, estimates),
+                                    [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if ok:
+                self.overlays[cam.id] = jpeg.tobytes()
         lanes = {lane.lane: lane for lane in cam.lanes}
         summaries = []
         for est in estimates:
@@ -163,6 +203,7 @@ class Worker:
         reader = self.readers[cam.id]
         was_down = self.status["cameras"][cam.id]["phase"] == "down"
         try:
+            self._set(cam, video_id=find(cam.channel, cam.title).video_id)
             if not reader.references and not self._has_road(cam):
                 self._learn(cam, reader, started)
             else:

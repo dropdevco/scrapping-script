@@ -30,8 +30,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .calibration import Camera, Strip, live_region, load_cameras
-from .measure import LaneEstimate, LaneWindow, Reference, image_features
+from .calibration import PX_PER_M, Camera, Strip, live_region, load_cameras
+from .measure import BIN_M, LaneEstimate, LaneWindow, Reference, image_features
 from .stream import StreamError, find, frames, resolve
 
 FPS = 2.0                 # two frames a second: a queued car moves well under a metre between them
@@ -51,6 +51,8 @@ class CameraReader:
     def __init__(self, camera: Camera):
         self.camera = camera
         self._strips: dict[str, Strip] = {}
+        self.last_frame: np.ndarray | None = None
+        self.last_windows: dict[str, LaneWindow] = {}
 
     def strips(self, frame: np.ndarray) -> dict[str, Strip]:
         size = (frame.shape[1], frame.shape[0])
@@ -93,6 +95,8 @@ class CameraReader:
             image = image_features(frame)          # once per frame, shared by every lane
             for window in windows.values():
                 window.add(image)
+            self.last_frame = frame
+        self.last_windows = windows
         if save and not references:
             # The references drifted toward the light of this window; keep that, so the next
             # window starts from today's road rather than the night it was learnt in.
@@ -101,6 +105,42 @@ class CameraReader:
                                     edges=window.ref.edges, size=np.array(window.strip.size),
                                     saved_at=np.array(datetime.now(UTC).isoformat()))
         return [w.result() for w in windows.values()]
+
+
+def debug_image(reader: CameraReader, estimates: list[LaneEstimate]) -> np.ndarray:
+    """The last frame with every metre of each lane shaded by how much of the window it was
+    occupied (clear = no tint, red = always), the queue's end marked, and the numbers."""
+    shown = reader.last_frame.copy()
+    tint = shown.copy()
+    for est in estimates:
+        window = reader.last_windows[est.lane]
+        strip = window.strip
+        inverse = np.linalg.inv(strip.matrix)
+        width = strip.size[0]
+        share = est.detail.get("occupied_share", [])
+        step = round(BIN_M * PX_PER_M)
+        for i, value in enumerate(share):
+            a, b = i * step, min((i + 1) * step, strip.size[1])
+            if not strip.rows_valid[a:b].any():
+                continue
+            quad = cv2.perspectiveTransform(np.float32([[(0, a), (width, a), (width, b), (0, b)]]),
+                                            inverse)[0].astype(np.int32)
+            colour = (0, int(255 * (1 - value)), int(255 * value))
+            cv2.fillPoly(tint, [quad], colour)
+        if est.queue_m:
+            r = min(round(est.queue_m * PX_PER_M), strip.size[1] - 1)
+            end = cv2.perspectiveTransform(np.float32([[(0, r), (width, r)]]), inverse)[0]
+            cv2.line(shown, tuple(int(v) for v in end[0]), tuple(int(v) for v in end[1]),
+                     (255, 255, 0), 3)
+    cv2.addWeighted(tint, 0.35, shown, 0.65, 0, shown)
+    y = shown.shape[0] - 12 * (len(estimates) + 1)
+    for est in estimates:
+        speed = "-" if est.speed_m_s is None else f"{est.speed_m_s:.2f} m/s"
+        text = f"{est.lane}: {est.state} queue {est.queue_m:.0f} m speed {speed}"
+        cv2.putText(shown, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 3)
+        cv2.putText(shown, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        y += 14
+    return shown
 
 
 def as_signal(est: LaneEstimate, lane, observed_at: datetime) -> dict:
@@ -173,9 +213,14 @@ def cmd_reference(args, cameras) -> int:
     return 0
 
 
-def _read_once(cam: Camera, source: str | None, seconds: float) -> list[dict]:
+def _read_once(cam: Camera, source: str | None, seconds: float,
+               debug: str | None = None) -> list[dict]:
     started = datetime.now(UTC)
-    estimates = CameraReader(cam).read(frames(_source(cam, source), FPS, seconds, live_region(cam)))
+    reader = CameraReader(cam)
+    estimates = reader.read(frames(_source(cam, source), FPS, seconds, live_region(cam)),
+                            save=source is None)
+    if debug:
+        cv2.imwrite(debug, debug_image(reader, estimates))
     lanes = {lane.lane: lane for lane in cam.lanes}
     return [as_signal(e, lanes[e.lane], started) for e in estimates]
 
@@ -183,7 +228,7 @@ def _read_once(cam: Camera, source: str | None, seconds: float) -> list[dict]:
 def cmd_read(args, cameras) -> int:
     cam = _camera(cameras, args.camera)
     try:
-        signals = _read_once(cam, args.source, args.seconds)
+        signals = _read_once(cam, args.source, args.seconds, args.debug)
     except StreamError as exc:
         print(json.dumps({"camera": cam.id, "error": type(exc).__name__, "detail": str(exc)}))
         return 1
@@ -257,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seconds", type=float, default=WINDOW_SECONDS)
     p.add_argument("--source")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--debug", help="write the last frame with occupancy and queue drawn on")
     p = sub.add_parser("run")
     p.add_argument("--cameras", required=True)
     p.add_argument("--seconds", type=float, default=WINDOW_SECONDS)

@@ -226,7 +226,22 @@ class LaneEstimate:
     detail: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in self.__dict__.items()}
+        return {k: (round(v, 2) if isinstance(v, float) else v)
+                for k, v in plain(self.__dict__).items()}
+
+
+def plain(value):
+    """numpy scalars and arrays as plain Python, so a reading always serialises to JSON.
+    (np.bool_ in `beyond_view` crashed the live worker on its first line of output.)"""
+    if isinstance(value, dict):
+        return {k: plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [plain(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def _queue_run(share: np.ndarray, seen: np.ndarray,
@@ -328,7 +343,7 @@ class LaneWindow:
         detail["queue_head_m"] = first * BIN_M
 
         queue_m = (last + 1) * BIN_M
-        beyond = (visible[-1] - last) * BIN_M < BEYOND_VIEW_M
+        beyond = bool((visible[-1] - last) * BIN_M < BEYOND_VIEW_M)
         # Only segments wholly inside the queue: at its tail, cars joining and gaps opening
         # make the profile change shape rather than move, which correlates as false motion.
         lo, hi = first * BIN_M + SEGMENT_M / 2, queue_m - SEGMENT_M / 2
@@ -385,5 +400,5 @@ def rolling(history: list[tuple[float, LaneEstimate]], now: float,
     wait = None
     if booth_distance_m is not None and speed >= MIN_SPEED_M_S:
         wait = (booth_distance_m + latest.queue_m) / speed / 60
-    return {"speed_m_s": speed, "wait_min": wait, "windows": len(recent),
-            "seconds": seconds, "lower_bound": latest.beyond_view}
+    return plain({"speed_m_s": float(speed), "wait_min": wait, "windows": len(recent),
+                  "seconds": float(seconds), "lower_bound": latest.beyond_view})

@@ -40,6 +40,7 @@ from .measure import (
     Reference,
     foreground,
     image_features,
+    plain,
     rolling,
     strip_features,
 )
@@ -338,7 +339,7 @@ def cmd_read(args, cameras) -> int:
         return 1
     for sig in signals:
         if args.json:
-            print(json.dumps(sig, ensure_ascii=False))
+            print(json.dumps(plain(sig), ensure_ascii=False))
             continue
         ev = sig["evidence"]
         wait = "unknown" if sig["minutes"] is None else f"{sig['minutes']} min"
@@ -389,7 +390,7 @@ def cmd_run(args, cameras) -> int:
                         sig["minutes"] = None if roll["wait_min"] is None else round(roll["wait_min"])
                         sig["low"] = sig["minutes"] if roll.get("lower_bound") else sig["low"]
                         sig["high"] = None if roll.get("lower_bound") else sig["high"]
-                    print(json.dumps(sig, ensure_ascii=False), flush=True)
+                    print(json.dumps(plain(sig), ensure_ascii=False), flush=True)
                 status[cam.id] = "ok"
                 if cam.id in down:
                     asyncio.run(_alert(f"Border camera {cam.id} is back."))

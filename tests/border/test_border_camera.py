@@ -220,3 +220,18 @@ class QueueRuns(unittest.TestCase):
 
     def test_one_parked_object_is_not_a_queue_when_the_booth_is_out_of_view(self):
         self.assertIsNone(self.run_of([0.0] * 20 + [1.0] * 5 + [0.0] * 20, booth_in_view=False))
+
+
+class Serialisation(unittest.TestCase):
+    def test_a_real_reading_serialises_to_json(self):
+        # The live worker's first output line once crashed on a numpy bool.
+        import json
+
+        from scraper.border.camera.reader import as_signal
+
+        cam = camera()
+        est = run(cam, moving_queue(90, lambda t: 0.6))
+        sig = as_signal(est, cam.lanes[0], __import__("datetime").datetime(2026, 10, 19))
+        sig["evidence"]["rolling"] = rolling([(0, est)], now=0, booth_distance_m=0)
+        decoded = json.loads(json.dumps(sig))
+        self.assertIs(decoded["evidence"]["beyond_view"], True)

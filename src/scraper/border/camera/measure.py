@@ -20,7 +20,9 @@ EDGE_LEVEL = 45          # gradient a vehicle's outline adds over the empty road
 OCCUPIED_FRACTION = 0.30 # share of a metre's pixels that must differ; below it is glare or noise
 QUEUED_TIME = 0.5        # a metre occupied at least half the window is queue, not passing traffic
 GAP_M = 9.0              # cars queue a few metres apart; a gap longer than this ends the queue
-QUEUE_DENSITY = 0.6      # share of a queue's metres that must be queued: see result()
+QUEUE_DENSITY = 0.6      # share of a queue's metres that must be queued: see _queue_run()
+RUN_OCCUPANCY = 0.67     # mean share of the window a queue's metres are occupied
+MIN_RUN_M = 10.0         # with the booth out of view, a queue is at least two cars long
 BEYOND_VIEW_M = 4.0      # a queue reaching this close to the last visible metre continues past it
 UPDATE_STEP = 1.5        # grey levels per frame the reference may drift toward an empty pixel
 PROFILE_SIGMA_ROWS = 4   # half a metre of smoothing along the lane
@@ -227,6 +229,53 @@ class LaneEstimate:
         return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in self.__dict__.items()}
 
 
+def _queue_run(share: np.ndarray, seen: np.ndarray,
+               booth_in_view: bool) -> tuple[int, int, float] | None:
+    """(first, last, density) of the queue in this view, in metres from its booth end.
+
+    Runs of queued metres are split wherever a gap is longer than GAP_M. A run is a queue
+    only if it is dense: every real queue labelled on 2026-10-19 was at least 70 % queued
+    metres along its length, every false one islands under 50 % (a vendor's cart, people in
+    the street). It must also be occupied most of the time on average: real queues averaged
+    0.72-1.00 of the window, false runs 0.53-0.62 (a stretch that someone crossed now and
+    then, held just over QUEUED_TIME). With the booth in view the queue must start at it. With the booth out of view
+    it need not: at Lerdo at 07:16 local the cars at the far end had just moved off toward the
+    booth, leaving 15 clear metres at the head of the view, and requiring the queue to touch
+    that edge missed a full lane. There a run must instead be at least MIN_RUN_M long, so one
+    parked object is not a queue.
+    """
+    queued = share >= QUEUED_TIME
+    runs, start, last, gap = [], -1, -1, 0.0
+    for i in range(len(queued)):
+        if not seen[i]:
+            continue                       # out of view: neither extends nor breaks a run
+        if queued[i]:
+            if start < 0:
+                start = i
+            last, gap = i, 0.0
+        elif start >= 0:
+            gap += BIN_M
+            if gap > GAP_M:
+                runs.append((start, last))
+                start, last, gap = -1, -1, 0.0
+    if start >= 0:
+        runs.append((start, last))
+    head = int(np.flatnonzero(seen)[0]) if seen.any() else 0
+    for first, last in runs:
+        span = seen[first:last + 1]
+        if not span.any():
+            continue
+        density = float(queued[first:last + 1][span].mean())
+        if density < QUEUE_DENSITY or float(share[first:last + 1][span].mean()) < RUN_OCCUPANCY:
+            continue
+        if booth_in_view and (first - head) * BIN_M > GAP_M:
+            return None                    # the nearest queue does not reach the booth
+        if not booth_in_view and (last - first + 1) * BIN_M < MIN_RUN_M:
+            continue
+        return first, last, density
+    return None
+
+
 class LaneWindow:
     """Accumulates frames of one lane and turns them into one estimate."""
 
@@ -260,49 +309,31 @@ class LaneWindow:
         bins = _bins(len(self.strip.rows_valid))
         seen = np.array([self.strip.rows_valid[a:b].mean() >= 0.5 for a, b in bins])
         share = np.mean(self.occupied, axis=0)
-        queued = share >= QUEUED_TIME
-        last, gap = -1, 0.0
-        for i in range(len(bins)):
-            if not seen[i]:
-                continue                       # out of view: neither extends nor breaks it
-            if queued[i]:
-                last, gap = i, 0.0
-            else:
-                gap += BIN_M
-                if gap > GAP_M:
-                    break
         visible = np.flatnonzero(seen)
         detail = {"occupied_share": [round(float(s), 2) for s in share],
                   "visible_m": [float(visible[0] * BIN_M), float((visible[-1] + 1) * BIN_M)]
                   if len(visible) else None}
         booth_distance = lane.booth_distance_m
-
-        if last < 0:
+        run = _queue_run(share, seen, booth_in_view=booth_distance == 0)
+        if run is None:
             # Nothing queued at this camera. With the booth in view that is a zero wait; with
             # the booth out of view a queue could still sit between here and it.
             wait = 0.0 if booth_distance == 0 else None
             return LaneEstimate(state="no_queue", wait_min=wait, low_min=wait, high_min=wait,
                                 detail=detail, **base)
-
-        # A queue is dense: car after car. Every real queue labelled on 2026-10-19 was at
-        # least 70 % queued metres along its length; every false one was islands under 50 %
-        # (a vendor's cart, people standing in the street) that the gap rule chained together.
-        first = int(np.flatnonzero(queued & seen)[0])
+        first, last, density = run
         span = seen[first:last + 1]
-        density = float(queued[first:last + 1][span].mean()) if span.any() else 0.0
         detail["queue_density"] = round(density, 2)
-        if density < QUEUE_DENSITY:
-            wait = 0.0 if booth_distance == 0 else None
-            return LaneEstimate(state="no_queue", wait_min=wait, low_min=wait, high_min=wait,
-                                detail=detail, **base)
+        detail["queue_occupancy"] = round(float(share[first:last + 1][span].mean()), 2)
+        detail["queue_head_m"] = first * BIN_M
 
         queue_m = (last + 1) * BIN_M
         beyond = (visible[-1] - last) * BIN_M < BEYOND_VIEW_M
         # Only segments wholly inside the queue: at its tail, cars joining and gaps opening
         # make the profile change shape rather than move, which correlates as false motion.
-        inside = queue_m - SEGMENT_M / 2
-        per_pair = [np.mean([v for centre, v in pair if centre <= inside])
-                    for pair in self.speeds if any(centre <= inside for centre, _ in pair)]
+        lo, hi = first * BIN_M + SEGMENT_M / 2, queue_m - SEGMENT_M / 2
+        per_pair = [np.mean([v for centre, v in pair if lo <= centre <= hi])
+                    for pair in self.speeds if any(lo <= centre <= hi for centre, _ in pair)]
         detail["speed_samples"] = len(per_pair)
         if len(per_pair) < MIN_FRAMES // 2:
             return LaneEstimate(state="insufficient", queue_m=queue_m, beyond_view=beyond,

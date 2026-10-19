@@ -186,3 +186,37 @@ class EmptiestReference(unittest.TestCase):
         held = Reference.from_images(self.strip, [image_features(self.empty)])
         queued = [self.features(f) for f in moving_queue(40, lambda t: 0.0, frames=12)]
         self.assertIsNone(emptiest_reference(queued, self.strip.valid, held))
+
+
+class QueueRuns(unittest.TestCase):
+    """The rules that decide whether a profile of per-metre occupancy is a queue, each from a
+    case seen on real footage on 2026-10-19."""
+
+    def run_of(self, share, booth_in_view):
+        import numpy as np
+
+        from scraper.border.camera.measure import _queue_run
+
+        share = np.array(share, float)
+        return _queue_run(share, np.ones(len(share), bool), booth_in_view)
+
+    def test_a_clear_head_does_not_hide_a_queue_when_the_booth_is_out_of_view(self):
+        # Lerdo, 07:16 local: the first 15 m had just cleared, the rest of the lane was full.
+        share = [0.1] * 15 + [0.95] * 50
+        self.assertEqual(self.run_of(share, booth_in_view=False)[:2], (15, 64))
+
+    def test_with_the_booth_in_view_the_queue_must_reach_it(self):
+        share = [0.1] * 15 + [0.95] * 50
+        self.assertIsNone(self.run_of(share, booth_in_view=True))
+
+    def test_islands_of_clutter_are_not_a_queue(self):
+        # PDN south, 02:36 local: a cart, people standing; dense spots with gaps between.
+        share = ([0.9] * 3 + [0.1] * 4) * 6
+        self.assertIsNone(self.run_of(share, booth_in_view=False))
+
+    def test_a_stretch_held_just_over_the_line_is_not_a_queue(self):
+        # PDN south, 02:56 local: 0.5-0.6 for 10 m, someone crossing now and then.
+        self.assertIsNone(self.run_of([0.0] * 20 + [0.55] * 11 + [0.0] * 20, booth_in_view=False))
+
+    def test_one_parked_object_is_not_a_queue_when_the_booth_is_out_of_view(self):
+        self.assertIsNone(self.run_of([0.0] * 20 + [1.0] * 5 + [0.0] * 20, booth_in_view=False))

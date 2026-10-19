@@ -98,5 +98,72 @@
     "mask": [[0, 0, 355, 55], [0, 55, 236, 250], [295, 90, 155, 55], [1015, 85, 165, 60], [1005, 140, 210, 22]],
     "clock": [0, 0, 300, 28],
     "notes": "Looks south down the Juarez street that feeds the Paso del Norte bridge; the queue faces the camera and drives toward it, so the booth end is the near end and the bridge is behind the camera. No lane markings (cobblestone); the two strips follow the two queue columns seen at 04:56 local on 2026-10-19, left along the barrier fence. Vendors walk between the columns. Width assumed ~9 m."
+  },
+  "bota-south-approach": {
+    "title": "CÃ³rdova - AmÃ©ricas (Sur)",
+    "port_number": "240201",
+    "direction": "north",
+    "frame_size": [1280, 720],
+    "ground": {
+      "image": [[215, 640], [545, 640], [575, 300], [460, 300]],
+      "width_m": 7.0,
+      "length_m": 40.0,
+      "scale_verified": false
+    },
+    "lanes": [
+      {
+        "lane": "lane-1",
+        "across": [0.0, 0.5],
+        "along": [-0.05, 2.2],
+        "booth": "near",
+        "booth_distance_m": null,
+        "cbp_lane": null
+      },
+      {
+        "lane": "lane-2",
+        "across": [0.5, 1.0],
+        "along": [-0.05, 2.2],
+        "booth": "near",
+        "booth_distance_m": null,
+        "cbp_lane": null
+      }
+    ],
+    "mask": [[0, 0, 322, 64], [256, 90, 156, 56], [866, 88, 160, 58], [450, 60, 348, 38], [882, 0, 398, 50]],
+    "clock": [0, 0, 300, 28],
+    "notes": "Looks south down the approach road to the Bridge of the Americas, with the bridge behind the camera. The queue in the left carriageway drives toward the camera: the reader's signed speed was negative in all 15 rounds from 03:16 to 07:56 local on 2026-10-19 with the booth set at the far end, so it is set at the near end. (Red lights seen on these cars at night had suggested the opposite; the measurement overruled that.) Two lanes, width assumed 7 m. The right carriageway carries other traffic and is not calibrated. BOTA is not administered by FPFCH (on-screen banner)."
+  },
+  "lerdo-south-booths": {
+    "title": "Lerdo (Sur)",
+    "port_number": "240204",
+    "direction": "south",
+    "direction_verified": false,
+    "frame_size": [1280, 720],
+    "ground": {
+      "image": [[230, 540], [790, 540], [660, 200], [480, 200]],
+      "width_m": 7.0,
+      "length_m": 40.0,
+      "scale_verified": false
+    },
+    "lanes": [
+      {
+        "lane": "left-lane",
+        "across": [0.0, 0.52],
+        "along": [0.0, 2.0],
+        "booth": "near",
+        "booth_distance_m": 0,
+        "cbp_lane": null
+      },
+      {
+        "lane": "centre-lane",
+        "across": [0.52, 1.0],
+        "along": [0.0, 2.0],
+        "booth": "near",
+        "booth_distance_m": 0,
+        "cbp_lane": null
+      }
+    ],
+    "mask": [[0, 0, 300, 58], [180, 62, 234, 80], [908, 68, 236, 84], [878, 150, 216, 22]],
+    "clock": [0, 0, 300, 28],
+    "notes": "Lerdo, booths in the foreground: cars drive toward the camera and stop at gates staffed by uniformed officers, so the booth end is the near end and the booth is in view (booth_distance_m 0), which makes this the one calibration whose wait does not depend on its unverified scale. Direction is INFERRED as southbound (Mexican customs on arrival in Juarez) from the officers and the flow toward the Juarez end; not confirmed, hence direction_verified false. Two lanes split at the orange divider; width assumed 7 m."
   }
 }

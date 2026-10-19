@@ -219,7 +219,8 @@ def debug_image(reader: CameraReader, estimates: list[LaneEstimate]) -> np.ndarr
     return shown
 
 
-def as_signal(est: LaneEstimate, lane, observed_at: datetime) -> dict:
+def as_signal(est: LaneEstimate, lane, observed_at: datetime,
+              direction_verified: bool = False) -> dict:
     """The estimate in the shape of SPEC.md §3's Signal, kind `measured`. A strip whose CBP
     lane type nobody has confirmed carries `lane: null`, so fusion cannot file it under the
     wrong lane; the strip's own name travels in `evidence`."""
@@ -232,7 +233,8 @@ def as_signal(est: LaneEstimate, lane, observed_at: datetime) -> dict:
         "low": None if est.low_min is None else round(est.low_min),
         "high": None if est.high_min is None else round(est.high_min),
         "observed_at": observed_at.isoformat(), "independent": True,
-        "evidence": est.to_dict(),
+        "evidence": {**est.to_dict(), "lane_verified": lane.lane_verified,
+                     "direction_verified": direction_verified},
     }
 
 
@@ -324,7 +326,7 @@ def _read_once(cam: Camera, source: str | None, seconds: float,
                debug: str | None = None) -> list[dict]:
     started = datetime.now(UTC)
     lanes = {lane.lane: lane for lane in cam.lanes}
-    return [as_signal(e, lanes[e.lane], started) for e in _estimate(cam, source, seconds, debug)]
+    return [as_signal(e, lanes[e.lane], started, cam.direction_verified) for e in _estimate(cam, source, seconds, debug)]
 
 
 def cmd_read(args, cameras) -> int:
@@ -378,7 +380,7 @@ def cmd_run(args, cameras) -> int:
                     past = history.setdefault((cam.id, est.lane), [])
                     past.append((time.monotonic(), est))
                     past[:] = [(t, e) for t, e in past if time.monotonic() - t <= 3600]
-                    sig = as_signal(est, lane, observed)
+                    sig = as_signal(est, lane, observed, cam.direction_verified)
                     # The signal's number is the rolling one: a single window in stop-and-go
                     # traffic is too noisy to publish. The window's own reading stays in evidence.
                     roll = rolling(past, time.monotonic(), lane.booth_distance_m)

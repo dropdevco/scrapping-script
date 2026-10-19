@@ -45,6 +45,7 @@ class Camera:
     title: str                     # the stream's title, how a stream is found on the channel
     port_number: str
     direction: str                 # north | south
+    direction_verified: bool       # False until someone confirms which way this traffic crosses
     frame_size: tuple[int, int]    # the size `ground` points were picked at
     ground: tuple[tuple[float, float], ...]   # near-left, near-right, far-right, far-left
     width_m: float
@@ -77,6 +78,7 @@ def camera_from_dict(cid: str, raw: dict) -> Camera:
         raise ValueError(f"{cid}: direction must be north or south")
     return Camera(
         id=cid, title=raw["title"], port_number=raw["port_number"], direction=raw["direction"],
+        direction_verified=bool(raw.get("direction_verified", False)),
         frame_size=tuple(raw["frame_size"]), ground=ground,
         width_m=float(raw["ground"]["width_m"]), length_m=float(raw["ground"]["length_m"]),
         scale_verified=bool(raw["ground"].get("scale_verified", False)),

@@ -23,7 +23,7 @@ Needs Python 3.11+ and Node.js on `PATH` (yt-dlp uses it to read YouTube). From 
 
 ```bash
 python -m venv .venv
-.venv\Scriptsctivate                     # macOS/Linux: source .venv/bin/activate
+.venv\Scripts\activate                     # macOS/Linux: source .venv/bin/activate
 pip install -e ".[camera]"
 python -m scraper.border camera list         # every calibrated camera, and whether its stream is live
 ```

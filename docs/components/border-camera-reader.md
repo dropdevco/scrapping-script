@@ -135,13 +135,13 @@ Internacional".
 
 | Video id | Title | Port | Status | What it shows (night frames) | Calibrated |
 |---|---|---|---|---|---|
-| `0Pg3S6s76IE` | Paso del Norte (Norte) | 240202 | live | Northbound bridge carriageways from the Juárez end, booths out of view | `pdn-north` (3 lanes) |
+| `0Pg3S6s76IE` | Paso del Norte (Norte) | 240202 | live | Northbound bridge carriageways from the Juárez end, booths out of view | `pdn-north` (5 lanes) |
 | `IcvugJWPXz8` | Paso del Norte (Sur) | 240202 | live | The Juárez street feeding the bridge; the queue drives toward the camera | `pdn-south-street` (2 columns) |
 | `sOHFG6_3zAs` | Lerdo (Norte) | 240204 | live | Northbound roadway on the Lerdo–Stanton bridge | `lerdo-north` |
-| `CYhISA_wFQ8` | Lerdo (Sur) | 240204 | live | Toll booths and lanes; traffic direction not yet confirmed | — |
+| `CYhISA_wFQ8` | Lerdo (Sur) | 240204 | live | Gates staffed by officers, traffic driving toward them; direction inferred southbound, not confirmed | `lerdo-south-booths` (2 lanes, **booth in view**) |
 | `RVXhhbkBGbI` | Lerdo (Fila) | 240204 | live | Labelled "queue view"; which lane is the queue is not identifiable at night | — |
 | `mp3RS0y77tY` | Córdova–Américas (Norte) | 240201 | live | Seen only as a thumbnail so far | — |
-| `CZM5TpXLzE8` | Córdova–Américas (Sur) | 240201 | live | Seen only as a thumbnail so far | — |
+| `CZM5TpXLzE8` | Córdova–Américas (Sur) | 240201 | live | Approach road, bridge behind the camera; the queue drives toward it | `bota-south-approach` (2 lanes) |
 | `Y3OESQEXBlI` | Córdova–Américas (Av. Rafael Pérez Serna) | 240201 | live | Seen only as a thumbnail so far | — |
 | `o5h9RB7qwY8` | Zaragoza (Av. Waterfill) – Vista Sur | 240203 | live | Seen only as a thumbnail so far | — |
 | `ZZFgkly8XyE` | Zaragoza (Av. Waterfill) | 240203 | down | — | — |
@@ -167,8 +167,26 @@ bridge is not administered by FPFCH.
 | Speed on real footage | First and last frames of each clip compared by eye | Stalled lanes read 0.00–0.03 m/s; a lane that advanced about one car length (7–10 m) in 44 s read 0.16–0.23 m/s. Absolute metres are nominal until a calibration's scale is verified |
 | Lane types, booth distances, scale | Not verified for any camera | All `null` / `false` in `cameras.json` |
 
+| Daylight and dawn | Lerdo–Stanton northbound (`lerdo-north`), empty overnight and queued once the port opened at 6 a.m.; replayed the way the worker runs from 03:16 to 07:56 local | 15/15 rounds right, through the change from streetlight to sun |
+| Direction, measured | Signed speed toward the booth across 15 rounds | `bota-south-approach` was first set the wrong way round (red lights at night suggested it); speed was negative every round, so it was flipped. `lerdo-south-booths` positive every round |
+| A complete wait | `lerdo-south-booths`, booth in view so scale cancels | Empty until 06:36 local, then waits of 1.0–7.6 min |
+| The live worker | `camera run` on PDN north and the Lerdo booths for five minutes | Four cycles, rolling speeds accumulating, heartbeat written; its first run found a JSON crash, now fixed and tested |
+
+**Known risks:**
+- **Low sun.** Long shadows of railings and gantries are structure too. At 08:40 local they lit
+  patches of PDN's empty left lanes as "occupied"; the run-occupancy rule kept that from becoming
+  a queue, and the worker's hourly refresh should learn the shadows, but it has not been watched
+  through a full day.
+- **PDN `lane-5`** reads only a short stalled stretch where daylight frames show more cars: it
+  under-reads and is not validated.
+
 **Not yet done:**
-- Daylight footage: sharp shadows are structure too, and they move with the sun.
+- **Booth distances.** No calibration except `lerdo-south-booths` can turn a queue into minutes
+  until `booth_distance_m` is measured on a map, from each strip's booth-end row to the CBP booth.
+- Confirming lane types (`cbp_lane`), directions (`direction_verified`) and scales.
+- BOTA north, Lerdo (Fila), BOTA (Av. Rafael Pérez Serna) and the Zaragoza avenue view are live but
+  not calibrated. Every Zaragoza bridge stream and both Guadalupe–Tornillo streams were down all
+  morning.
 - Grading against timed crossings (needs Phase 3).
 - Calibrating the remaining live cameras.
 - Measuring booth distances.

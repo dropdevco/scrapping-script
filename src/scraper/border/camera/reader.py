@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import time
+from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,79 +32,154 @@ import cv2
 import numpy as np
 
 from .calibration import PX_PER_M, Camera, Strip, live_region, load_cameras
-from .measure import BIN_M, LaneEstimate, LaneWindow, Reference, image_features, rolling
+from .measure import (
+    BIN_M,
+    Image,
+    LaneEstimate,
+    LaneWindow,
+    Reference,
+    foreground,
+    image_features,
+    rolling,
+    strip_features,
+)
 from .stream import StreamError, find, frames, resolve
 
 FPS = 2.0                 # two frames a second: a queued car moves well under a metre between them
 WINDOW_SECONDS = 60
-REFERENCE_SECONDS = 60
+REFERENCE_SECONDS = 20
 
 
 def state_dir() -> Path:
     return Path(os.environ.get("CAMERA_STATE_DIR") or Path.home() / ".chisme" / "camera")
 
 
-def _ref_path(camera: Camera, lane: str) -> Path:
-    return state_dir() / f"{camera.id}.{lane}.reference.npz"
+EMPTY_MAX = 0.12          # share of a lane that may differ for a sample to count as "empty"
+EMPTY_MIN_SAMPLES = 4     # fewer empty samples than this and the old reference is kept
+
+
+def emptiest_reference(samples: list[tuple[np.ndarray, np.ndarray]], valid: np.ndarray,
+                       current: Reference | None) -> Reference | None:
+    """The road, learnt only from the moments the lane was (nearly) empty.
+
+    A plain median over moments learns cars once the lane is queued more than half the time,
+    and Paso del Norte northbound was queued from 03:16 local on: a reference learnt from
+    three queued rounds out of five showed car shapes, and the empty street read as a queue.
+    So: start from the median (or the reference already held), score every sample by how much
+    of the lane differs from it, keep the near-empty ones and take their median, three times.
+    When no sample is near-empty — a lane queued all hour — the reference already held is
+    kept rather than replaced by a picture of the queue. Returns None to mean "keep it"."""
+    if not samples:
+        return None
+    ref = current or Reference.from_strips(samples)
+    for _ in range(3):
+        scores = [float(foreground(g, e, ref, valid)[valid].mean()) for g, e in samples]
+        empty = [s for s, score in zip(samples, scores) if score <= EMPTY_MAX]
+        if len(empty) < EMPTY_MIN_SAMPLES:
+            if current is not None:
+                return None
+            ranked = sorted(zip(scores, range(len(samples))))
+            empty = [samples[i] for _, i in ranked[:EMPTY_MIN_SAMPLES]]
+        ref = Reference.from_strips(empty)
+    return ref
+
+
+def _state_path(camera: Camera, name: str) -> Path:
+    return state_dir() / f"{camera.id}.{name}.npz"
+
+
+BANK_SIZE = 36            # in-memory lane samples for self-refreshing references: ~1 h at 3 a window
+BANK_MIN = 18             # rebuild once the bank spans ~30 minutes of separate moments
+SAMPLES_PER_WINDOW = 3
 
 
 class CameraReader:
+    """One camera: its lane strips and their empty-road references.
+
+    References are learnt from moments spread across time, never from one clip (see
+    Reference.from_strips), and the worker keeps refreshing them from a small in-memory bank
+    of lane samples. Only the medians are written to CAMERA_STATE_DIR; no frame is."""
+
     def __init__(self, camera: Camera):
         self.camera = camera
         self._strips: dict[str, Strip] = {}
+        self.references: dict[str, Reference] = {}
+        self.bank: deque = deque(maxlen=BANK_SIZE)
         self.last_frame: np.ndarray | None = None
         self.last_windows: dict[str, LaneWindow] = {}
 
-    def strips(self, frame: np.ndarray) -> dict[str, Strip]:
-        size = (frame.shape[1], frame.shape[0])
+    def strips(self, size: tuple[int, int]) -> dict[str, Strip]:
         if not self._strips or next(iter(self._strips.values())).frame_size != size:
             self._strips = {lane.lane: Strip(self.camera, lane, size) for lane in self.camera.lanes}
         return self._strips
 
-    def learn_reference(self, source_frames: list[np.ndarray]) -> dict[str, Reference]:
-        """Per-pixel median of frames of a clear road. Run it when the lanes are empty or
-        flowing freely: a median over a standing queue learns the queue as road."""
-        images = [image_features(f) for f in source_frames]
-        refs = {}
-        for lane, strip in self.strips(source_frames[0]).items():
-            refs[lane] = Reference.from_images(strip, images)
-            path = _ref_path(self.camera, lane)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(path, grey=refs[lane].image, edges=refs[lane].edges,
-                                size=np.array(strip.size),
-                                saved_at=np.array(datetime.now(UTC).isoformat()))
-        return refs
+    def _sample(self, image: Image) -> tuple:
+        size = (image.grey.shape[1], image.grey.shape[0])
+        lanes = {lane: tuple(x.astype(np.float16) for x in strip_features(strip, image))
+                 for lane, strip in self.strips(size).items()}
+        return size, lanes
 
-    def stored_reference(self, lane: str, strip: Strip) -> Reference:
-        path = _ref_path(self.camera, lane)
-        if not path.exists():
-            raise FileNotFoundError(f"no empty-road reference for {self.camera.id}/{lane}: "
-                                    f"run `camera reference --camera {self.camera.id}` while it is clear")
-        data = np.load(path)
-        if tuple(data["size"]) != strip.size:
-            raise ValueError(f"{path.name} was learnt for a different calibration; relearn it")
-        return Reference(data["grey"], data["edges"])
+    def _rebuild(self) -> None:
+        size = self.bank[-1][0]
+        samples = [lanes for s, lanes in self.bank if s == size]
+        for lane, strip in self.strips(size).items():
+            ref = emptiest_reference([(g.astype(np.float32), e.astype(np.float32))
+                                      for g, e in (s[lane] for s in samples)],
+                                     strip.valid, self.references.get(lane))
+            if ref is not None:
+                self.references[lane] = ref
 
-    def read(self, source_frames, references: dict[str, Reference] | None = None,
-             save: bool = True) -> list[LaneEstimate]:
+    def learn(self, images: list[Image]) -> None:
+        """Learn the scene and every lane's empty road from images taken at separate moments."""
+        self.bank.extend(self._sample(image) for image in images)
+        self._rebuild()
+
+    def save(self) -> None:
+        state_dir().mkdir(parents=True, exist_ok=True)
+        stamp = np.array(datetime.now(UTC).isoformat())
+        for lane, ref in self.references.items():
+            np.savez_compressed(_state_path(self.camera, f"{lane}.reference"), grey=ref.image,
+                                edges=ref.edges, size=np.array(self._strips[lane].size),
+                                saved_at=stamp)
+
+    def load(self, size: tuple[int, int]) -> None:
+        for lane, strip in self.strips(size).items():
+            path = _state_path(self.camera, f"{lane}.reference")
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"no learnt road for {self.camera.id}/{lane}: run `camera reference --camera "
+                    f"{self.camera.id} --rounds 6` (or --source with several clips)")
+            ref = np.load(path)
+            if tuple(ref["size"]) != strip.size:
+                raise ValueError(f"{self.camera.id}/{lane} was learnt for a different "
+                                 "calibration; relearn it")
+            self.references[lane] = Reference(ref["grey"], ref["edges"])
+
+    def read(self, source_frames, save: bool = True) -> list[LaneEstimate]:
         windows: dict[str, LaneWindow] = {}
+        raw_images: list[Image] = []
         for frame in source_frames:
+            raw = image_features(frame)            # once per frame, shared by every lane
             if not windows:
-                for lane, strip in self.strips(frame).items():
-                    ref = (references or {}).get(lane) or self.stored_reference(lane, strip)
-                    windows[lane] = LaneWindow(strip, ref, 1 / FPS)
-            image = image_features(frame)          # once per frame, shared by every lane
+                size = (frame.shape[1], frame.shape[0])
+                if not self.references:
+                    self.load(size)
+                windows = {lane: LaneWindow(strip, Reference(self.references[lane].image.copy(),
+                                                             self.references[lane].edges.copy()),
+                                            1 / FPS)
+                           for lane, strip in self.strips(size).items()}
             for window in windows.values():
-                window.add(image)
+                window.add(raw)
+            raw_images.append(raw)
             self.last_frame = frame
         self.last_windows = windows
-        if save and not references:
-            # The references drifted toward the light of this window; keep that, so the next
-            # window starts from today's road rather than the night it was learnt in.
-            for lane, window in windows.items():
-                np.savez_compressed(_ref_path(self.camera, lane), grey=window.ref.image,
-                                    edges=window.ref.edges, size=np.array(window.strip.size),
-                                    saved_at=np.array(datetime.now(UTC).isoformat()))
+        if raw_images:
+            step = max(1, len(raw_images) // SAMPLES_PER_WINDOW)
+            self.bank.extend(self._sample(im) for im in raw_images[::step][:SAMPLES_PER_WINDOW])
+            if len(self.bank) >= BANK_MIN:
+                self._rebuild()
+                if save:
+                    self.save()
         return [w.result() for w in windows.values()]
 
 
@@ -194,7 +270,7 @@ def cmd_snapshot(args, cameras) -> int:
                       (round((x + w) * sx), round((y + h) * sy)), (0, 0, 200), 2)
     ground = np.int32([[x * sx, y * sy] for x, y in cam.ground])
     cv2.polylines(shown, [ground], True, (0, 255, 255), 2)
-    for name, strip in reader.strips(frame).items():
+    for name, strip in reader.strips((frame.shape[1], frame.shape[0])).items():
         outline = np.int32(strip.outline())
         cv2.polylines(shown, [outline], True, (0, 220, 0), 2)
         cv2.putText(shown, f"{name} booth", tuple(int(v) for v in outline[0]),
@@ -206,10 +282,31 @@ def cmd_snapshot(args, cameras) -> int:
 
 
 def cmd_reference(args, cameras) -> int:
+    """Learn the road from moments spread across time: several recorded clips (--source, may
+    repeat), or --rounds live samples --gap seconds apart. One moment is refused: a median
+    over a single moment learns whatever stood in the lane then."""
     cam = _camera(cameras, args.camera)
-    got = list(frames(_source(cam, args.source), FPS, args.seconds, live_region(cam)))
-    CameraReader(cam).learn_reference(got)
-    print(f"learnt the empty road for {cam.id} from {len(got)} frames into {state_dir()}")
+    sources = args.source or []
+    if len(sources) < 2 and args.rounds < 2:
+        raise SystemExit("learn from at least two moments: --source CLIP twice or more, "
+                         "or --rounds N (N >= 2) on the live stream")
+    images: list[Image] = []
+    if sources:
+        for src in sources:
+            for i, frame in enumerate(frames(src, FPS, args.seconds, live_region(cam))):
+                if i % 8 == 0:
+                    images.append(image_features(frame))
+    else:
+        for n in range(args.rounds):
+            if n:
+                time.sleep(args.gap)
+            got = list(frames(_source(cam, None), FPS, args.seconds, live_region(cam)))
+            images.extend(image_features(f) for f in got[::8])
+            print(f"round {n + 1}/{args.rounds}: {len(got)} frames", flush=True)
+    reader = CameraReader(cam)
+    reader.learn(images)
+    reader.save()
+    print(f"learnt the road for {cam.id} from {len(images)} samples into {state_dir()}")
     return 0
 
 
@@ -317,7 +414,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("reference")
     p.add_argument("--camera", required=True)
     p.add_argument("--seconds", type=float, default=REFERENCE_SECONDS)
-    p.add_argument("--source")
+    p.add_argument("--source", action="append", help="a recorded clip; repeat for each moment")
+    p.add_argument("--rounds", type=int, default=0, help="live samples to take")
+    p.add_argument("--gap", type=float, default=600, help="seconds between live samples")
     p = sub.add_parser("read")
     p.add_argument("--camera", required=True)
     p.add_argument("--seconds", type=float, default=WINDOW_SECONDS)

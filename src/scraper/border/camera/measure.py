@@ -14,11 +14,13 @@ import numpy as np
 from .calibration import PX_PER_M, Strip
 
 BIN_M = 1.0              # occupancy is decided per metre of lane
+HIGHPASS_M = 1.0         # structure scale: smoother than this is light, not a vehicle
 DIFF_LEVEL = 24          # grey levels from the empty road before a pixel counts as "something"
 EDGE_LEVEL = 45          # gradient a vehicle's outline adds over the empty road's own texture
 OCCUPIED_FRACTION = 0.30 # share of a metre's pixels that must differ; below it is glare or noise
 QUEUED_TIME = 0.5        # a metre occupied at least half the window is queue, not passing traffic
 GAP_M = 9.0              # cars queue a few metres apart; a gap longer than this ends the queue
+QUEUE_DENSITY = 0.6      # share of a queue's metres that must be queued: see result()
 BEYOND_VIEW_M = 4.0      # a queue reaching this close to the last visible metre continues past it
 UPDATE_STEP = 1.5        # grey levels per frame the reference may drift toward an empty pixel
 PROFILE_SIGMA_ROWS = 4   # half a metre of smoothing along the lane
@@ -57,7 +59,24 @@ def image_features(frame_bgr: np.ndarray) -> Image:
 
 
 def strip_features(strip: Strip, image: Image) -> tuple[np.ndarray, np.ndarray]:
-    return strip.warp(image.grey), strip.warp(image.edges)
+    """A lane's grey *structure* and edge strength, in strip pixels.
+
+    Structure is the grey level minus a HIGHPASS_M blur of itself, taken in the strip so the
+    blur is the same size in metres near the camera and far from it. At night the empty road
+    has no single brightness: the headlights of whatever is queued nearby light the
+    cobblestones, so the same empty Paso del Norte (Sur) street read up to 24 levels darker or
+    brighter than its reference from one 20-minute round to the next, and a plain difference
+    called it a queue. Removing everything smoother than a couple of metres drops what light
+    does and keeps what a vehicle adds. (A blur fixed in image pixels was tried first: it was
+    narrower than a car close to the camera, filtered the car's body away, and lost the queue.)
+    The blur is normalised by the strip's valid area so the black border around it does not
+    leak in."""
+    g = strip.warp(image.grey)
+    weight = strip.valid.astype(np.float32)
+    sigma = HIGHPASS_M * PX_PER_M
+    smooth = cv2.GaussianBlur(g * weight, (0, 0), sigma) / np.maximum(
+        cv2.GaussianBlur(weight, (0, 0), sigma), 1e-3)
+    return (g - smooth + 128.0) * weight, strip.warp(image.edges)
 
 
 class Reference:
@@ -75,9 +94,16 @@ class Reference:
 
     @classmethod
     def from_images(cls, strip: Strip, images: list[Image]) -> Reference:
-        warped = [strip_features(strip, image) for image in images]
-        return cls(np.median(np.stack([g for g, _ in warped]), axis=0),
-                   np.median(np.stack([e for _, e in warped]), axis=0))
+        return cls.from_strips([strip_features(strip, image) for image in images])
+
+    @classmethod
+    def from_strips(cls, warped: list[tuple[np.ndarray, np.ndarray]]) -> Reference:
+        """Per-pixel median over moments spread across time. Measured on 2026-10-19: nine
+        moments 20 minutes apart gave a clean empty road for Paso del Norte northbound even
+        though six of the nine were queued, because no one car sits in a pixel for long. A
+        median over one 45-second clip learnt a waiting queue as road."""
+        return cls(np.median(np.stack([g for g, _ in warped]).astype(np.float32), axis=0),
+                   np.median(np.stack([e for _, e in warped]).astype(np.float32), axis=0))
 
     def update(self, g: np.ndarray, e: np.ndarray, free: np.ndarray) -> None:
         self.image[free] += np.clip(g - self.image, -UPDATE_STEP, UPDATE_STEP)[free]
@@ -254,6 +280,18 @@ class LaneWindow:
         if last < 0:
             # Nothing queued at this camera. With the booth in view that is a zero wait; with
             # the booth out of view a queue could still sit between here and it.
+            wait = 0.0 if booth_distance == 0 else None
+            return LaneEstimate(state="no_queue", wait_min=wait, low_min=wait, high_min=wait,
+                                detail=detail, **base)
+
+        # A queue is dense: car after car. Every real queue labelled on 2026-10-19 was at
+        # least 70 % queued metres along its length; every false one was islands under 50 %
+        # (a vendor's cart, people standing in the street) that the gap rule chained together.
+        first = int(np.flatnonzero(queued & seen)[0])
+        span = seen[first:last + 1]
+        density = float(queued[first:last + 1][span].mean()) if span.any() else 0.0
+        detail["queue_density"] = round(density, 2)
+        if density < QUEUE_DENSITY:
             wait = 0.0 if booth_distance == 0 else None
             return LaneEstimate(state="no_queue", wait_min=wait, low_min=wait, high_min=wait,
                                 detail=detail, **base)

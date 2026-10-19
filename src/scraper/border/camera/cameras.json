@@ -65,5 +65,38 @@
     "mask": [[0, 0, 300, 58], [182, 90, 234, 82], [868, 90, 236, 102], [876, 172, 210, 20]],
     "notes": "Looks north along the Lerdo-Stanton bridge from the Juarez end. right-roadway is the straight stretch between the bollard line and the orange right curb, with the northbound arrow; width assumed two lanes (7 m). CBP names this port 'Stanton DCL', but which lane type the strip is has not been confirmed. Below y=380 the roadway curves left toward the camera and is not covered by the straight strip.",
     "clock": [0, 0, 300, 28]
+  },
+  "pdn-south-street": {
+    "title": "Paso del Norte (Sur)",
+    "port_number": "240202",
+    "direction": "north",
+    "frame_size": [1280, 720],
+    "ground": {
+      "image": [[470, 560], [980, 560], [830, 180], [545, 180]],
+      "width_m": 9.0,
+      "length_m": 30.0,
+      "scale_verified": false
+    },
+    "lanes": [
+      {
+        "lane": "left-column",
+        "across": [0.0, 0.33],
+        "along": [-0.1, 1.6],
+        "booth": "near",
+        "booth_distance_m": null,
+        "cbp_lane": null
+      },
+      {
+        "lane": "right-column",
+        "across": [0.33, 1.0],
+        "along": [-0.1, 1.6],
+        "booth": "near",
+        "booth_distance_m": null,
+        "cbp_lane": null
+      }
+    ],
+    "mask": [[0, 0, 355, 55], [0, 55, 236, 250], [295, 90, 155, 55], [1015, 85, 165, 60], [1005, 140, 210, 22]],
+    "clock": [0, 0, 300, 28],
+    "notes": "Looks south down the Juarez street that feeds the Paso del Norte bridge; the queue faces the camera and drives toward it, so the booth end is the near end and the bridge is behind the camera. No lane markings (cobblestone); the two strips follow the two queue columns seen at 04:56 local on 2026-10-19, left along the barrier fence. Vendors walk between the columns. Width assumed ~9 m."
   }
 }

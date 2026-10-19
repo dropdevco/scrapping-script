@@ -153,3 +153,36 @@ class Determinism(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmptiestReference(unittest.TestCase):
+    """The road is learnt from the moments the lane was empty, even when it was queued most
+    of the time, and an all-queued hour never overwrites a good reference."""
+
+    def setUp(self):
+        from scraper.border.camera.measure import strip_features
+
+        self.cam = camera()
+        self.strip = Strip(self.cam, self.cam.lanes[0], FRAME)
+        self.empty = Scene().render([])
+        self.features = lambda f: strip_features(self.strip, image_features(f))
+
+    def test_a_mostly_queued_hour_still_learns_the_road(self):
+        from scraper.border.camera.reader import emptiest_reference
+
+        # Twelve moments of a moving queue (different cars each time), five of an empty lane.
+        # A queue that never moved all hour is indistinguishable from paint, so not tested.
+        queued = [self.features(f) for f in moving_queue(40, lambda t: 0.6, frames=96)[::8]]
+        empty = [self.features(self.empty) for _ in range(5)]
+        ref = emptiest_reference(queued + empty, self.strip.valid, None)
+        window = LaneWindow(self.strip, ref, DT)
+        for f in [self.empty] * 30:
+            window.add(f)
+        self.assertEqual(window.result().state, "no_queue")
+
+    def test_an_hour_with_no_empty_moment_keeps_the_reference_held(self):
+        from scraper.border.camera.reader import emptiest_reference
+
+        held = Reference.from_images(self.strip, [image_features(self.empty)])
+        queued = [self.features(f) for f in moving_queue(40, lambda t: 0.0, frames=12)]
+        self.assertIsNone(emptiest_reference(queued, self.strip.valid, held))

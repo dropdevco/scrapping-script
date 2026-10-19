@@ -29,6 +29,7 @@ import numpy as np
 FORMAT = "bestvideo[height<=480]/bestvideo"   # 480p is plenty for metres of queue; less to pull
 FROZEN_SECONDS = 20       # an unchanging picture this long is a stalled encoder, not a quiet road
 FROZEN_DIFF = 1.0         # mean grey-level change below which two frames are "the same picture"
+BLACK_LEVEL = 12          # mean grey below this is an encoder sending black, not a dark road
 FROZEN_CHANGED = 0.1      # frozen when at most this share of a window's frames changed: keyframes
 LISTING_TTL = 600         # a channel's stream list is re-read at most every ten minutes
 
@@ -158,7 +159,10 @@ def frames(url: str, fps: float, seconds: float,
                 # Judged over the whole window, not a run of identical frames: a frozen
                 # stream is still re-encoded, and every keyframe changes the picture a little.
                 if len(changes) == frozen_limit and sum(changes) <= FROZEN_CHANGED * frozen_limit:
-                    raise StreamFrozen(f"the picture has not changed for {FROZEN_SECONDS}s")
+                    # Seen live: Zaragoza (Av. Waterfill) came back at 10:16 UTC on 2026-10-19
+                    # serving solid black for 20 s, then dropped again. Say which it is.
+                    what = "is black" if float(frame.mean()) < BLACK_LEVEL else "has not changed"
+                    raise StreamFrozen(f"the picture {what} for {FROZEN_SECONDS}s")
                 n += 1
                 yield frame
             i += 1

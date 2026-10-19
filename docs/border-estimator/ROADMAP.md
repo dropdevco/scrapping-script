@@ -101,13 +101,13 @@ Built in the approved order: **Telegram → website → Instagram → WhatsApp**
 
 | # | Step | Done when | Blocked by |
 |---|---|---|---|
-| 6.1 | Inventory the FPFCH YouTube streams (`youtube.com/@fpfch/streams`) and any other bridge streams: which bridge, direction and lanes each shows, and whether it is live 24/7 | Stream table with evidence | — |
+| 6.1 | ~~Inventory the FPFCH YouTube streams~~ **Done 2026-10-19**: 16 streams, 9 live and 7 down ("technical difficulties"); none at Santa Teresa. Table in [border-camera-reader.md](../components/border-camera-reader.md#stream-inventory-roadmap-step-61) | Stream table with evidence | — |
 | 6.2 | Set up the worker on **a machine we own**: resolve streams from the channel (not hard-coded ids), heartbeat to `/health`, Telegram alert on a dead or blocked stream | The heartbeat shows up; a killed stream triggers an alert | Machine access |
 | 6.3 | Calibrate each camera: booth line, tail zone, lane polygons, car spacing | Calibration file per camera, checked against footage | 6.1 |
-| 6.4 | Count cars crossing the booth line → `μ`; track the tail → `v_q`; produce a `measured` Signal (SPEC §5.1). Frames are analysed in memory and never stored | Validated against timed crossings | 6.2, 6.3 |
+| 6.4 | Measure queue length and queue speed → `measured` Signal (SPEC §5.1). Frames are analysed in memory and never stored. **Built 2026-10-19** (`src/scraper/border/camera/`, commit `19035e9`) as queue occupancy + time-averaged speed (Little's law) rather than booth-line counting, because no camera sees a CBP booth; validated on rendered queues, not yet on real ones | Validated against timed crossings | 6.3 |
 
-The detection library is **not chosen**. That needs a spike on real footage once 6.1 lands. **[A]** Do
-not pick one blind.
+No detection library or model is used: the reader is plain OpenCV image arithmetic, chosen so every
+reading is reproducible (see the component doc).
 
 ## Phase 7: Go live, bridge by bridge
 

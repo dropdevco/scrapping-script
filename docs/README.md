@@ -53,6 +53,7 @@ the only documents everyone is expected to have read.
 | [components/web-app.md](components/web-app.md) | `web/` — Next.js 16 site, admin surfaces, auth, map, i18n, design system |
 | [components/knowledge-base-export.md](components/knowledge-base-export.md) | `src/scraper/kb/` — the Google Sheet that grounds the GoHighLevel bot |
 | [components/border-wait-times.md](components/border-wait-times.md) | `src/scraper/border/` — live bridge wait times, the 10-minute `border-poll`, the crossing-times sheet tab |
+| [components/border-camera-reader.md](components/border-camera-reader.md) | `src/scraper/border/camera/` — deterministic queue length and speed from the bridge cameras, calibration, stream inventory |
 | [border-estimator/](border-estimator/README.md) | **Proposal** — weighted wait-time estimator (cameras, Maps, sites, crowd): spec, roadmap, open questions |
 
 ### Data

@@ -17,6 +17,39 @@ always give the same answer, so any reading can be reproduced from a recording.
 
 ---
 
+## Run it
+
+Needs Python 3.11+ and Node.js on `PATH` (yt-dlp uses it to read YouTube). From the repo root:
+
+```bash
+python -m venv .venv
+.venv\Scriptsctivate                     # macOS/Linux: source .venv/bin/activate
+pip install -e ".[camera]"
+python -m scraper.border camera list         # every calibrated camera, and whether its stream is live
+```
+
+**First, once per camera, learn the empty road** from moments spread over time (an hour here):
+
+```bash
+python -m scraper.border camera reference --camera lerdo-south-booths --rounds 6 --gap 600
+```
+
+Then:
+
+```bash
+python -m scraper.border camera read --camera lerdo-south-booths            # one 60 s reading
+python -m scraper.border camera read --camera pdn-north --debug pdn.jpg      # plus a picture of what it saw
+python -m scraper.border camera run --cameras pdn-north,lerdo-south-booths  # the always-on worker
+```
+
+`run` prints one JSON signal per lane every 5 minutes, writes `heartbeat.json` and the learnt
+references to `CAMERA_STATE_DIR` (default `~/.chisme/camera`), and alerts Telegram when a stream
+goes down or comes back if `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. A wait in
+minutes appears only for lanes whose `booth_distance_m` is known; today that is
+`lerdo-south-booths`.
+
+---
+
 ## How a wait is read
 
 ```

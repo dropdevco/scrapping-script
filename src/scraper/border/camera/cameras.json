@@ -54,7 +54,7 @@
       }
     ],
     "mask": [[0, 0, 900, 58], [230, 64, 218, 112], [828, 64, 218, 112], [448, 196, 342, 96], [500, 290, 212, 22]],
-    "notes": "Looks north up the bridge from the Juarez end; the US booths are past the far end, out of view. lane-1..lane-3 (left to right) split the carriageway between the yellow left curb and the white bollard line into equal thirds (width assumed 3 x 3.5 m). They are read separately because they queue separately: at 03:16 local on 2026-10-19 only the middle lane was queued. The lane between the bollards and the orange barrels, and the one right of them, are not calibrated yet. The Feliz Viaje sign hides the road behind it and is masked. lane-4 runs between the white bollards and the orange barrels, lane-5 between the barrels and the right curb; their edges were mapped through this rectangle's homography on a daylight frame (bollards at 1.00 of the width at every depth, curb 1.79-1.89, barrels tapering 1.45 to 1.25 where they end). At 08:40 local on 2026-10-19 the queue had moved from lanes 1-3 to these two.",
+    "notes": "Looks north up the bridge from the Juarez end; the US booths are past the far end, out of view. lane-1..lane-3 (left to right) split the carriageway between the yellow left curb and the white bollard line into equal thirds (width assumed 3 x 3.5 m). They are read separately because they queue separately: at 03:16 local on 2026-10-19 only the middle lane was queued. The Feliz Viaje sign hides the road behind it and is masked. lane-4 runs between the white bollards and the orange barrels, lane-5 between the barrels and the right curb; their edges were mapped through this rectangle's homography on a daylight frame (bollards at 1.00 of the width at every depth, curb 1.79-1.89, barrels tapering 1.45 to 1.25 where they end). At 08:40 local on 2026-10-19 the queue had moved from lanes 1-3 to these two.",
     "clock": [0, 0, 300, 28]
   },
   "lerdo-north": {
@@ -116,7 +116,7 @@
     "notes": "Looks south down the Juarez street that feeds the Paso del Norte bridge; the queue faces the camera and drives toward it, so the booth end is the near end and the bridge is behind the camera. No lane markings (cobblestone); the two strips follow the two queue columns seen at 04:56 local on 2026-10-19, left along the barrier fence. Vendors walk between the columns. Width assumed ~9 m."
   },
   "bota-south-approach": {
-    "title": "CÃ³rdova - AmÃ©ricas (Sur)",
+    "title": "Córdova - Américas (Sur)",
     "port_number": "240201",
     "direction": "north",
     "frame_size": [1280, 720],

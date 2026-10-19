@@ -114,6 +114,13 @@ class CalibrationFile(unittest.TestCase):
                 self.assertLessEqual(x + w, cam.frame_size[0], cam.id)
                 self.assertLessEqual(y + h, cam.frame_size[1], cam.id)
 
+    def test_titles_are_real_text_not_mojibake(self):
+        # bota-south-approach was once saved as "CÃ³rdova" (UTF-8 read as cp1252): replays
+        # from recorded clips never noticed, but the live stream could never have been found.
+        for cam in load_cameras().values():
+            self.assertNotIn("Ã", cam.title, cam.id)
+            self.assertNotIn("Ã", cam.notes, cam.id)
+
     def test_bad_values_are_refused(self):
         raw = {"title": "t", "port_number": "1", "direction": "north", "frame_size": [10, 10],
                "ground": {"image": [[0, 9], [9, 9], [6, 2], [3, 2]], "width_m": 3, "length_m": 9},

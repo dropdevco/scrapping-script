@@ -6,22 +6,29 @@ aggregate a window. Tolerances are what a crosser would notice, not what flatter
 """
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+import unittest.mock
 
+import numpy as np
 import pytest
 
 pytest.importorskip("cv2")
 
 from camera_scene import FRAME, Scene, camera, queue_fronts
 
-from scraper.border.camera.calibration import Strip
+from scraper.border.camera.calibration import Strip, camera_from_dict
 from scraper.border.camera.measure import (
+    SCALE_SLACK,
     LaneEstimate,
     LaneWindow,
     Reference,
     image_features,
     rolling,
+    wait_bounds,
 )
+from scraper.border.camera.reader import CameraReader, _state_path
 
 DT = 0.5
 FRAMES = 120
@@ -151,8 +158,6 @@ class Determinism(unittest.TestCase):
         self.assertAlmostEqual(wrong.wait_min, right.wait_min, delta=0.1 * right.wait_min)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class EmptiestReference(unittest.TestCase):
@@ -235,3 +240,116 @@ class Serialisation(unittest.TestCase):
         sig["evidence"]["rolling"] = rolling([(0, est)], now=0, booth_distance_m=0)
         decoded = json.loads(json.dumps(sig))
         self.assertIs(decoded["evidence"]["beyond_view"], True)
+
+
+class WaitBounds(unittest.TestCase):
+    def test_the_low_end_is_the_short_distance_at_the_fastest_speed(self):
+        low, high = wait_bounds(100, 0, 20, fastest=0.4, slowest=0.2, scale_verified=True)
+        self.assertAlmostEqual(low, 120 / 0.4 / 60)
+        self.assertAlmostEqual(high, 120 / 0.2 / 60)
+
+    def test_the_distance_uncertainty_widens_both_ends(self):
+        low, high = wait_bounds(400, 40, 20, 0.5, 0.5, scale_verified=True)
+        self.assertAlmostEqual(low, (360 + 20) / 0.5 / 60)
+        self.assertAlmostEqual(high, (440 + 20) / 0.5 / 60)
+
+    def test_an_uncertainty_larger_than_the_distance_never_goes_below_the_visible_line(self):
+        low, _ = wait_bounds(10, 30, 20, 0.5, 0.5, scale_verified=True)
+        self.assertAlmostEqual(low, 20 / 0.5 / 60)
+
+    def test_an_unverified_scale_widens_the_range_only_when_the_booth_is_out_of_view(self):
+        low, high = wait_bounds(400, 0, 20, 0.5, 0.5, scale_verified=False)
+        wait = 420 / 0.5 / 60
+        self.assertAlmostEqual(low, wait / (1 + SCALE_SLACK))
+        self.assertAlmostEqual(high, wait * (1 + SCALE_SLACK))
+        # With the booth in view the scale cancels out of the wait, so no slack.
+        self.assertEqual(wait_bounds(0, 0, 20, 0.5, 0.5, scale_verified=False),
+                         wait_bounds(0, 0, 20, 0.5, 0.5, scale_verified=True))
+
+
+class RollingRange(unittest.TestCase):
+    def window(self, beyond=False):
+        return LaneEstimate(camera="c", lane="l", port_number="p", direction="north",
+                            state="queue", frames=120, seconds=60, queue_m=40.0,
+                            beyond_view=beyond, speed_m_s=0.2)
+
+    def test_the_range_carries_the_distance_uncertainty_and_contains_the_wait(self):
+        out = rolling([(0, self.window())], now=0, booth_distance_m=400, uncertainty_m=40)
+        self.assertAlmostEqual(out["wait_min"], 440 / 0.2 / 60)
+        self.assertAlmostEqual(out["low_min"], 400 / 0.2 / 60)
+        self.assertAlmostEqual(out["high_min"], 480 / 0.2 / 60)
+
+    def test_a_line_running_out_of_view_has_a_low_end_and_no_high_end(self):
+        out = rolling([(0, self.window(beyond=True))], now=0, booth_distance_m=400,
+                      uncertainty_m=40, scale_verified=False)
+        self.assertTrue(out["lower_bound"])
+        self.assertIsNone(out["high_min"])
+        self.assertAlmostEqual(out["low_min"], 400 / 0.2 / 60 / (1 + SCALE_SLACK))
+
+
+def raw_camera(**lane):
+    return {"title": "t", "port_number": "000000", "direction": "north", "frame_size": FRAME,
+            "ground": {"image": [(160, 340), (480, 340), (345, 90), (295, 90)],
+                       "width_m": 4.0, "length_m": 60.0},
+            "lanes": [{"lane": "car", "across": [0, 1], "along": [0, 1], "booth": "far", **lane}]}
+
+
+class BoothDistanceFields(unittest.TestCase):
+    def test_a_null_uncertainty_means_none_given(self):
+        cam = camera_from_dict("x", raw_camera(booth_distance_m=400,
+                                               booth_distance_uncertainty_m=None))
+        self.assertEqual(cam.lanes[0].booth_distance_uncertainty_m, 0.0)
+
+    def test_negative_distances_are_refused(self):
+        for fields in ({"booth_distance_m": -5}, {"booth_distance_uncertainty_m": -1}):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                camera_from_dict("x", raw_camera(**fields))
+
+    def test_only_a_booth_in_view_counts_as_verified_unless_said(self):
+        self.assertTrue(camera_from_dict("x", raw_camera(booth_distance_m=0)).lanes[0]
+                        .booth_distance_verified)
+        self.assertFalse(camera_from_dict("x", raw_camera(booth_distance_m=400)).lanes[0]
+                         .booth_distance_verified)
+
+
+class SavedReferences(unittest.TestCase):
+    """What the worker loads at start: good lanes kept, stale ones dropped, never a crash."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        patcher = unittest.mock.patch.dict(os.environ, {"CAMERA_STATE_DIR": d.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        raw = raw_camera()
+        raw["lanes"].append({**raw["lanes"][0], "lane": "car-2"})
+        self.cam = camera_from_dict("two", raw)
+
+    def learnt(self):
+        reader = CameraReader(self.cam)
+        reader.learn([image_features(Scene().render([]))])
+        return reader
+
+    def test_a_stale_reference_is_deleted_and_relearnt_even_on_windows(self):
+        # The archive used to stay open while the stale file was deleted: on Windows that
+        # raised PermissionError and stopped the worker on every restart.
+        self.learnt().save()
+        stale = _state_path(self.cam, "car.reference")
+        with np.load(stale) as saved:
+            arrays = {k: saved[k] for k in saved.files}
+        np.savez_compressed(stale, **{**arrays, "size": np.array([1, 1])})
+        reader = CameraReader(self.cam)
+        self.assertEqual(reader.prepare(), ["car"])
+        self.assertFalse(stale.exists())
+        self.assertIn("car-2", reader.references)
+
+    def test_one_missing_lane_leaves_the_others_learnt(self):
+        self.learnt().save()
+        _state_path(self.cam, "car-2.reference").unlink()
+        reader = CameraReader(self.cam)
+        self.assertEqual(reader.prepare(), ["car-2"])
+        self.assertEqual(list(reader.references), ["car"])
+
+
+if __name__ == "__main__":
+    unittest.main()

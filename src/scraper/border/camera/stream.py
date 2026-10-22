@@ -10,7 +10,9 @@ never swallowed (ADR-0011), so a dead camera reads as dead rather than as an emp
     StreamLost    frames stopped arriving mid-read
 
 The product owner chose to read these YouTube streams knowing YouTube's terms forbid
-automated access (QUESTIONS.md, Q-7). Frames are analysed in memory and never written.
+automated access (QUESTIONS.md, Q-7). Frames are analysed in memory: the worker and the
+viewer never write one. Only an operator's explicit `camera snapshot --out` or
+`camera read --debug` writes a single annotated frame, for checking a calibration.
 """
 from __future__ import annotations
 

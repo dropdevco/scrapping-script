@@ -7,11 +7,14 @@ No model, no training data, nothing random: the same frames always give the same
     2. measure      per frame, which metres of the strip hold a vehicle (difference from an
                     empty-road reference); per frame pair, how far the vehicles moved toward
                     the booth (1-D correlation of the strip's profile)
-    3. window       over a minute of frames: the queue is the run of metres occupied most of
-                    the time, starting at the booth end; its speed is the time-averaged speed
-                    of whatever is in it, stationary cars included
+    3. window       over a minute of frames: the queue is a dense run of metres occupied
+                    most of the time (starting at the booth end when the booth is in view);
+                    its speed is the time-averaged speed of whatever is in it, stationary
+                    cars included
+    4. worker       every camera in parallel, a 15-minute rolling speed per lane, and what
+                    each lane's number means for the viewer
 
-    wait ≈ (distance from the visible queue's booth end to the booth + visible length) / speed
+    wait ≈ (distance from the strip's booth end to the booth + queue, counted from that end) / speed
 
 That is Little's law for one lane: a car at the tail covers the queue's length at the
 queue's average speed. When the whole queue and the booth are in view, an error in the

@@ -3,10 +3,10 @@
     python -m scraper.border camera list                       # calibrated cameras, stream status
     python -m scraper.border camera snapshot --camera pdn-north --out pdn.jpg
                                                                # one frame with the lanes drawn on
-    python -m scraper.border camera reference --camera pdn-north [--seconds 60]
-                                                               # learn the empty road; run when clear
+    python -m scraper.border camera reference --camera pdn-north --rounds 6 --gap 600
+                                                               # learn the road from six moments
     python -m scraper.border camera read --camera pdn-north [--seconds 60] [--json]
-    python -m scraper.border camera run --cameras pdn-north,lerdo-fila [--every 300]
+    python -m scraper.border camera run --cameras pdn-north,lerdo-south-booths [--every 300]
                                                                # the always-on worker
     python -m scraper.border camera view [--cameras ...] [--every 120] [--port 8090]
                                                                # the worker plus a live page
@@ -94,6 +94,10 @@ BANK_MIN = 18             # rebuild once the bank spans ~30 minutes of separate 
 SAMPLES_PER_WINDOW = 3
 
 
+class StaleReference(ValueError):
+    """A saved reference learnt for a different calibration of the same lane."""
+
+
 class CameraReader:
     """One camera: its lane strips and their empty-road references.
 
@@ -143,18 +147,49 @@ class CameraReader:
                                 edges=ref.edges, size=np.array(self._strips[lane].size),
                                 saved_at=stamp)
 
+    def _load_lane(self, lane: str, strip: Strip) -> Reference | None:
+        """One lane's saved road, or None if there is none. The archive is closed before
+        anything else happens: on Windows a file still open cannot be deleted, and the relearn
+        path deletes stale references (it once crashed the worker on every restart)."""
+        path = _state_path(self.camera, f"{lane}.reference")
+        if not path.exists():
+            return None
+        with np.load(path) as saved:
+            size = tuple(int(v) for v in saved["size"])
+            grey, edges = saved["grey"].copy(), saved["edges"].copy()
+        if size != strip.size:
+            raise StaleReference(f"{self.camera.id}/{lane} was learnt for a different "
+                                 "calibration; relearn it")
+        return Reference(grey, edges)
+
+    def prepare(self) -> list[str]:
+        """Load every lane reference that exists and still fits its calibration, delete the
+        stale ones, and return the lanes that still need learning. A strip's size does not
+        depend on the frame size, so this needs no frame. Lanes already learnt are kept: a
+        lane added to cameras.json must not cost the others their references."""
+        missing = []
+        for lane, strip in self.strips(self.camera.frame_size).items():
+            if lane in self.references:
+                continue
+            try:
+                ref = self._load_lane(lane, strip)
+            except StaleReference:
+                _state_path(self.camera, f"{lane}.reference").unlink(missing_ok=True)
+                ref = None
+            if ref is None:
+                missing.append(lane)
+            else:
+                self.references[lane] = ref
+        return missing
+
     def load(self, size: tuple[int, int]) -> None:
         for lane, strip in self.strips(size).items():
-            path = _state_path(self.camera, f"{lane}.reference")
-            if not path.exists():
+            ref = self._load_lane(lane, strip)
+            if ref is None:
                 raise FileNotFoundError(
                     f"no learnt road for {self.camera.id}/{lane}: run `camera reference --camera "
                     f"{self.camera.id} --rounds 6` (or --source with several clips)")
-            ref = np.load(path)
-            if tuple(ref["size"]) != strip.size:
-                raise ValueError(f"{self.camera.id}/{lane} was learnt for a different "
-                                 "calibration; relearn it")
-            self.references[lane] = Reference(ref["grey"], ref["edges"])
+            self.references[lane] = ref
 
     def read(self, source_frames, save: bool = True) -> list[LaneEstimate]:
         windows: dict[str, LaneWindow] = {}
@@ -235,7 +270,10 @@ def as_signal(est: LaneEstimate, lane, observed_at: datetime,
         "high": None if est.high_min is None else round(est.high_min),
         "observed_at": observed_at.isoformat(), "independent": True,
         "evidence": {**est.to_dict(), "lane_verified": lane.lane_verified,
-                     "direction_verified": direction_verified},
+                     "direction_verified": direction_verified,
+                     "booth_distance_m": lane.booth_distance_m,
+                     "booth_distance_uncertainty_m": lane.booth_distance_uncertainty_m,
+                     "booth_distance_verified": lane.booth_distance_verified},
     }
 
 

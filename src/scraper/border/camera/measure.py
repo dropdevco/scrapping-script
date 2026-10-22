@@ -2,7 +2,8 @@
 
 Everything here is a fixed computation over pixels, so a given sequence of frames always
 produces the same estimate. Thresholds are starting values, tuned against recorded footage
-and graded against timed crossings; each says what it guards against.
+(hand-labelled rounds, 2026-10-19); grading against timed crossings waits on Phase 3. Each
+says what it guards against.
 """
 from __future__ import annotations
 
@@ -364,25 +365,39 @@ class LaneWindow:
         if booth_distance is None:
             return LaneEstimate(state="queue", **common)    # speed and length, but no wait
 
-        distance = booth_distance + queue_m
-        wait = distance / speed / 60
-        fastest = max(max(quarters), MIN_SPEED_M_S)
-        slowest = max(min(quarters), MIN_SPEED_M_S)
-        low, high = distance / fastest / 60, distance / slowest / 60
-        if booth_distance > 0 and not cam.scale_verified:
-            low, high = low / (1 + SCALE_SLACK), high * (1 + SCALE_SLACK)
+        wait = (booth_distance + queue_m) / speed / 60
+        low, high = wait_bounds(booth_distance, lane.booth_distance_uncertainty_m, queue_m,
+                                max(max(quarters), MIN_SPEED_M_S),
+                                max(min(quarters), MIN_SPEED_M_S), cam.scale_verified)
         if beyond:
-            low, high = wait, None
+            # A floor: the line runs on past the view. Its honest low end is still the range's
+            # low end (short distance, fast speed, scale slack), not the central wait.
+            high = None
         return LaneEstimate(state="queue", wait_min=wait, low_min=min(low, wait),
                             high_min=None if high is None else max(high, wait),
                             lower_bound=beyond, **common)
+
+
+def wait_bounds(booth_distance: float, uncertainty: float, queue_m: float, fastest: float,
+                slowest: float, scale_verified: bool) -> tuple[float, float]:
+    """(low, high) minutes. The road left to the booth is booth_distance +/- uncertainty (a
+    map estimate is not a survey), covered at between the fastest and slowest speed seen; and
+    while the camera's scale is unverified, a booth out of view widens the range by
+    SCALE_SLACK, because then the distance is in real metres and the speed in nominal ones."""
+    near = max(0.0, booth_distance - uncertainty) + queue_m
+    far = booth_distance + uncertainty + queue_m
+    low, high = near / fastest / 60, far / slowest / 60
+    if booth_distance > 0 and not scale_verified:
+        low, high = low / (1 + SCALE_SLACK), high * (1 + SCALE_SLACK)
+    return low, high
 
 
 ROLLING_SECONDS = 900    # stop-and-go: a one-minute window can fall entirely inside a stop
 
 
 def rolling(history: list[tuple[float, LaneEstimate]], now: float,
-            booth_distance_m: float | None) -> dict:
+            booth_distance_m: float | None, uncertainty_m: float = 0.0,
+            scale_verified: bool = True) -> dict:
     """Speed and wait over the last ROLLING_SECONDS of windows from one lane.
 
     At Paso del Norte at 04:36 local on 2026-10-19 the queue sat still for 15 s, advanced a
@@ -397,8 +412,14 @@ def rolling(history: list[tuple[float, LaneEstimate]], now: float,
     seconds = sum(e.seconds for _, e in recent)
     speed = max(0.0, sum(e.speed_m_s * e.seconds for _, e in recent) / seconds)
     latest = max(recent, key=lambda item: item[0])[1]
-    wait = None
+    wait = low = high = None
     if booth_distance_m is not None and speed >= MIN_SPEED_M_S:
         wait = (booth_distance_m + latest.queue_m) / speed / 60
-    return plain({"speed_m_s": float(speed), "wait_min": wait, "windows": len(recent),
-                  "seconds": float(seconds), "lower_bound": latest.beyond_view})
+        low, high = wait_bounds(booth_distance_m, uncertainty_m, latest.queue_m, speed, speed,
+                                scale_verified)
+        low, high = min(low, wait), max(high, wait)
+        if latest.beyond_view:
+            high = None
+    return plain({"speed_m_s": float(speed), "wait_min": wait, "low_min": low, "high_min": high,
+                  "windows": len(recent), "seconds": float(seconds),
+                  "lower_bound": latest.beyond_view})

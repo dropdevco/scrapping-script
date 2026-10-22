@@ -7,7 +7,8 @@ bridge, a line per lane, and what each camera is doing right now (learning the r
 calculating, waiting for its next reading, or down), with a countdown to its next result.
 Each camera shows its live stream through YouTube's embedded player, or "what it measured":
 the last reading's frame with each metre of lane tinted by occupancy. That picture is held in
-the worker's memory and served from there, never written to disk.
+the worker's memory and served from there, never written to disk. Under each bridge, CBP's own
+published waits are shown for comparison only; they never feed the camera estimate.
 Only bound to localhost; it is a viewer for the machine running the cameras, not a website.
 """
 from __future__ import annotations
@@ -47,7 +48,7 @@ header p { margin:4px 0 0; color:var(--soft); font-size:14px }
 .pill { font:500 11px/1 var(--mono); text-transform:uppercase; letter-spacing:.06em; padding:5px 8px;
   border-radius:999px; border:1px solid currentColor; white-space:nowrap }
 .p-ok { color:var(--ok) } .p-reading { color:var(--busy) } .p-learning { color:var(--accent) }
-.p-down { color:var(--down) } .p-waiting { color:var(--idle) }
+.p-down, .p-error { color:var(--down) } .p-waiting { color:var(--idle) }
 .status { font-size:13px; color:var(--soft) }
 .status b { color:var(--ink); font-variant-numeric:tabular-nums }
 .lane { display:grid; grid-template-columns: 1fr auto; gap:2px 12px; align-items:baseline }
@@ -70,6 +71,7 @@ footer { font-size:12.5px; color:var(--soft) }
 .frame .note { position:absolute; inset:0; display:grid; place-items:center; color:#c9d0cd;
   font-size:13px; padding:12px; text-align:center }
 .legend { font-size:12px; color:var(--soft) }
+.cbp { font-size:12.5px; color:var(--soft); margin-top:-6px }
 </style></head>
 <body><main>
 <header>
@@ -95,27 +97,14 @@ function left(iso) {
 const LANE_NAMES = { car: "Cars", car_sentri: "SENTRI", car_ready: "Ready Lane", walk: "Walking",
   walk_ready: "Walking Ready", truck: "Trucks", truck_fast: "FAST" };
 function laneRow(l, stale) {
+  // The worker decides what a lane's number means (worker.lane_summary); the page only prints it.
   const row = el("div", "lane" + (stale ? " stale" : ""));
   const name = l.cbp_lane ? LANE_NAMES[l.cbp_lane] || l.cbp_lane : l.lane;
   row.append(el("span", "lname", name + (l.cbp_lane ? "" : " (lane type unconfirmed)")));
-  const w = el("span", "wait");
-  if (l.minutes != null) {
-    const m = Math.round(l.minutes);
-    w.textContent = (l.lower_bound ? "≥ " : "") + m;
-    w.append(el("small", null, " min"));
-  } else {
-    w.textContent = "—";
-  }
+  const w = el("span", "wait", l.display_value || "—");
+  if (l.minutes != null) w.append(el("small", null, " min"));
   row.append(w);
-  const bits = [];
-  if (l.state === "no_queue") bits.push("no queue in view");
-  else if (l.state === "queue" || l.state === "stalled") {
-    bits.push(`line ${Math.round(l.queue_m)} m${l.beyond_view ? "+ (runs out of view)" : ""}`);
-    if (l.speed_m_s != null) bits.push(`moving ${l.speed_m_s.toFixed(2)} m/s`);
-    if (l.state === "stalled") bits.push("not moving this minute");
-  }
-  if (l.why_no_minutes) bits.push(l.why_no_minutes);
-  row.append(el("span", "detail", bits.join(" · ")));
+  row.append(el("span", "detail", l.display_detail || ""));
   return row;
 }
 function camInfo(c) {
@@ -123,7 +112,7 @@ function camInfo(c) {
   const head = el("div", "camhead");
   const dir = c.direction === "north" ? "northbound" : "southbound";
   head.append(el("span", "view", `${c.view} · ${dir}${c.direction_verified ? "" : " (direction unconfirmed)"}`));
-  const label = { ok: "live", reading: "calculating", learning: "learning", down: "down", waiting: "starting" }[c.phase] || c.phase;
+  const label = { ok: "live", reading: "calculating", learning: "learning", down: "down", error: "error", waiting: "starting" }[c.phase] || c.phase;
   head.append(el("span", "pill p-" + c.phase, label));
   box.append(head);
   const st = el("div", "status");
@@ -131,10 +120,12 @@ function camInfo(c) {
     st.append("Calculating… result in ", el("b", null, left(c.eta_at) || "—"));
   } else if (c.phase === "learning" && c.learning) {
     const ready = c.learning.ready_at ? new Date(c.learning.ready_at) : null;
-    st.append(`Learning the empty road (${c.learning.done} of ${c.learning.needed}). First estimate ≈ `,
+    st.append(`${c.message ? c.message[0].toUpperCase() + c.message.slice(1) : "Learning the empty road"}. First estimate ≈ `,
       el("b", null, ready ? `${clock(ready)} (in ${left(c.learning.ready_at)})` : "soon"));
   } else if (c.phase === "down") {
     st.append(`Camera down: ${c.message}. Retrying in `, el("b", null, left(c.next_at) || "—"));
+  } else if (c.phase === "error") {
+    st.append(`Reading failed: ${c.message}. Retrying in `, el("b", null, left(c.next_at) || "—"));
   } else if (c.phase === "waiting") {
     st.append("Starting…");
   } else {
@@ -142,7 +133,7 @@ function camInfo(c) {
       el("b", null, left(c.next_at) || "—"));
   }
   box.append(st);
-  const stale = c.phase === "reading" || c.phase === "down";
+  const stale = c.phase === "reading" || c.phase === "down" || c.phase === "error";
   for (const l of c.lanes || []) box.append(laneRow(l, stale));
   return box;
 }
@@ -220,6 +211,9 @@ function render() {
     if (!card) {
       card = el("section", "bridge");
       card.append(el("h2", null, c.bridge));
+      const cbpLine = el("div", "cbp");
+      cbpLine.dataset.port = c.port_number;
+      card.append(cbpLine);
       host.append(card);
       bridges.set(c.bridge, card);
     }
@@ -227,6 +221,16 @@ function render() {
     if (!entry.root.parentNode) card.append(entry.root);
     entry.info.replaceChildren(camInfo(c));
     updateMedia(entry, c);
+  }
+  for (const line of document.querySelectorAll(".cbp")) {
+    const lanes = (status.cbp || {})[line.dataset.port];
+    const names = { car: "Cars", car_ready: "Ready", car_sentri: "SENTRI" };
+    const parts = lanes ? Object.entries(lanes).filter(([, v]) => v.state === "open" && v.minutes != null)
+      .map(([k, v]) => `${names[k] || k} ${v.minutes} min`) : [];
+    const label = lanes ? Object.values(lanes).map(v => v.label).find(Boolean) : null;
+    line.textContent = parts.length
+      ? `For comparison, CBP publishes (northbound): ${parts.join(" · ")}${label ? ` — ${label.toLowerCase()}` : ""}`
+      : (status.cbp_error ? "CBP's published waits unavailable right now" : "");
   }
   document.getElementById("clock").textContent = `El Paso time ${clock(new Date())}.`;
   const age = Math.round((Date.now() - fetchedAt) / 1000);
@@ -295,7 +299,7 @@ def cmd_view(args, cameras) -> int:
     try:
         worker = Worker(chosen, seconds=args.seconds, every=args.every,
                         emit=(lambda sig: print(json.dumps(sig, ensure_ascii=False), flush=True))
-                        if args.json else None)
+                        if args.json else None, compare_cbp=True)
     except AlreadyRunning as exc:
         print(exc)
         return 1

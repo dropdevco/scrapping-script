@@ -1,5 +1,5 @@
 {
-  "_readme": "Camera calibrations. ground.image: near-left, near-right, far-right, far-left corners of a rectangle on the road, picked at frame_size. width_m/length_m: that rectangle in metres; scale_verified=false means nobody measured it, so absolute metres and speeds are nominal (they cancel out of a wait only when the booth is in view). Lanes: across/along are fractions of the rectangle; along may run past [0,1]. booth_distance_m: metres from the strip's booth-end row to the inspection booth, null = not measured (no wait is produced, only queue and speed). cbp_lane: null until someone confirms which CBP lane type the strip is. mask: x,y,w,h overlays (clock, logos, QR codes, signs that hide the road). Check any change with `camera snapshot`. clock: the burned-in date/time box; a stream whose clock stops changing for 20 s is reported frozen.",
+  "_readme": "Camera calibrations. ground.image: near-left, near-right, far-right, far-left corners of a rectangle on the road, picked at frame_size. width_m/length_m: that rectangle in metres; scale_verified=false means nobody measured it, so absolute metres and speeds are nominal (they cancel out of a wait only when the booth is in view). Lanes: across/along are fractions of the rectangle; along may run past [0,1]. booth_distance_m: metres from the strip's booth-end row to the inspection booth, null = not measured (no wait is produced, only queue and speed). cbp_lane: null until someone confirms which CBP lane type the strip is. mask: x,y,w,h overlays (clock, logos, QR codes, signs that hide the road). Check any change with `camera snapshot`. clock: the burned-in date/time box; a stream whose clock stops changing for 20 s is reported frozen. booth_distance_uncertainty_m / booth_distance_verified: a distance estimated from a map carries its +/- and verified=false; the wait's range widens by it and the viewer marks the minutes approximate.",
   "pdn-north": {
     "title": "Paso del Norte (Norte)",
     "port_number": "240202",
@@ -17,44 +17,54 @@
         "across": [0.0, 0.3333],
         "along": [-0.1, 2.4],
         "booth": "far",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 365,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 35,
+        "booth_distance_verified": false
       },
       {
         "lane": "lane-2",
         "across": [0.3333, 0.6667],
         "along": [-0.1, 2.4],
         "booth": "far",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 365,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 35,
+        "booth_distance_verified": false
       },
       {
         "lane": "lane-3",
         "across": [0.6667, 1.0],
         "along": [-0.1, 2.4],
         "booth": "far",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 365,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 35,
+        "booth_distance_verified": false
       },
       {
         "lane": "lane-4",
         "across": [1.0, 1.4],
         "along": [-0.1, 2.4],
         "booth": "far",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 365,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 35,
+        "booth_distance_verified": false
       },
       {
         "lane": "lane-5",
         "across": [1.4, 1.85],
         "along": [-0.1, 2.4],
         "booth": "far",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 365,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 35,
+        "booth_distance_verified": false
       }
     ],
     "mask": [[0, 0, 900, 58], [230, 64, 218, 112], [828, 64, 218, 112], [448, 196, 342, 96], [500, 290, 212, 22]],
-    "notes": "Looks north up the bridge from the Juarez end; the US booths are past the far end, out of view. lane-1..lane-3 (left to right) split the carriageway between the yellow left curb and the white bollard line into equal thirds (width assumed 3 x 3.5 m). They are read separately because they queue separately: at 03:16 local on 2026-10-19 only the middle lane was queued. The Feliz Viaje sign hides the road behind it and is masked. lane-4 runs between the white bollards and the orange barrels, lane-5 between the barrels and the right curb; their edges were mapped through this rectangle's homography on a daylight frame (bollards at 1.00 of the width at every depth, curb 1.79-1.89, barrels tapering 1.45 to 1.25 where they end). At 08:40 local on 2026-10-19 the queue had moved from lanes 1-3 to these two.",
+    "notes": "Looks north up the bridge from the Juarez end; the US booths are past the far end, out of view. lane-1..lane-3 (left to right) split the carriageway between the yellow left curb and the white bollard line into equal thirds (width assumed 3 x 3.5 m). They are read separately because they queue separately: at 03:16 local on 2026-10-19 only the middle lane was queued. The Feliz Viaje sign hides the road behind it and is masked. lane-4 runs between the white bollards and the orange barrels, lane-5 between the barrels and the right curb; their edges were mapped through this rectangle's homography on a daylight frame (bollards at 1.00 of the width at every depth, curb 1.79-1.89, barrels tapering 1.45 to 1.25 where they end). At 08:40 local on 2026-10-19 the queue had moved from lanes 1-3 to these two. Booth distance (2026-10-22, Google satellite, map scale bar): from the Feliz Viaje gantry at about 31.7463,-106.4866 north along the bridge to the CBP primary-booth canopy at about 31.7500,-106.4868: ~410 m, +/-30 m. The strips do not end at the gantry: they run on under and past the sign. In a 2026-10-22 snapshot the gantry posts reach the road at about image y 405-420, which this calibration puts ~45 m (nominal; the scale is unverified) short of the strips' booth-end row, so booth_distance_m from that row is 410 - 45 = ~365 m, +/-35 m (map, post feet and scale). The gantry was placed from the layout (the parking lot west of the bridge appears beside the middle of the lanes); Street View has no imagery on the bridge deck to confirm it.",
     "clock": [0, 0, 300, 28]
   },
   "lerdo-north": {
@@ -74,12 +84,14 @@
         "across": [0.0, 1.0],
         "along": [-0.05, 2.2],
         "booth": "far",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 335,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 35,
+        "booth_distance_verified": false
       }
     ],
     "mask": [[0, 0, 300, 58], [182, 90, 234, 82], [868, 90, 236, 102], [876, 172, 210, 20]],
-    "notes": "Looks north along the Lerdo-Stanton bridge from the Juarez end. right-roadway is the straight stretch between the bollard line and the orange right curb, with the northbound arrow; width assumed two lanes (7 m). CBP names this port 'Stanton DCL', but which lane type the strip is has not been confirmed. Below y=380 the roadway curves left toward the camera and is not covered by the straight strip.",
+    "notes": "Looks north along the Lerdo-Stanton bridge from the Juarez end. right-roadway is the straight stretch between the bollard line and the orange right curb, with the northbound arrow; width assumed two lanes (7 m). CBP names this port 'Stanton DCL', but which lane type the strip is has not been confirmed. Below y=380 the roadway curves left toward the camera and is not covered by the straight strip. Booth distance (2026-10-22, Google satellite): from the overpass over Av. Heroico Colegio Militar, visible at the top of this camera's picture, at about 31.7474,-106.4824, along the bridge to the Stanton commuter-lane booth canopy at about 31.7502,-106.4833; ~335 m, +/-35 m. Not yet corrected to the strip's booth-end row: that row sits short of the far gantry at the top of the picture by a gap this calibration cannot measure (the road climbs there, so the flat-road warp does not hold past the strip), so 335 m is likely an under-estimate.",
     "clock": [0, 0, 300, 28]
   },
   "pdn-south-street": {
@@ -99,21 +111,25 @@
         "across": [0.0, 0.33],
         "along": [-0.1, 1.6],
         "booth": "near",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 510,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 75,
+        "booth_distance_verified": false
       },
       {
         "lane": "right-column",
         "across": [0.33, 1.0],
         "along": [-0.1, 1.6],
         "booth": "near",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 510,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 75,
+        "booth_distance_verified": false
       }
     ],
     "mask": [[0, 0, 355, 55], [0, 55, 236, 250], [295, 90, 155, 55], [1015, 85, 165, 60], [1005, 140, 210, 22]],
     "clock": [0, 0, 300, 28],
-    "notes": "Looks south down the Juarez street that feeds the Paso del Norte bridge; the queue faces the camera and drives toward it, so the booth end is the near end and the bridge is behind the camera. No lane markings (cobblestone); the two strips follow the two queue columns seen at 04:56 local on 2026-10-19, left along the barrier fence. Vendors walk between the columns. Width assumed ~9 m."
+    "notes": "Looks south down the Juarez street that feeds the Paso del Norte bridge; the queue faces the camera and drives toward it, so the booth end is the near end and the bridge is behind the camera. No lane markings (cobblestone); the two strips follow the two queue columns seen at 04:56 local on 2026-10-19, left along the barrier fence. Vendors walk between the columns. Width assumed ~9 m. Booth distance (2026-10-22, Google satellite): the camera is placed at the north end of this street near the foot of the bridge (~31.7457,-106.4865), not confirmed; from there up Av. Benito Juarez and across the bridge to the CBP primary booths at about 31.7500,-106.4868: ~480 m, +/-70 m. That is from the camera; the strips' booth-end row is in front of it, ~30 m (nominal) by the camera position this calibration implies (height ~14 m; square pixels and a centred image assumed), so booth_distance_m is ~510 m, +/-75 m."
   },
   "bota-south-approach": {
     "title": "Córdova - Américas (Sur)",
@@ -132,21 +148,25 @@
         "across": [0.0, 0.5],
         "along": [-0.05, 2.2],
         "booth": "near",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 615,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 70,
+        "booth_distance_verified": false
       },
       {
         "lane": "lane-2",
         "across": [0.5, 1.0],
         "along": [-0.05, 2.2],
         "booth": "near",
-        "booth_distance_m": null,
-        "cbp_lane": null
+        "booth_distance_m": 615,
+        "cbp_lane": null,
+        "booth_distance_uncertainty_m": 70,
+        "booth_distance_verified": false
       }
     ],
     "mask": [[0, 0, 322, 64], [256, 90, 156, 56], [866, 88, 160, 58], [450, 60, 348, 38], [882, 0, 398, 50]],
     "clock": [0, 0, 300, 28],
-    "notes": "Looks south down the approach road to the Bridge of the Americas, with the bridge behind the camera. The queue in the left carriageway drives toward the camera: the reader's signed speed was negative in all 15 rounds from 03:16 to 07:56 local on 2026-10-19 with the booth set at the far end, so it is set at the near end. (Red lights seen on these cars at night had suggested the opposite; the measurement overruled that.) Two lanes, width assumed 7 m. The right carriageway carries other traffic and is not calibrated. BOTA is not administered by FPFCH (on-screen banner)."
+    "notes": "Looks south down the approach road to the Bridge of the Americas, with the bridge behind the camera. The queue in the left carriageway drives toward the camera: the reader's signed speed was negative in all 15 rounds from 03:16 to 07:56 local on 2026-10-19 with the booth set at the far end, so it is set at the near end. (Red lights seen on these cars at night had suggested the opposite; the measurement overruled that.) Two lanes, width assumed 7 m. The right carriageway carries other traffic and is not calibrated. BOTA is not administered by FPFCH (on-screen banner). Booth distance (2026-10-22, Google satellite): the camera is placed on Av. de las Americas south of the Mexican plaza (~31.7616,-106.4519) from the flag monument and visitor-centre sign on its right, not confirmed; from there north across the bridge to the CBP primary booths at about 31.7669,-106.4511: ~600 m, +/-70 m. That is from the camera; the strips' booth-end row is in front of it, ~17 m (nominal) by the camera position this calibration implies (height ~11 m; square pixels and a centred image assumed), so booth_distance_m is ~615 m, +/-70 m."
   },
   "lerdo-south-booths": {
     "title": "Lerdo (Sur)",

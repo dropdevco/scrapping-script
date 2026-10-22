@@ -31,6 +31,8 @@ class Lane:
     booth: str                     # "far" or "near": which end of `along` the booth is at
     booth_distance_m: float | None = 0.0   # booth to the strip's booth-end row; None = unknown
     cbp_lane: str | None = None    # car | car_sentri | car_ready | walk | truck | ... once verified
+    booth_distance_uncertainty_m: float = 0.0  # +/- on booth_distance_m (map estimates)
+    booth_distance_verified: bool = True       # False for a distance estimated, not surveyed
 
     @property
     def lane_verified(self) -> bool:
@@ -66,8 +68,12 @@ def _lane(raw: dict) -> Lane:
     b0, b1 = raw["along"]
     if not (a0 < a1 and b0 < b1):
         raise ValueError(f"lane {raw['lane']}: across/along must be increasing")
-    return Lane(raw["lane"], (a0, a1), (b0, b1), raw["booth"],
-                raw.get("booth_distance_m", 0.0), raw.get("cbp_lane"))
+    distance = raw.get("booth_distance_m", 0.0)
+    uncertainty = float(raw.get("booth_distance_uncertainty_m") or 0.0)   # null means none given
+    if uncertainty < 0 or (distance is not None and distance < 0):
+        raise ValueError(f"lane {raw['lane']}: booth distance and its uncertainty cannot be negative")
+    return Lane(raw["lane"], (a0, a1), (b0, b1), raw["booth"], distance, raw.get("cbp_lane"),
+                uncertainty, bool(raw.get("booth_distance_verified", distance == 0)))
 
 
 def camera_from_dict(cid: str, raw: dict) -> Camera:

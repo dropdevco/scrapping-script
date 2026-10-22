@@ -10,10 +10,10 @@ always give the same answer, so any reading can be reproduced from a recording.
 | | |
 |---|---|
 | **Runs** | On a machine we own (Q-3), continuously: `python -m scraper.border camera run` |
-| **Reads** | The FPFCH YouTube live streams (`youtube.com/@fpfch/streams`), found by title |
-| **Writes** | JSON signal lines on stdout; each lane's empty-road reference and a heartbeat in `CAMERA_STATE_DIR` (default `~/.chisme/camera`) |
+| **Reads** | The FPFCH YouTube live streams (`youtube.com/@fpfch/streams`), found by title. The viewer also fetches CBP's published waits each cycle, **for display only**: they never feed the camera estimate |
+| **Writes** | JSON signal lines on stdout; each lane's empty-road reference, `status.json` (what the viewer shows, including `cbp`, `cbp_at`, `cbp_error`) and a heartbeat in `CAMERA_STATE_DIR` (default `~/.chisme/camera`) |
 | **Install** | `pip install -e ".[camera]"` (OpenCV headless, numpy, yt-dlp); Node on `PATH` for yt-dlp's YouTube extraction |
-| **Decision on record** | Reading YouTube streams is against YouTube's terms; the product owner chose to do it (QUESTIONS.md, Q-7). Frames are analysed in memory and **never written**. |
+| **Decision on record** | Reading YouTube streams is against YouTube's terms; the product owner chose to do it (QUESTIONS.md, Q-7). Frames are analysed in memory; the worker and the viewer **never write one**. Only an operator's explicit `camera snapshot --out` or `camera read --debug` writes a single annotated frame, to check a calibration. |
 
 ---
 
@@ -51,9 +51,13 @@ python -m scraper.border camera run --cameras pdn-north,lerdo-south-booths  # th
 
 `run` prints one JSON signal per lane every 5 minutes, writes `heartbeat.json` and the learnt
 references to `CAMERA_STATE_DIR` (default `~/.chisme/camera`), and alerts Telegram when a stream
-goes down or comes back if `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. A wait in
-minutes appears only for lanes whose `booth_distance_m` is known; today that is
-`lerdo-south-booths`.
+goes down or comes back if `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. Only one worker
+(`run` or `view`) can use a `CAMERA_STATE_DIR` at a time; a second one refuses to start.
+
+Every calibrated lane now has a `booth_distance_m`, so every lane can give minutes.
+`lerdo-south-booths` sees its booth, so its distance is exact. The other four cameras' distances
+are **map estimates** (2026-10-22) with a ± and `booth_distance_verified: false`, so their
+minutes are shown as approximate (see [What the viewer shows](#what-the-viewer-shows)).
 
 ---
 
@@ -72,8 +76,10 @@ frame ──► image grey + edges ──► warp each lane into a strip (booth 
           │                                                │
           └──────────────── over a 60 s window ────────────┘
                                    ▼
-   queue  = run of metres occupied ≥ half the window, from the booth end, gaps ≤ 9 m,
-            at least 60 % of its metres queued
+   queue  = run of metres occupied ≥ half the window, gaps ≤ 9 m, at least 60 % of its
+            metres queued and occupied ≥ 67 % of the window on average. With the booth in
+            view it must start at the booth end; otherwise any such run ≥ 10 m counts. Its
+            length is always counted from the strip's booth end
    speed  = time-averaged speed of what is inside the queue, stationary cars included
             (the worker publishes a 15-minute rolling average of it)
    wait   = (distance from strip to booth + visible queue) ÷ speed
@@ -104,19 +110,54 @@ at the queue's average speed. Two consequences:
 - **When the booth is in view, scale cancels.** A calibration whose metres are 1.5× too long
   stretches length and speed equally, so the wait is unchanged (pinned by a test).
 - **When the booth is out of view it does not.** The distance to the booth is in real metres and
-  the speed is in calibrated metres. Every current calibration is in this case: the cameras are
-  on the Juárez side and the CBP booths are on the US side. Those lanes produce a wait only once
-  `booth_distance_m` is measured, and their range is widened by 25 % while `scale_verified` is
-  false.
+  the speed is in calibrated metres. Four of the five calibrations are in this case (all but
+  `lerdo-south-booths`): the cameras are on the Juárez side and the CBP booths are on the US
+  side. Their range is wider for two reasons. First, the distance is `booth_distance_m ±
+  booth_distance_uncertainty_m`. Second, while `scale_verified` is false, the range is
+  stretched by a further 25 % each way (`SCALE_SLACK`).
+
+The range is `measure.wait_bounds`:
+- **low** = (distance − uncertainty, never below 0, + queue) ÷ the fastest quarter-minute speed;
+- **high** = (distance + uncertainty + queue) ÷ the slowest.
+
+Each end then moves by the 25 % scale slack when that applies.
 
 ### States a reading can report
 
-| `state` | Meaning | Wait |
+These are the states of the **signal** a reading publishes. The viewer can still show a number
+for some of the "unknown" ones; see [What the viewer shows](#what-the-viewer-shows).
+
+| `state` | Meaning | Wait in the signal |
 |---|---|---|
-| `queue` | A queue starts at the booth end of the view | `(booth distance + queue) / speed`; a **floor** with `lower_bound: true` when the queue runs past the far edge of the view |
+| `queue` | A dense queue in view | `(booth distance + queue) / speed`; a **floor** with `lower_bound: true` when the queue runs past the far edge of the view |
 | `no_queue` | Nothing queued at this camera | `0` if the booth is in view; **unknown** if not, because a queue could sit between the view and the booth |
 | `stalled` | Queued, but it did not move over the whole window | unknown; `lower_bound: true` |
 | `insufficient` | Fewer than 20 frames, or too few motion samples | unknown |
+
+`camera run` and `camera view` publish the **15-minute rolling** wait, with that rolling wait's
+own range. The one-minute window's range is never used, so the minutes always fall inside the
+published `low`–`high`. A floor is published with its `low` and no `high`.
+
+### What the viewer shows
+
+The viewer (`camera view`) gives a number whenever one can be stood behind, and says what kind
+of number it is. `worker.lane_summary` decides; the page only prints it.
+
+| Shown | When | How |
+|---|---|---|
+| `12 min` | A queue, booth in view | The 15-minute rolling wait. With the booth in view the scale cancels, so it is never marked approximate |
+| `≈ 12 min`, range `9–16` | A queue, booth out of view, with a map-estimated distance or an unverified scale | The rolling wait and its range; the line under it says which of the two makes it approximate |
+| `≥ 9 min` | The line runs past the edge of the view | A floor, stated at its range's **low** end, not at the central wait |
+| `3 min` (or `≈ 3`) with "this minute's line" | A line in view, but too few motion samples this minute to time it | This minute's line, timed at the last 15 minutes' speed. Never an older line's wait: a short line at the booth is always too short to time, and showing a long line's wait from ten minutes ago would be wrong exactly when the line has cleared |
+| `0 min` | No queue, booth in view | — |
+| `under ~20 min` | No queue in view, booth out of view | A line could still wait between the view and the booth. It would be shorter than that stretch, so it is (distance + uncertainty) timed at the **slowest** recent queue speed among this camera's lanes, × 1.25 while the scale is unverified. It is "probably under", not a strict bound: a hidden line could move slower still |
+| `—` and a reason | No booth distance; a queue that has not moved for 15 minutes; no recent queue on this camera to time a hidden line by; too few frames | — |
+
+Under each bridge, CBP's own published waits are printed for comparison. They are fetched in
+parallel with the cameras, with one short attempt, and never feed the camera number.
+
+A camera whose reading fails for any reason shows **down** (the stream) or **error** (anything
+else, such as a yt-dlp timeout) and is retried next cycle; the others carry on.
 
 A stream that fails is never a reading. It raises instead (ADR-0011):
 
@@ -127,7 +168,7 @@ A stream that fails is never a reading. It raises instead (ADR-0011):
 | `StreamLost` | Frames stopped arriving mid-read | — |
 
 `camera run` alerts Telegram once when a camera stops and once when it comes back, and keeps
-retrying. One camera failing never stops the others.
+retrying. One camera failing, for any reason, never stops the others or the worker.
 
 ---
 
@@ -144,9 +185,20 @@ silently.** Whatever was not verified says so, and travels with every reading.
 3. Define each lane as a strip of that plane: `across` and `along` are fractions of the
    rectangle, and `along` may run past 0 or 1 to cover more road. Set `booth` to the end the
    inspection booth is at (`far` or `near`).
-4. `booth_distance_m`: the distance along the lane from the strip's booth end to the booth, if
-   measured. Use `0` when the booth is in view, and `null` when unmeasured (no wait is produced,
-   only queue and speed).
+4. `booth_distance_m`: the distance along the lane from the **strip's booth-end row** to the
+   booth. That row is not always where it looks:
+   - A far-booth strip may run on past a landmark. PDN north's strips run under and past the
+     Feliz Viaje sign.
+   - A near-booth strip starts in front of the camera, not at it.
+
+   Measure to that row, or correct for the gap, and say how in the camera's `notes`. Use `0`
+   when the booth is in view, and `null` when unknown: then no wait is produced, only queue and
+   speed. An estimate (a map, not a survey) also gets:
+   - `booth_distance_uncertainty_m`: its ±, which widens the range (`null` or missing means 0;
+     negative values are refused);
+   - `booth_distance_verified: false`, which marks the minutes approximate.
+
+   If `booth_distance_verified` is missing, it defaults to true only for `0` (booth in view).
 5. `cbp_lane`: the CBP lane type (`car`, `car_sentri`, `car_ready`, …) **once someone has
    confirmed it**. Until then it is `null`, and the signal's `lane` is `null` so fusion cannot
    file it under the wrong lane.
@@ -157,10 +209,13 @@ silently.** Whatever was not verified says so, and travels with every reading.
 8. Learn the road from **moments spread across time**, including some when the lane is clear:
    `python -m scraper.border camera reference --camera <id> --rounds 6 --gap 600` takes six
    live samples ten minutes apart (or pass `--source` once per recorded clip). One moment is
-   refused. The worker then keeps refreshing each reference from an in-memory bank of about an
-   hour of samples, learning only from the emptiest of them. Readings in the first hour after
-   install are the least reliable: the one miss in the evaluation below had a single 45-second
-   clip of history.
+   refused. The worker then rebuilds each reference on every reading, once its in-memory bank
+   holds 18 samples, learning only from the emptiest of them. The bank keeps 36 samples, three
+   per reading. That is about an hour at `run`'s 5-minute cadence, and about 24 minutes at the
+   viewer's 2-minute cadence. A lane with no saved reference is learnt by the worker itself. Lanes
+   already learnt keep theirs, and a reference saved for a different calibration is deleted and
+   relearnt. Readings in the first hour after install are the least reliable: the one miss in the
+   evaluation below had a single 45-second clip of history.
 9. **A negative speed means `booth` points the wrong way.** On footage with traffic, the
    reader's signed speed toward the booth is a check on the calibration's direction.
 
@@ -201,12 +256,13 @@ bridge is not administered by FPFCH.
 
 | What | How it was checked | Result |
 |---|---|---|
-| Rectification, occupancy, motion, window logic | 12 tests on rendered perspective queues of known length and speed (`tests/border/test_border_camera.py`) | Speed 0.99–1.04× truth from 0.1 to 3 m/s; length within ±5 m; scale cancels |
-| Stream handling | 12 tests against small recorded videos and a mocked channel (`test_border_camera_stream.py`) | Down / frozen / lost all raise |
+| Rectification, occupancy, motion, window logic, the range | 34 tests on rendered perspective queues of known length and speed, plus the range, calibration fields and saved references (`tests/border/test_border_camera.py`) | Speed 0.99–1.04× truth from 0.1 to 3 m/s; length within ±5 m; scale cancels; the range widens by the distance's ± and by the 25 % scale slack only when the booth is out of view; a stale reference is replaced without a crash on Windows |
+| Stream handling | 13 tests against small recorded videos and a mocked channel (`test_border_camera_stream.py`) | Down / frozen / lost all raise |
+| What the viewer shows, and the worker | 25 tests (`test_border_camera_viewer.py`) | Every row of [What the viewer shows](#what-the-viewer-shows); the published signal pairs the rolling wait with its own range; an unexpected failure marks the camera `error` and the worker carries on; CBP is fetched alongside the cameras; one worker per state folder |
 | Queue vs. no queue on real footage | 45 lane-rounds hand-labelled from nine 20-minute rounds of PDN north (3 lanes) and PDN south (2 columns), 02:16–04:56 local on 2026-10-19, 21 queued. Each round read with a reference learnt only from the rounds before it, as the worker would have it | **39/40 correct** (round 1 has no history). The miss: PDN south, left column, 02:36, with one 45 s clip of history |
 | Speed on real footage | First and last frames of each clip compared by eye | Stalled lanes read 0.00–0.03 m/s; a lane that advanced about one car length (7–10 m) in 44 s read 0.16–0.23 m/s. Absolute metres are nominal until a calibration's scale is verified |
-| Lane types, booth distances, scale | Not verified for any camera | All `null` / `false` in `cameras.json` |
-
+| Lane types, scale | Not verified for any camera | `null` / `false` in `cameras.json` |
+| Booth distances | `lerdo-south-booths`: booth in view, exact. The other four: Google satellite map with its scale bar (2026-10-22), then corrected to each strip's booth-end row from a live frame. For PDN north, the strip runs ~45 m past the Feliz Viaje gantry's posts. For the two near-booth cameras, the camera position implied by their calibration puts the strip's row ~30 m (PDN south) and ~17 m (BOTA) in front of the camera | PDN north 365 ± 35 m, PDN south 510 ± 75 m, BOTA 615 ± 70 m, Lerdo north 335 ± 35 m; all `booth_distance_verified: false`. Lerdo north is **not yet corrected**: its strip ends short of the far gantry by a gap the flat-road calibration cannot measure (the road climbs there), so 335 m is likely low |
 | Daylight and dawn | Lerdo–Stanton northbound (`lerdo-north`), empty overnight and queued once the port opened at 6 a.m.; replayed the way the worker runs from 03:16 to 07:56 local | 15/15 rounds right, through the change from streetlight to sun |
 | Direction, measured | Signed speed toward the booth across 15 rounds | `bota-south-approach` was first set the wrong way round (red lights at night suggested it); speed was negative every round, so it was flipped. `lerdo-south-booths` positive every round |
 | A complete wait | `lerdo-south-booths`, booth in view so scale cancels | Empty until 06:36 local, then waits of 1.0–7.6 min |
@@ -215,22 +271,26 @@ bridge is not administered by FPFCH.
 **Known risks:**
 - **Low sun.** Long shadows of railings and gantries are structure too. At 08:40 local they lit
   patches of PDN's empty left lanes as "occupied"; the run-occupancy rule kept that from becoming
-  a queue, and the worker's hourly refresh should learn the shadows, but it has not been watched
-  through a full day.
+  a queue, and the worker's reference refresh should learn the shadows, but it has not been
+  watched through a full day.
+- **Map distances.** Every out-of-view lane's minutes rest on a map estimate. Until they are
+  graded against timed crossings, treat them as the approximate figures the viewer says they
+  are.
 - **PDN `lane-5`** reads only a short stalled stretch where daylight frames show more cars: it
   under-reads and is not validated.
 
 **Not yet done:**
-- **Booth distances.** No calibration except `lerdo-south-booths` can turn a queue into minutes
-  until `booth_distance_m` is measured on a map, from each strip's booth-end row to the CBP booth.
+- **Verifying booth distances.** The four map estimates need a survey, or grading against timed
+  crossings. Lerdo north's also needs correcting to its strip's booth-end row.
 - Confirming lane types (`cbp_lane`), directions (`direction_verified`) and scales.
 - BOTA north, Lerdo (Fila), BOTA (Av. Rafael Pérez Serna) and the Zaragoza avenue view are live but
   not calibrated. Every Zaragoza bridge stream and both Guadalupe–Tornillo streams were down all
   morning.
 - Grading against timed crossings (needs Phase 3).
 - Calibrating the remaining live cameras.
-- Measuring booth distances.
 
 ---
 
-*Written 2026-10-19 against commit `19035e9` on branch `chisme-border`.*
+*Written 2026-10-19 against commit `19035e9` on branch `chisme-border`; updated 2026-10-22 on
+branch `chisme-border-waittime` for map booth distances, the viewer's minutes and the review
+fixes.*

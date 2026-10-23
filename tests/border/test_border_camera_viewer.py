@@ -190,6 +190,24 @@ class WorkerReadings(unittest.TestCase):
         self.assertIn("yt-dlp timed out", cam["message"])
         self.assertIn("error", self.signals[-1])
 
+    def test_output_that_has_gone_away_does_not_stop_the_cycle(self):
+        def closed(_):
+            raise BrokenPipeError("stdout closed")
+        self.worker.emit = closed
+        with unittest.mock.patch("scraper.border.camera.worker.find",
+                                 side_effect=RuntimeError("yt-dlp timed out")):
+            self.worker.cycle()
+        self.assertIn("cycle_at", self.worker.status)
+        self.assertEqual(self.worker.status["cameras"][self.cam.id]["phase"], "error")
+
+    def test_a_full_disk_does_not_stop_the_cycle_and_the_page_still_updates(self):
+        with unittest.mock.patch("scraper.border.camera.worker.find",
+                                 side_effect=RuntimeError("yt-dlp timed out")), \
+                unittest.mock.patch("pathlib.Path.replace", side_effect=OSError("disk full")):
+            self.worker.cycle()
+        self.assertIn("cycle_at", self.worker.status)
+        self.assertEqual(self.worker.status["cameras"][self.cam.id]["phase"], "error")
+
     def test_cbp_is_fetched_alongside_the_cameras_not_before_them(self):
         camera_started = threading.Event()
         seen = []

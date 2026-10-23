@@ -122,7 +122,8 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
         if distance is None:
             why = "booth distance not measured"
         elif not timed:
-            why = "line not moving over the last 15 minutes"
+            n = roll.get("windows", 0)
+            why = f"line not moving over the last {n} reading{'' if n == 1 else 's'}"
         else:
             minutes, low, high = roll.get("wait_min"), roll.get("low_min"), roll.get("high_min")
             kind = "floor" if (roll.get("lower_bound") or est.beyond_view) else "estimate"
@@ -133,8 +134,12 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
             low, high = min(low, minutes), max(high, minutes)
             kind = "floor" if est.beyond_view else "estimate"
             note = "this minute's line, timed at the last 15 minutes' speed"
+        elif est.queue_m > 0 and distance is None:
+            why = "booth distance not measured"
         elif est.queue_m > 0:
-            why = "a line, but too little movement to time it yet"
+            # Speed is timed only on 12 m segments wholly inside the line, so a line shorter
+            # than 12-18 m is never timed, however it moves.
+            why = "a line, but too short or too still to time, and no recent speed on this lane"
         else:
             why = "too few frames this minute to read the lane"
     elif est.state == "no_queue":
@@ -243,6 +248,7 @@ class Worker:
         # worker and viewer never write a frame to disk (QUESTIONS.md Q-7), this one included.
         self.overlays: dict[str, bytes] = {}
         self._lock = threading.Lock()
+        self._write_failed = self._emit_failed = False
         self.status = {"started_at": _iso(datetime.now(UTC)), "every_s": every,
                        "reading_s": seconds, "cameras": {c.id: self._initial(c) for c in cameras}}
         self.write()
@@ -254,12 +260,35 @@ class Worker:
                 "message": "starting", "lanes": [], "learning": None}
 
     def write(self) -> None:
+        """Write status.json for anything outside this process. The viewer in this process reads
+        self.status directly, so a failed write (a full disk) is logged, once, and readings go on."""
         with self._lock:
-            state_dir().mkdir(parents=True, exist_ok=True)
-            path = state_dir() / "status.json"
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(plain(self.status), ensure_ascii=False), encoding="utf-8")
-            tmp.replace(path)
+            try:
+                state_dir().mkdir(parents=True, exist_ok=True)
+                path = state_dir() / "status.json"
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(plain(self.status), ensure_ascii=False), encoding="utf-8")
+                tmp.replace(path)
+            except OSError as exc:
+                if not self._write_failed:
+                    log.error("camera status not written (%s); readings continue", exc)
+                self._write_failed = True
+            else:
+                self._write_failed = False
+
+    def _emit(self, payload: dict) -> None:
+        """Hand one signal to `emit`. Output that has gone away (a closed pipe) is logged once
+        and never stops the cameras."""
+        if not self.emit:
+            return
+        try:
+            self.emit(payload)
+        except Exception as exc:  # noqa: BLE001 - whatever the consumer raises, readings go on
+            if not self._emit_failed:
+                log.error("camera signal not delivered (%s: %s)", type(exc).__name__, exc)
+            self._emit_failed = True
+        else:
+            self._emit_failed = False
 
     def _set(self, cam: Camera, **fields) -> None:
         with self._lock:
@@ -282,8 +311,10 @@ class Worker:
                 reader.bank.append(reader._sample(image_features(frame)))
         self.learnt[cam.id] = done + 1
         if self.learnt[cam.id] >= LEARN_CYCLES:
-            reader._rebuild()      # lanes already loaded are passed in as the reference held
-            reader.save()
+            # Only the missing lanes: a few minutes of samples must not replace a good lane's
+            # road (a car standing at the booth throughout would be learnt into it).
+            reader._rebuild(missing)
+            reader.save(missing)
             self.learnt[cam.id] = 0
             self._set(cam, phase="ok", message="road learnt; first estimate next cycle",
                       learning={"done": LEARN_CYCLES, "needed": LEARN_CYCLES,
@@ -328,7 +359,7 @@ class Worker:
             if self.emit:
                 sig = as_signal(est, lane, observed, cam.direction_verified)
                 sig["evidence"]["rolling"] = roll
-                self.emit(plain(signal_from_roll(sig, est, roll)))
+                self._emit(plain(signal_from_roll(sig, est, roll)))
         self._set(cam, phase="ok", message="", lanes=summaries, updated_at=_iso(observed))
 
     def _one(self, cam: Camera, started: datetime) -> None:
@@ -354,8 +385,7 @@ class Worker:
     def _fail(self, cam: Camera, phase: str, exc: Exception, was_failing: bool) -> None:
         message = f"{type(exc).__name__}: {exc}"
         self._set(cam, phase=phase, message=message)
-        if self.emit:
-            self.emit({"camera": cam.id, "error": message})
+        self._emit({"camera": cam.id, "error": message})
         if not was_failing:
             self._notify(f"Border camera {cam.id} stopped: {message}")
 

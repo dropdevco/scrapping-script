@@ -22,9 +22,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
+import zipfile
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,6 +47,8 @@ from .measure import (
     strip_features,
 )
 from .stream import StreamError, find, frames, resolve
+
+log = logging.getLogger(__name__)
 
 FPS = 2.0                 # two frames a second: a queued car moves well under a metre between them
 WINDOW_SECONDS = 60
@@ -124,10 +128,13 @@ class CameraReader:
                  for lane, strip in self.strips(size).items()}
         return size, lanes
 
-    def _rebuild(self) -> None:
+    def _rebuild(self, lanes: list[str] | None = None) -> None:
+        """Re-learn every lane's road from the bank, or only `lanes`."""
         size = self.bank[-1][0]
-        samples = [lanes for s, lanes in self.bank if s == size]
+        samples = [s_lanes for s, s_lanes in self.bank if s == size]
         for lane, strip in self.strips(size).items():
+            if lanes is not None and lane not in lanes:
+                continue
             ref = emptiest_reference([(g.astype(np.float32), e.astype(np.float32))
                                       for g, e in (s[lane] for s in samples)],
                                      strip.valid, self.references.get(lane))
@@ -139,13 +146,20 @@ class CameraReader:
         self.bank.extend(self._sample(image) for image in images)
         self._rebuild()
 
-    def save(self) -> None:
+    def save(self, lanes: list[str] | None = None) -> None:
+        """Save every lane's road, or only `lanes`. Each file is written whole and then moved
+        into place, so a worker killed mid-save never leaves a half-written reference."""
         state_dir().mkdir(parents=True, exist_ok=True)
         stamp = np.array(datetime.now(UTC).isoformat())
         for lane, ref in self.references.items():
-            np.savez_compressed(_state_path(self.camera, f"{lane}.reference"), grey=ref.image,
-                                edges=ref.edges, size=np.array(self._strips[lane].size),
-                                saved_at=stamp)
+            if lanes is not None and lane not in lanes:
+                continue
+            path = _state_path(self.camera, f"{lane}.reference")
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "wb") as f:
+                np.savez_compressed(f, grey=ref.image, edges=ref.edges,
+                                    size=np.array(self._strips[lane].size), saved_at=stamp)
+            os.replace(tmp, path)
 
     def _load_lane(self, lane: str, strip: Strip) -> Reference | None:
         """One lane's saved road, or None if there is none. The archive is closed before
@@ -173,7 +187,11 @@ class CameraReader:
                 continue
             try:
                 ref = self._load_lane(lane, strip)
-            except StaleReference:
+            except (StaleReference, ValueError, KeyError, EOFError, OSError,
+                    zipfile.BadZipFile) as exc:
+                # Stale or unreadable (a corrupt file would otherwise fail every cycle, for
+                # ever): drop it and learn the lane again.
+                log.warning("dropping %s/%s reference: %s", self.camera.id, lane, exc)
                 _state_path(self.camera, f"{lane}.reference").unlink(missing_ok=True)
                 ref = None
             if ref is None:

@@ -117,10 +117,13 @@ at the queue's average speed. Two consequences:
   stretched by a further 25 % each way (`SCALE_SLACK`).
 
 The range is `measure.wait_bounds`:
-- **low** = (distance − uncertainty, never below 0, + queue) ÷ the fastest quarter-minute speed;
+- **low** = (distance − uncertainty, never below 0, + queue) ÷ the fastest speed;
 - **high** = (distance + uncertainty + queue) ÷ the slowest.
 
-Each end then moves by the 25 % scale slack when that applies.
+Each end then moves by the 25 % scale slack when that applies. A one-minute window takes its
+fastest and slowest quarter-minute speeds. The 15-minute rolling wait, which is what gets
+published and shown, has one averaged speed, so its range reflects only the distance's ± and
+the scale slack, not how much the speed varied.
 
 ### States a reading can report
 
@@ -150,8 +153,8 @@ of number it is. `worker.lane_summary` decides; the page only prints it.
 | `≥ 9 min` | The line runs past the edge of the view | A floor, stated at its range's **low** end, not at the central wait |
 | `3 min` (or `≈ 3`) with "this minute's line" | A line in view, but too few motion samples this minute to time it | This minute's line, timed at the last 15 minutes' speed. Never an older line's wait: a short line at the booth is always too short to time, and showing a long line's wait from ten minutes ago would be wrong exactly when the line has cleared |
 | `0 min` | No queue, booth in view | — |
-| `under ~20 min` | No queue in view, booth out of view | A line could still wait between the view and the booth. It would be shorter than that stretch, so it is (distance + uncertainty) timed at the **slowest** recent queue speed among this camera's lanes, × 1.25 while the scale is unverified. It is "probably under", not a strict bound: a hidden line could move slower still |
-| `—` and a reason | No booth distance; a queue that has not moved for 15 minutes; no recent queue on this camera to time a hidden line by; too few frames | — |
+| `under ~20 min` | No queue in view, booth out of view | A line could still wait between the view and the booth. It would be shorter than that stretch, so it is (distance + uncertainty) timed at the **slowest** recent queue speed among this camera's lanes that are moving at all, × 1.25 while the scale is unverified. It is "probably under", not a strict bound: a hidden line could move slower still |
+| `—` and a reason | No booth distance; a queue that has not moved in its recent readings; a line too short or too still to time with no recent speed on that lane (speed is timed only on 12 m segments wholly inside the line, so a line under 12–18 m is never timed); no recent queue on this camera to time a hidden line by; too few frames | — |
 
 Under each bridge, CBP's own published waits are printed for comparison. They are fetched in
 parallel with the cameras, with one short attempt, and never feed the camera number.
@@ -213,8 +216,9 @@ silently.** Whatever was not verified says so, and travels with every reading.
    holds 18 samples, learning only from the emptiest of them. The bank keeps 36 samples, three
    per reading. That is about an hour at `run`'s 5-minute cadence, and about 24 minutes at the
    viewer's 2-minute cadence. A lane with no saved reference is learnt by the worker itself. Lanes
-   already learnt keep theirs, and a reference saved for a different calibration is deleted and
-   relearnt. Readings in the first hour after install are the least reliable: the one miss in the
+   already learnt keep theirs, and are never rebuilt from those few minutes of samples. A reference
+   saved for a different calibration, or unreadable, is deleted and relearnt; references are
+   written whole and then moved into place, so a killed worker cannot leave half a file. Readings in the first hour after install are the least reliable: the one miss in the
    evaluation below had a single 45-second clip of history.
 9. **A negative speed means `booth` points the wrong way.** On footage with traffic, the
    reader's signed speed toward the booth is a check on the calibration's direction.
@@ -256,9 +260,9 @@ bridge is not administered by FPFCH.
 
 | What | How it was checked | Result |
 |---|---|---|
-| Rectification, occupancy, motion, window logic, the range | 34 tests on rendered perspective queues of known length and speed, plus the range, calibration fields and saved references (`tests/border/test_border_camera.py`) | Speed 0.99–1.04× truth from 0.1 to 3 m/s; length within ±5 m; scale cancels; the range widens by the distance's ± and by the 25 % scale slack only when the booth is out of view; a stale reference is replaced without a crash on Windows |
+| Rectification, occupancy, motion, window logic, the range | 36 tests on rendered perspective queues of known length and speed, plus the range, calibration fields and saved references (`tests/border/test_border_camera.py`) | Speed 0.99–1.04× truth from 0.1 to 3 m/s; length within ±5 m; scale cancels; the range widens by the distance's ± and by the 25 % scale slack only when the booth is out of view; a stale or corrupt reference is replaced without a crash on Windows; learning one lane leaves the others' saved road untouched |
 | Stream handling | 13 tests against small recorded videos and a mocked channel (`test_border_camera_stream.py`) | Down / frozen / lost all raise |
-| What the viewer shows, and the worker | 25 tests (`test_border_camera_viewer.py`) | Every row of [What the viewer shows](#what-the-viewer-shows); the published signal pairs the rolling wait with its own range; an unexpected failure marks the camera `error` and the worker carries on; CBP is fetched alongside the cameras; one worker per state folder |
+| What the viewer shows, and the worker | 27 tests (`test_border_camera_viewer.py`) | Every row of [What the viewer shows](#what-the-viewer-shows); the published signal pairs the rolling wait with its own range; an unexpected failure, a closed output or a full disk marks the camera `error` and the worker carries on; CBP is fetched alongside the cameras; one worker per state folder |
 | Queue vs. no queue on real footage | 45 lane-rounds hand-labelled from nine 20-minute rounds of PDN north (3 lanes) and PDN south (2 columns), 02:16–04:56 local on 2026-10-19, 21 queued. Each round read with a reference learnt only from the rounds before it, as the worker would have it | **39/40 correct** (round 1 has no history). The miss: PDN south, left column, 02:36, with one 45 s clip of history |
 | Speed on real footage | First and last frames of each clip compared by eye | Stalled lanes read 0.00–0.03 m/s; a lane that advanced about one car length (7–10 m) in 44 s read 0.16–0.23 m/s. Absolute metres are nominal until a calibration's scale is verified |
 | Lane types, scale | Not verified for any camera | `null` / `false` in `cameras.json` |

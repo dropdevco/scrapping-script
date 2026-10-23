@@ -350,6 +350,29 @@ class SavedReferences(unittest.TestCase):
         self.assertEqual(reader.prepare(), ["car-2"])
         self.assertEqual(list(reader.references), ["car"])
 
+    def test_an_unreadable_reference_is_dropped_and_relearnt(self):
+        # A worker killed mid-save could leave garbage; it must not fail every cycle for ever.
+        self.learnt().save()
+        _state_path(self.cam, "car.reference").write_bytes(b"not an archive")
+        reader = CameraReader(self.cam)
+        self.assertEqual(reader.prepare(), ["car"])
+        self.assertFalse(_state_path(self.cam, "car.reference").exists())
+
+    def test_learning_one_lane_leaves_the_others_road_untouched(self):
+        self.learnt().save()
+        saved = _state_path(self.cam, "car.reference").read_bytes()
+        reader = CameraReader(self.cam)
+        reader.prepare()
+        kept = reader.references["car"]
+        # A car standing in every sample: learning car-2 from these must not touch car.
+        reader.bank.extend(reader._sample(image_features(Scene().render([(30.0, 0)])))
+                           for _ in range(6))
+        reader._rebuild(["car-2"])
+        reader.save(["car-2"])
+        self.assertIs(reader.references["car"], kept)
+        self.assertEqual(_state_path(self.cam, "car.reference").read_bytes(), saved)
+        self.assertFalse(list(_state_path(self.cam, "x").parent.glob("*.tmp")))
+
 
 if __name__ == "__main__":
     unittest.main()

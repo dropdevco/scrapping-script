@@ -34,6 +34,7 @@ MIN_PEAK = 0.55          # weaker correlation than this is not the same cars mov
 MIN_STRUCTURE = 2.0      # a segment with less profile contrast has nothing to track
 MIN_SPEED_M_S = 0.02     # slower than this over a whole window is a stalled queue
 MIN_FRAMES = 20
+MAX_PAIR_GAP = 3.0       # frame pairs further apart than this many intervals are not timed
 SCALE_SLACK = 0.25       # widening of the range when an unverified scale does not cancel
 
 
@@ -299,26 +300,44 @@ class LaneWindow:
         self.strip, self.ref, self.dt = strip, reference, dt
         self.occupied: list[np.ndarray] = []
         self.speeds: list[list[tuple[float, float]]] = []
+        self.times: list[float] = []
+        self.untimed_pairs = 0
         self._prev: np.ndarray | None = None
 
-    def add(self, frame: np.ndarray | Image) -> None:
+    def add(self, frame: np.ndarray | Image, at: float | None = None) -> None:
+        """`at` is the frame's capture time in seconds (hls.Stamped.at), so a pair's speed is
+        divided by the time that really passed between them. Without it, frames are taken to be
+        `dt` apart, as recorded clips are. A pair further apart than MAX_PAIR_GAP intervals
+        spans a gap in the stream and is not timed: the cars moved by an unknown amount."""
         image = frame if isinstance(frame, Image) else image_features(frame)
         g, e = strip_features(self.strip, image)
         fg = foreground(g, e, self.ref, self.strip.valid)
         self.occupied.append(occupancy(fg, self.strip.valid))
         cur = profile(g, self.ref, self.strip.valid)
+        t = at if at is not None else (self.times[-1] + self.dt if self.times else 0.0)
         if self._prev is not None:
-            self.speeds.append(segment_speeds(cur, self._prev, self.strip.rows_valid, self.dt))
+            pair_dt = t - self.times[-1]
+            if 0 < pair_dt <= MAX_PAIR_GAP * self.dt:
+                self.speeds.append(segment_speeds(cur, self._prev, self.strip.rows_valid, pair_dt))
+            else:
+                self.untimed_pairs += 1
+        self.times.append(t)
         self._prev = cur
         # Never let the reference learn a vehicle: grow the detection before excluding it.
         busy = cv2.dilate(fg.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
         self.ref.update(g, e, self.strip.valid & ~busy)
 
+    def _seconds(self) -> float:
+        """Stream time the window covers: from its first to its last frame, plus one interval."""
+        if len(self.times) < 2:
+            return len(self.times) * self.dt
+        return float(self.times[-1] - self.times[0] + self.dt)
+
     def result(self) -> LaneEstimate:
         cam, lane = self.strip.camera, self.strip.lane
         base = {"camera": cam.id, "lane": lane.lane, "port_number": cam.port_number,
                 "direction": cam.direction, "frames": len(self.occupied),
-                "seconds": len(self.occupied) * self.dt, "scale_verified": cam.scale_verified}
+                "seconds": self._seconds(), "scale_verified": cam.scale_verified}
         if len(self.occupied) < MIN_FRAMES:
             return LaneEstimate(state="insufficient", **base)
 
@@ -351,6 +370,7 @@ class LaneWindow:
         per_pair = [np.mean([v for centre, v in pair if lo <= centre <= hi])
                     for pair in self.speeds if any(lo <= centre <= hi for centre, _ in pair)]
         detail["speed_samples"] = len(per_pair)
+        detail["untimed_pairs"] = self.untimed_pairs
         if len(per_pair) < MIN_FRAMES // 2:
             return LaneEstimate(state="insufficient", queue_m=queue_m, beyond_view=beyond,
                                 detail=detail, **base)

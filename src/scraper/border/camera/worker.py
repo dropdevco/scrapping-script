@@ -34,7 +34,7 @@ from datetime import UTC, datetime, timedelta
 import cv2
 
 from ..cbp import PORTS
-from .calibration import Camera, live_region
+from .calibration import Camera
 from .measure import (
     MIN_SPEED_M_S,
     SCALE_SLACK,
@@ -44,8 +44,8 @@ from .measure import (
     rolling,
     wait_bounds,
 )
-from .reader import FPS, CameraReader, as_signal, debug_image, state_dir
-from .stream import StreamError, find, frames, resolve
+from .reader import CameraReader, as_signal, debug_image, live_frames, state_dir
+from .stream import StreamError, find
 
 LEARN_CYCLES = 3          # readings of samples before a camera with no learnt road starts estimating
 OPEN_SECONDS = 15         # finding and opening a stream, on top of the video it reads
@@ -305,10 +305,9 @@ class Worker:
                   message=f"learning {what} ({done + 1} of {LEARN_CYCLES})",
                   eta_at=_iso(started + timedelta(seconds=self.seconds + OPEN_SECONDS)),
                   learning={"done": done, "needed": LEARN_CYCLES, "ready_at": _iso(ready)})
-        url = resolve(cam.channel, cam.title)
-        for i, frame in enumerate(frames(url, FPS, self.seconds, live_region(cam))):
+        for i, stamped in enumerate(live_frames(cam, self.seconds)):
             if i % 8 == 0:
-                reader.bank.append(reader._sample(image_features(frame)))
+                reader.bank.append(reader._sample(image_features(stamped.image)))
         self.learnt[cam.id] = done + 1
         if self.learnt[cam.id] >= LEARN_CYCLES:
             # Only the missing lanes: a few minutes of samples must not replace a good lane's
@@ -327,9 +326,9 @@ class Worker:
     def _read(self, cam: Camera, reader: CameraReader, started: datetime) -> None:
         self._set(cam, phase="reading", message="calculating",
                   eta_at=_iso(started + timedelta(seconds=self.seconds + OPEN_SECONDS)))
-        url = resolve(cam.channel, cam.title)
-        estimates = reader.read(frames(url, FPS, self.seconds, live_region(cam)), save=True)
-        observed = datetime.now(UTC)
+        estimates = reader.read(live_frames(cam, self.seconds), save=True)
+        # The road's time, from the stream's own clock (ADR-0014), not when the read finished.
+        observed = reader.last_at or datetime.now(UTC)
         if reader.last_frame is not None:
             ok, jpeg = cv2.imencode(".jpg", debug_image(reader, estimates),
                                     [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -366,7 +365,8 @@ class Worker:
         reader = self.readers[cam.id]
         was_failing = self.status["cameras"][cam.id]["phase"] in ("down", "error")
         try:
-            self._set(cam, video_id=find(cam.channel, cam.title).video_id)
+            if cam.source == "youtube":
+                self._set(cam, video_id=find(cam.channel, cam.title).video_id)
             missing = reader.prepare()
             if missing:
                 self._learn(cam, reader, started, missing)

@@ -35,6 +35,7 @@ import cv2
 import numpy as np
 
 from .calibration import PX_PER_M, Camera, Strip, live_region, load_cameras
+from .hls import HlsReader, Stamped
 from .measure import (
     BIN_M,
     Image,
@@ -51,6 +52,7 @@ from .stream import StreamError, find, frames, resolve
 log = logging.getLogger(__name__)
 
 FPS = 2.0                 # two frames a second: a queued car moves well under a metre between them
+YOUTUBE_SIZE = (854, 480) # FPFCH streams are read at 480p (stream.FORMAT); the City at frame_size
 WINDOW_SECONDS = 60
 REFERENCE_SECONDS = 20
 
@@ -115,6 +117,7 @@ class CameraReader:
         self.references: dict[str, Reference] = {}
         self.bank: deque = deque(maxlen=BANK_SIZE)
         self.last_frame: np.ndarray | None = None
+        self.last_at: datetime | None = None     # capture time of last_frame, when stamped
         self.last_windows: dict[str, LaneWindow] = {}
 
     def strips(self, size: tuple[int, int]) -> dict[str, Strip]:
@@ -212,7 +215,10 @@ class CameraReader:
     def read(self, source_frames, save: bool = True) -> list[LaneEstimate]:
         windows: dict[str, LaneWindow] = {}
         raw_images: list[Image] = []
-        for frame in source_frames:
+        for item in source_frames:
+            # Live frames come stamped with their capture time (hls.Stamped); recorded clips are
+            # bare frames taken to be 1/FPS apart.
+            frame, at = (item.image, item.at) if isinstance(item, Stamped) else (item, None)
             raw = image_features(frame)            # once per frame, shared by every lane
             if not windows:
                 size = (frame.shape[1], frame.shape[0])
@@ -223,9 +229,9 @@ class CameraReader:
                                             1 / FPS)
                            for lane, strip in self.strips(size).items()}
             for window in windows.values():
-                window.add(raw)
+                window.add(raw, None if at is None else at.timestamp())
             raw_images.append(raw)
-            self.last_frame = frame
+            self.last_frame, self.last_at = frame, at
         self.last_windows = windows
         if raw_images:
             step = max(1, len(raw_images) // SAMPLES_PER_WINDOW)
@@ -299,6 +305,27 @@ def _source(camera: Camera, source: str | None) -> str:
     return source or resolve(camera.channel, camera.title)
 
 
+def live_frames(camera: Camera, seconds: float | None):
+    """The camera's live stream as stamped frames (ADR-0014): each carries its capture time
+    from the stream's own clock, so a reading is timed by the road, not by the network."""
+    from ...core.config import settings  # only live reads need the settings
+
+    if camera.source == "hls":
+        url_fn, size = (lambda: camera.url), camera.frame_size
+    else:
+        url_fn, size = (lambda: resolve(camera.channel, camera.title)), YOUTUBE_SIZE
+    reader = HlsReader(url_fn, camera.stream_clock, size, FPS, settings.user_agent,
+                       live_region(camera))
+    return reader.frames(seconds)
+
+
+def source_frames(camera: Camera, source: str | None, seconds: float):
+    """A recorded clip (`source`) as bare frames, or the live stream as stamped ones."""
+    if source:
+        return frames(source, FPS, seconds, live_region(camera))
+    return live_frames(camera, seconds)
+
+
 def _camera(cameras: dict[str, Camera], cid: str) -> Camera:
     if cid not in cameras:
         raise SystemExit(f"unknown camera {cid}; known: {', '.join(sorted(cameras))}")
@@ -307,6 +334,11 @@ def _camera(cameras: dict[str, Camera], cid: str) -> Camera:
 
 def cmd_list(args, cameras) -> int:
     for cam in cameras.values():
+        if cam.source == "hls":
+            status = f"HLS {cam.url} (never displayed)" if not cam.display else f"HLS {cam.url}"
+            lanes = ", ".join(lane.lane for lane in cam.lanes) or f"{len(cam.count_zones)} count zones"
+            print(f"{cam.id:<16} {cam.port_number} {cam.direction:<5} [{lanes}] - {status}")
+            continue
         try:
             listed = find(cam.channel, cam.title)
             status = f"live ({listed.video_id})" if listed.live else "listed, not live"
@@ -320,7 +352,10 @@ def cmd_list(args, cameras) -> int:
 
 def cmd_snapshot(args, cameras) -> int:
     cam = _camera(cameras, args.camera)
-    frame = next(frames(_source(cam, args.source), FPS, 1, live_region(cam)))
+    if args.source:
+        frame = next(frames(args.source, FPS, 1, live_region(cam)))
+    else:
+        frame = next(live_frames(cam, 1)).image
     reader = CameraReader(cam)
     shown = frame.copy()
     sx, sy = frame.shape[1] / cam.frame_size[0], frame.shape[0] / cam.frame_size[1]
@@ -371,19 +406,25 @@ def cmd_reference(args, cameras) -> int:
 
 def _estimate(cam: Camera, source: str | None, seconds: float,
               debug: str | None = None) -> list[LaneEstimate]:
+    return _estimate_with(cam, source, seconds, debug)[0]
+
+
+def _estimate_with(cam: Camera, source: str | None, seconds: float,
+                   debug: str | None = None) -> tuple[list[LaneEstimate], CameraReader]:
     reader = CameraReader(cam)
-    estimates = reader.read(frames(_source(cam, source), FPS, seconds, live_region(cam)),
-                            save=source is None)
+    estimates = reader.read(source_frames(cam, source, seconds), save=source is None)
     if debug:
         cv2.imwrite(debug, debug_image(reader, estimates))
-    return estimates
+    return estimates, reader
 
 
 def _read_once(cam: Camera, source: str | None, seconds: float,
                debug: str | None = None) -> list[dict]:
     started = datetime.now(UTC)
+    estimates, reader = _estimate_with(cam, source, seconds, debug)
+    observed = reader.last_at or started        # the road's time when the stream says it
     lanes = {lane.lane: lane for lane in cam.lanes}
-    return [as_signal(e, lanes[e.lane], started, cam.direction_verified) for e in _estimate(cam, source, seconds, debug)]
+    return [as_signal(e, lanes[e.lane], observed, cam.direction_verified) for e in estimates]
 
 
 def cmd_read(args, cameras) -> int:

@@ -31,6 +31,7 @@ import numpy as np
 FORMAT = "bestvideo[height<=480]/bestvideo"   # 480p is plenty for metres of queue; less to pull
 FROZEN_SECONDS = 20       # an unchanging picture this long is a stalled encoder, not a quiet road
 FROZEN_DIFF = 1.0         # mean grey-level change below which two frames are "the same picture"
+FROZEN_DIFF_SCENE = 0.3   # the same, for a whole scene with no burned-in clock (see frozen_check)
 BLACK_LEVEL = 12          # mean grey below this is an encoder sending black, not a dark road
 FROZEN_CHANGED = 0.1      # frozen when at most this share of a window's frames changed: keyframes
 LISTING_TTL = 600         # a channel's stream list is re-read at most every ten minutes
@@ -143,9 +144,8 @@ def frames(url: str, fps: float, seconds: float,
     source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     step = max(1, round(source_fps / fps))
     wanted = round(seconds * fps)
-    frozen_limit = max(2, round(FROZEN_SECONDS * fps))
-    changes: deque[bool] = deque(maxlen=frozen_limit)
-    last, i, n = None, 0, 0
+    check = frozen_check(fps, live_region)
+    i, n = 0, 0
     try:
         while n < wanted:
             if not cap.grab():
@@ -154,17 +154,7 @@ def frames(url: str, fps: float, seconds: float,
                 ok, frame = cap.retrieve()
                 if not ok:
                     raise StreamLost(f"frame {n} could not be decoded")
-                probe = _live_probe(frame, live_region)
-                if last is not None:
-                    changes.append(float(np.abs(probe - last).mean()) >= FROZEN_DIFF)
-                last = probe
-                # Judged over the whole window, not a run of identical frames: a frozen
-                # stream is still re-encoded, and every keyframe changes the picture a little.
-                if len(changes) == frozen_limit and sum(changes) <= FROZEN_CHANGED * frozen_limit:
-                    # Seen live: Zaragoza (Av. Waterfill) came back at 10:16 UTC on 2026-10-19
-                    # serving solid black for 20 s, then dropped again. Say which it is.
-                    what = "is black" if float(frame.mean()) < BLACK_LEVEL else "has not changed"
-                    raise StreamFrozen(f"the picture {what} for {FROZEN_SECONDS}s")
+                check(frame)
                 n += 1
                 yield frame
             i += 1
@@ -172,10 +162,40 @@ def frames(url: str, fps: float, seconds: float,
         cap.release()
 
 
-def _live_probe(frame: np.ndarray, region) -> np.ndarray:
+def frozen_check(fps: float, live_region: tuple[float, float, float, float] | None):
+    """A callable that takes each frame in turn and raises StreamFrozen once the picture (or
+    the `live_region`) has stopped changing for FROZEN_SECONDS of frames at `fps`."""
+    limit = max(2, round(FROZEN_SECONDS * fps))
+    changes: deque[bool] = deque(maxlen=limit)
+    last: np.ndarray | None = None
+    # Without a burned-in clock the whole scene is the probe, and a quiet scene changes little:
+    # the City's bridgepdn1 at 19:50 local on 2026-10-24 changed by a median 1.14 grey levels a
+    # frame pair (min 0.16) at full size, but under 1.0 once shrunk to 64x16. So it is compared
+    # larger and against a lower bar. 0.3 is a judgement from that one measurement (ASSUMPTION):
+    # a frozen encoder's re-encodes are expected to differ by less.
+    size, bar = ((64, 16), FROZEN_DIFF) if live_region else ((320, 180), FROZEN_DIFF_SCENE)
+
+    def check(frame: np.ndarray) -> None:
+        nonlocal last
+        probe = _live_probe(frame, live_region, size)
+        if last is not None:
+            changes.append(float(np.abs(probe - last).mean()) >= bar)
+        last = probe
+        # Judged over the whole window, not a run of identical frames: a frozen stream is
+        # still re-encoded, and every keyframe changes the picture a little.
+        if len(changes) == limit and sum(changes) <= FROZEN_CHANGED * limit:
+            # Seen live: Zaragoza (Av. Waterfill) came back at 10:16 UTC on 2026-10-19
+            # serving solid black for 20 s, then dropped again. Say which it is.
+            what = "is black" if float(frame.mean()) < BLACK_LEVEL else "has not changed"
+            raise StreamFrozen(f"the picture {what} for {FROZEN_SECONDS}s")
+
+    return check
+
+
+def _live_probe(frame: np.ndarray, region, size: tuple[int, int] = (64, 16)) -> np.ndarray:
     h, w = frame.shape[:2]
     if region:
         x, y, rw, rh = region
         frame = frame[round(y * h):round((y + rh) * h), round(x * w):round((x + rw) * w)]
     grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
-    return cv2.resize(grey, (64, 16), interpolation=cv2.INTER_AREA).astype(np.float32)
+    return cv2.resize(grey, size, interpolation=cv2.INTER_AREA).astype(np.float32)

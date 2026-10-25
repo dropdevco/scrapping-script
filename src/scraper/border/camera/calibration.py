@@ -59,6 +59,14 @@ class Camera:
     notes: str = ""
     channel: str = "https://www.youtube.com/@fpfch/streams"
     extra: dict = field(default_factory=dict)
+    # Where the video comes from: "youtube" (found by `title` on `channel`) or "hls" (a fixed
+    # playlist `url`, e.g. the City of El Paso's bridge cameras), and which clock stamps its
+    # frames (hls.HlsReader): YouTube carries PROGRAM-DATE-TIME, the City only Last-Modified.
+    source: str = "youtube"
+    url: str | None = None
+    stream_clock: str = "pdt"
+    display: bool = True           # False: never shown on our pages (the City feeds, ADR-0014)
+    count_zones: tuple = ()        # crossing.Zone, the bands cars are counted across
 
 
 def _lane(raw: dict) -> Lane:
@@ -77,21 +85,39 @@ def _lane(raw: dict) -> Lane:
 
 
 def camera_from_dict(cid: str, raw: dict) -> Camera:
+    from .crossing import zones_from_raw
+
+    lanes = tuple(_lane(lane) for lane in raw.get("lanes", ()))
+    if raw.get("ground") is None:
+        if lanes:
+            raise ValueError(f"{cid}: lanes need a ground rectangle")
+        raw = {**raw, "ground": {"image": [(0, 0)] * 4, "width_m": 0, "length_m": 0}}
     ground = tuple(tuple(p) for p in raw["ground"]["image"])
     if len(ground) != 4:
         raise ValueError(f"{cid}: ground needs exactly four points")
     if raw["direction"] not in ("north", "south"):
         raise ValueError(f"{cid}: direction must be north or south")
+    source = raw.get("source", {"kind": "youtube"})
+    if source["kind"] not in ("youtube", "hls"):
+        raise ValueError(f"{cid}: source kind must be youtube or hls")
+    if source["kind"] == "hls" and not source.get("url"):
+        raise ValueError(f"{cid}: an hls source needs a url")
+    stream_clock = source.get("clock", "pdt")
+    if stream_clock not in ("pdt", "last-modified"):
+        raise ValueError(f"{cid}: source clock must be pdt or last-modified")
     return Camera(
         id=cid, title=raw["title"], port_number=raw["port_number"], direction=raw["direction"],
         direction_verified=bool(raw.get("direction_verified", False)),
         frame_size=tuple(raw["frame_size"]), ground=ground,
         width_m=float(raw["ground"]["width_m"]), length_m=float(raw["ground"]["length_m"]),
         scale_verified=bool(raw["ground"].get("scale_verified", False)),
-        lanes=tuple(_lane(lane) for lane in raw["lanes"]),
+        lanes=lanes,
         mask=tuple(tuple(m) for m in raw.get("mask", ())),
         clock=tuple(raw["clock"]) if raw.get("clock") else None,
         notes=raw.get("notes", ""), channel=raw.get("channel", Camera.channel),
+        source=source["kind"], url=source.get("url"), stream_clock=stream_clock,
+        display=bool(raw.get("display", True)),
+        count_zones=zones_from_raw(cid, raw.get("count_zones", [])),
     )
 
 

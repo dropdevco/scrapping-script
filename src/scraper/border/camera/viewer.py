@@ -296,6 +296,9 @@ def cmd_view(args, cameras) -> int:
 
     chosen = ([cameras[c.strip()] for c in args.cameras.split(",") if c.strip()]
               if args.cameras else list(cameras.values()))
+    # Cameras marked display: false (the City of El Paso feeds, ADR-0014) are never shown here,
+    # even when asked for; cameras with no lanes have no queue to show.
+    chosen = [c for c in chosen if c.display and c.lanes]
     try:
         worker = Worker(chosen, seconds=args.seconds, every=args.every,
                         emit=(lambda sig: print(json.dumps(sig, ensure_ascii=False), flush=True))

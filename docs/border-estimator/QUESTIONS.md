@@ -74,6 +74,22 @@ Which do you want? Is asking for location acceptable to the audience?
 With no CBP number southbound, the southbound estimate is graded only by southbound timed crossings.
 Should replies invite people heading into Juárez to time their crossing too ("voy a cruzar a Juárez")?
 
+### Q-21. Crossing time from a Mexican-side and a US-side camera: which feeds, which methods, which data?
+
+**Answered 2026-10-24 by the product owner** ([ADR-0014](../architecture/adr/0014-crossing-time-from-two-cameras.md)):
+
+- **The US-side feed** is the City of El Paso's Bridge Cameras page
+  (https://www2.elpasotexas.gov/misc/externally_linked/bridges/cameras.html). CBP publishes no cameras.
+- **Methods:** two, side by side on the same frames. One is deterministic (no model); the other uses a
+  vision model (YOLOX-S, pinned, Apache-2.0).
+- **Licence plates:** never read, never matched.
+- **City feeds:** the risk of reading them automatically is accepted. They are **never displayed** on our
+  pages.
+- **GPS-logged team crossings:** later.
+
+Per-vehicle data (boxes, colour signatures) stays in memory for at most 3 h. Only counts and transits
+per window are written.
+
 ---
 
-*Answers recorded 2026-10-12 on branch `chisme-border`.*
+*Answers recorded 2026-10-12 on branch `chisme-border`; Q-21 on 2026-10-24 on `chisme-border-waittime`.*

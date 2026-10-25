@@ -19,9 +19,12 @@ For each **port × lane type × direction**, publish one estimated wait in minut
 
 Every number must be explainable to a person, matching the existing rule in `scoring.py:3-5`.
 
-**No machine learning.** The estimate is a deterministic function of its inputs. Two runs over the same
-inputs give the same answer. That keeps it testable and arguable, and it matches how the existing code
-is written.
+**No machine learning in the estimate.** The estimate is a deterministic function of its inputs. Two
+runs over the same inputs give the same answer. That keeps it testable and arguable, and it matches how
+the existing code is written. Since [ADR-0014](../architecture/adr/0014-crossing-time-from-two-cameras.md)
+(2026-10-24), one **sensor** may use a pinned, pretrained vision model, never trained on our data: the
+crossing-time counter, run beside a deterministic counter on the same frames. Its output is a count,
+and everything from there on stays deterministic.
 
 ### Non-goals (for now)
 

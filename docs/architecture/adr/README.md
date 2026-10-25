@@ -25,6 +25,7 @@ disagree, the commit body is the primary source.
 | [0011](0011-make-swallowed-failures-loud.md) | Swallowed failures are made loud, everywhere | Accepted |
 | [0012](0012-python-rendering-not-satori.md) | Slides render in Python/Pillow, not `next/og` | Accepted |
 | [0013](0013-weighted-fusion-of-wait-signals.md) | A trust-weighted Chisme estimate is shown beside today's freshest-reading number | Accepted |
+| [0014](0014-crossing-time-from-two-cameras.md) | Crossing time is measured between a Mexican-side and a US-side camera, by two methods side by side | Accepted |
 
 ## Writing a new one
 

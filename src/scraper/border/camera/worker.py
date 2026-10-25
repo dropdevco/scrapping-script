@@ -329,7 +329,7 @@ class Worker:
         estimates = reader.read(live_frames(cam, self.seconds), save=True)
         # The road's time, from the stream's own clock (ADR-0014), not when the read finished.
         observed = reader.last_at or datetime.now(UTC)
-        if reader.last_frame is not None:
+        if reader.last_frame is not None and cam.display:   # never a picture of a hidden feed
             ok, jpeg = cv2.imencode(".jpg", debug_image(reader, estimates),
                                     [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ok:

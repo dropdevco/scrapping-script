@@ -365,15 +365,23 @@ def cmd_snapshot(args, cameras) -> int:
     for x, y, w, h in cam.mask:
         cv2.rectangle(shown, (round(x * sx), round(y * sy)),
                       (round((x + w) * sx), round((y + h) * sy)), (0, 0, 200), 2)
-    ground = np.int32([[x * sx, y * sy] for x, y in cam.ground])
-    cv2.polylines(shown, [ground], True, (0, 255, 255), 2)
+    if cam.lanes:
+        ground = np.int32([[x * sx, y * sy] for x, y in cam.ground])
+        cv2.polylines(shown, [ground], True, (0, 255, 255), 2)
+    for zone in cam.count_zones:                 # counting bands: magenta, far edge thicker
+        quad = np.int32([[x * sx, y * sy] for x, y in zone.quad])
+        cv2.polylines(shown, [quad], True, (255, 0, 255), 1)
+        cv2.line(shown, tuple(int(v) for v in quad[2]), tuple(int(v) for v in quad[3]),
+                 (255, 0, 255), 2)
+        cv2.putText(shown, f"{zone.line}:{zone.lane}", tuple(int(v) for v in quad[3]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), 1)
     for name, strip in reader.strips((frame.shape[1], frame.shape[0])).items():
         outline = np.int32(strip.outline())
         cv2.polylines(shown, [outline], True, (0, 220, 0), 2)
         cv2.putText(shown, f"{name} booth", tuple(int(v) for v in outline[0]),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 0), 1)
     cv2.imwrite(args.out, shown)
-    print(f"wrote {args.out}: yellow = ground rectangle, green = lane strips "
+    print(f"wrote {args.out}: yellow = ground rectangle, green = lane strips, magenta = count zones, "
           f"(label at the booth end), red = masked overlays")
     return 0
 
@@ -397,7 +405,7 @@ def cmd_reference(args, cameras) -> int:
         for n in range(args.rounds):
             if n:
                 time.sleep(args.gap)
-            got = list(frames(_source(cam, None), FPS, args.seconds, live_region(cam)))
+            got = [f.image for f in live_frames(cam, args.seconds)]
             images.extend(image_features(f) for f in got[::8])
             print(f"round {n + 1}/{args.rounds}: {len(got)} frames", flush=True)
     reader = CameraReader(cam)

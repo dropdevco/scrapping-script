@@ -49,6 +49,10 @@ from .stream import FROZEN_SECONDS, StreamFrozen, StreamLost, frozen_check
 WRAP = 1 << 33                 # MPEG-TS timestamps are 33-bit, at 90 kHz: they wrap every 26.5 h
 CLOCK_HZ = 90_000
 OFFSET_SEGMENTS = 30           # the offset is the median over this many recent segments
+CLOCK_SEGMENTS = 1024          # segments remembered for placing frames (over 17 min of 1 s ones)
+CUT_TOLERANCE_S = 2.0          # a segment starting further than this from where the last ended,
+                               # beyond any skipped segments, is a timeline cut
+STAMP_WATCHDOG_S = 30.0        # no frame placed in time for this long: the read has failed
 LM_ROUNDING_S = 0.5            # Last-Modified truncates to the second: add the mean lost half
 POLL_RETRIES = 3
 FETCH_TIMEOUT_S = 10
@@ -56,6 +60,17 @@ FETCH_TIMEOUT_S = 10
 
 class Gone(StreamLost):
     """HTTP 404/410: the resource is not there (an expired segment, or an expired URL)."""
+
+
+class Blocked(StreamLost):
+    """HTTP 401/403 that a fresh URL did not cure: the server refuses this client. For the City
+    feeds that means stop (ADR-0014): the client is never disguised to get past a block."""
+
+
+class TimelineCut(StreamLost):
+    """The stream's timestamps jumped (an encoder or server restart, #EXT-X-DISCONTINUITY). The
+    read ends before the cut, with every frame before it stamped right; a fresh read starts a
+    fresh clock on the far side."""
 
 
 @dataclass(frozen=True)
@@ -67,7 +82,7 @@ class Stamped:
 
 @dataclass(frozen=True)
 class Gap:
-    after: datetime | None     # the capture time of the last frame before the gap, if known
+    after: datetime | None     # stream time where the unseen stretch starts; None before any
     seconds: float             # how much stream time was never seen
     reason: str
 
@@ -78,6 +93,7 @@ class Segment:
     uri: str
     duration: float
     program_time: datetime | None   # wall time at the segment's start, if the playlist says
+    discontinuity: bool = False     # #EXT-X-DISCONTINUITY before it: its timestamps restart
 
 
 @dataclass(frozen=True)
@@ -98,6 +114,7 @@ def parse_playlist(text: str, base_url: str) -> Playlist:
     segments: list[Segment] = []
     duration: float | None = None
     program: datetime | None = None
+    cut = False
     seq = None
     for raw in text.splitlines():
         line = raw.strip()
@@ -113,12 +130,15 @@ def parse_playlist(text: str, base_url: str) -> Playlist:
             duration = float(line.split(":", 1)[1].split(",", 1)[0])
         elif line.startswith("#EXT-X-ENDLIST"):
             ended = True
+        elif line == "#EXT-X-DISCONTINUITY":
+            cut = True
         elif not line.startswith("#"):
             seq = media_sequence + len(segments)
-            segments.append(Segment(seq, urljoin(base_url, line), duration or target, program))
+            segments.append(Segment(seq, urljoin(base_url, line), duration or target, program,
+                                    cut))
             # One PDT covers the segments after it until the next tag; carry it forward.
             program = program + timedelta(seconds=duration or target) if program else None
-            duration = None
+            duration, cut = None, False
     return Playlist(media_sequence, target, segments, ended)
 
 
@@ -170,11 +190,18 @@ class Clock:
 
     def __init__(self) -> None:
         self.offsets: deque[float] = deque(maxlen=OFFSET_SEGMENTS)
-        self.segments: deque[tuple[int, float, float]] = deque(maxlen=64)  # start_mod, span_s, u
+        # Kept long enough to place a frame the consumer reaches long after its segment was
+        # fetched: the decoder can hold 256 frames (two minutes at 2 fps) and more behind them.
+        self.segments: deque[tuple[int, float, float]] = deque(maxlen=CLOCK_SEGMENTS)
         self._last_mod: int | None = None
         self._unwrapped = 0
+        self._lock = threading.Lock()   # added to by the pump thread, read by the consumer
 
     def add(self, start_pts: int, end_pts: int, wall_start: datetime) -> None:
+        with self._lock:
+            self._add(start_pts, end_pts, wall_start)
+
+    def _add(self, start_pts: int, end_pts: int, wall_start: datetime) -> None:
         mod = start_pts % WRAP
         if self._last_mod is None:
             self._unwrapped = mod
@@ -187,11 +214,13 @@ class Clock:
         self.offsets.append(wall_start.timestamp() - u)
 
     def wall(self, pts: int) -> datetime | None:
-        if not self.offsets:
-            return None
+        with self._lock:
+            if not self.offsets:
+                return None
+            offset = statistics.median(self.offsets)
+            segments = tuple(self.segments)
         p = pts % WRAP
-        offset = statistics.median(self.offsets)
-        for start_mod, span, u in reversed(self.segments):
+        for start_mod, span, u in reversed(segments):
             d = ((p - start_mod) % WRAP) / CLOCK_HZ
             if d <= span + 1.0:                      # inside this segment (one frame of slack)
                 return datetime.fromtimestamp(u + d + offset, UTC)
@@ -320,7 +349,9 @@ class HlsReader:
                 return r
             if r.status_code in (404, 410):
                 raise Gone(f"HTTP {r.status_code} for {url[:80]}")
-            if r.status_code == 403 or attempt == POLL_RETRIES - 1:
+            if r.status_code in (401, 403):
+                raise Blocked(f"HTTP {r.status_code} for {url[:80]}")
+            if attempt == POLL_RETRIES - 1:
                 raise StreamLost(f"HTTP {r.status_code} for {url[:80]}")
             time.sleep(1)
         raise StreamLost(f"no response for {url[:80]}")
@@ -337,18 +368,33 @@ class HlsReader:
         return written - timedelta(seconds=span)
 
     def frames(self, seconds: float | None = None) -> Iterator[Stamped]:
-        """Stamped frames covering `seconds` of capture time (or for ever when None). Gaps
-        found on the way are appended to `self.gaps`."""
-        decoder = Decoder(self.size, self.fps)
+        """Stamped frames covering `seconds` of capture time (or for ever when None).
+
+        Gaps found on the way are appended to `self.gaps`, placed where they are in stream time
+        (where the pump's fed content ended), not where the consumer happens to be. A timeline
+        cut ends the read with TimelineCut after the frames before it."""
+        url = self._url_fn()                     # before ffmpeg starts: a failure leaks nothing
         check = frozen_check(self.fps, self.live_region)
-        url = self._url_fn()
         self.last_seq = self.last_at = None      # each read starts afresh; gaps are within a read
+        self.clock = Clock()
         first: datetime | None = None
         stop = threading.Event()
         errors: list[BaseException] = []
+        decoder = Decoder(self.size, self.fps)
 
         def pump() -> None:
             nonlocal url
+            fed_end: datetime | None = None          # stream time at the end of what was fed
+            prev: tuple[int, float] | None = None    # (start PTS, duration) of the last fed
+            skipped = 0.0                            # seconds skipped since `prev`
+
+            def hole(seconds: float, reason: str) -> None:
+                nonlocal fed_end, skipped
+                self.gaps.append(Gap(fed_end, seconds, reason))
+                if fed_end is not None:
+                    fed_end += timedelta(seconds=seconds)
+                skipped += seconds
+
             try:
                 while not stop.is_set():
                     try:
@@ -357,26 +403,42 @@ class HlsReader:
                         url = self._url_fn()         # an expired URL: resolve it once more
                         text = self._get(url).text
                     pl = parse_playlist(text, url)
-                    new = [s for s in pl.segments if self.last_seq is None or s.seq > self.last_seq]
-                    if self.last_seq is not None and new and new[0].seq > self.last_seq + 1:
+                    new = [g for g in pl.segments if self.last_seq is None or g.seq > self.last_seq]
+                    if self.last_seq is None:
+                        cuts = [i for i, g in enumerate(new) if g.discontinuity]
+                        new = new[cuts[-1]:] if cuts else new    # start on the newest timeline
+                    elif new and new[0].seq > self.last_seq + 1:
                         missed = new[0].seq - self.last_seq - 1
-                        self.gaps.append(Gap(self.last_at, missed * pl.target_duration,
-                                             f"{missed} segment(s) expired before they were read"))
+                        hole(missed * pl.target_duration,
+                             f"{missed} segment(s) expired before they were read")
                     for seg in new:
+                        if seg.discontinuity and prev is not None:
+                            raise TimelineCut(f"#EXT-X-DISCONTINUITY at segment {seg.seq}")
                         try:
                             resp = self._get(seg.uri)
                         except Gone:
                             # Listed, then expired before we fetched it (seen on bridgepdn1 on
                             # 2026-10-24): those seconds were never seen. A gap, not a failure.
-                            self.gaps.append(Gap(self.last_at, seg.duration,
-                                                 f"segment {seg.seq} expired before it was fetched"))
+                            hole(seg.duration, f"segment {seg.seq} expired before it was fetched")
                             self.last_seq = seg.seq
                             continue
                         span = pts_range(resp.content)
+                        if span is not None and prev is not None:
+                            expected = prev[0] + round((prev[1] + skipped) * CLOCK_HZ)
+                            off = (span[0] - expected) % WRAP
+                            off = (off - WRAP if off > WRAP // 2 else off) / CLOCK_HZ
+                            if abs(off) > max(CUT_TOLERANCE_S, pl.target_duration):
+                                raise TimelineCut(f"timestamps jumped {off:+.1f} s at segment "
+                                                  f"{seg.seq}")
                         if span is not None:
-                            wall = self._segment_wall(seg, resp, (span[1] - span[0]) / CLOCK_HZ)
+                            length = ((span[1] - span[0]) % WRAP) / CLOCK_HZ
+                            wall = self._segment_wall(seg, resp, length)
                             if wall is not None:
                                 self.clock.add(span[0], span[1], wall)
+                            end = self.clock.wall(span[1])
+                            if end is not None:
+                                fed_end = end
+                            prev, skipped = (span[0], seg.duration), 0.0
                         decoder.feed(resp.content)
                         self.last_seq = seg.seq
                     if pl.ended:
@@ -390,11 +452,12 @@ class HlsReader:
                 except OSError:
                     pass
 
-        threading.Thread(target=pump, daemon=True).start()
         try:
+            threading.Thread(target=pump, daemon=True).start()
+            placed = time.monotonic()                # last time a frame was stamped and handed on
             while True:
                 try:
-                    item = decoder.frames.get(timeout=max(30.0, FROZEN_SECONDS))
+                    item = decoder.frames.get(timeout=max(STAMP_WATCHDOG_S, FROZEN_SECONDS))
                 except queue.Empty:
                     raise StreamLost("no frame for 30 s") from None
                 if item is None:
@@ -403,14 +466,17 @@ class HlsReader:
                     raise StreamLost("the stream ended")
                 pts, image = item
                 at = self.clock.wall(pts)
-                if at is None:
-                    continue                         # before any segment's time was known
-                if self.last_at is not None and at <= self.last_at:
-                    continue                         # a repeated or out-of-order frame
+                if at is None or (self.last_at is not None and at <= self.last_at):
+                    # Before any segment's time was known, or a repeated frame. Decoded frames
+                    # that are never placed must not look like a live read.
+                    if time.monotonic() - placed > STAMP_WATCHDOG_S:
+                        raise StreamLost("no frame could be stamped for 30 s")
+                    continue
                 check(image)                         # raises StreamFrozen
                 self.last_at = at
                 first = first or at
                 yield Stamped(image, at, pts)
+                placed = time.monotonic()            # the consumer's own time does not count
                 if seconds is not None and (at - first).total_seconds() >= seconds:
                     return
         finally:
@@ -418,5 +484,17 @@ class HlsReader:
             decoder.close()
 
 
-__all__ = ["Gap", "HlsReader", "Playlist", "Segment", "Stamped", "StreamFrozen", "StreamLost",
-           "parse_playlist", "pts_range"]
+__all__ = [
+    "Blocked",
+    "Gap",
+    "Gone",
+    "HlsReader",
+    "Playlist",
+    "Segment",
+    "Stamped",
+    "StreamFrozen",
+    "StreamLost",
+    "TimelineCut",
+    "parse_playlist",
+    "pts_range",
+]

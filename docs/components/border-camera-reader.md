@@ -210,7 +210,15 @@ Transit = the horizontal gap between the running counts at A and B (`transit.py`
 between the lines at the start are unknown. They come from **anchors**: a few distinctive cars,
 matched in FIFO order by a colour-and-width signature. Every gap cuts the count into a new epoch,
 and that epoch needs anchors or a carried count before its transits are trusted (unsure ones are
-flagged).
+flagged). Every one of these is a gap, never "no cars":
+- a reconnect;
+- an expired segment;
+- a timeline cut (encoder restart);
+- a frozen picture;
+- a counter still learning.
+
+A trip between the lines longer than 90 min is never anchored: signatures are kept at most 3 h, and an
+anchor needs the ceiling to spare at both ends. If the City refuses our client, that camera stops.
 
 What is written: one record per method per minute to `CAMERA_STATE_DIR/transit-<date>.jsonl`.
 It holds counts, rates, transit statistics per 15-minute window, and epochs: derived numbers

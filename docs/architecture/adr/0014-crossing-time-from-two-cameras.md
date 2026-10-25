@@ -103,3 +103,16 @@ measured:
 - **Drift.** Counts drift. Transit error grows with (count bias at A − count bias at B) × hours since the
   last anchor. Both methods must be checked against hand counts, and later GPS crossings, before any
   number is published.
+- **A 90-minute ceiling.** Signatures are kept at most 3 h. An anchor is only trusted when both ends of the
+  trip lie inside the measured span with the ceiling to spare, so the slowest trip from A to B that can be
+  anchored is 90 min, not FHWA's 120. A→B is the middle of the bridge, not the whole wait (ASSUMPTION that
+  it stays under that). Found by the integration review on 2026-10-25: at 120, no trip under 60 min, PDN's
+  ~47 among them, could ever anchor.
+- **Stream failures are gaps.** These are all gaps at that line, never zero cars:
+  - an encoder restart (a timeline cut);
+  - a frozen picture;
+  - a reconnect;
+  - a segment that expired before it was fetched;
+  - a counter still learning.
+
+  If the City refuses our client (HTTP 401/403), that camera is no longer read.

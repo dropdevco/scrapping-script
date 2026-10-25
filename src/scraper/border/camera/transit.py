@@ -880,8 +880,14 @@ def _epoch_record(e: Epoch) -> dict:
     }
 
 
+MIN_STATS_N = 3              # fewer transits than this in a window: no statistics are written,
+                             # so a record never carries what is in effect one car's trip
+
+
 def _window_record(w: Window) -> dict:
     def stats(s: Stats) -> dict:
+        if s.n < MIN_STATS_N:
+            return {"n": s.n, "flagged": s.flagged, "median": None, "p10": None, "p90": None}
         return {"n": s.n, "flagged": s.flagged, "median": _r(s.median), "p10": _r(s.p10),
                 "p90": _r(s.p90)}
     return {

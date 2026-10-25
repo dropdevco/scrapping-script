@@ -16,8 +16,9 @@ pytest.importorskip("cv2")
 from scraper.border.camera import runner as runner_mod
 from scraper.border.camera.calibration import camera_from_dict
 from scraper.border.camera.crossing import SIGNATURE_TTL_S, Crossing
-from scraper.border.camera.hls import Gap, Stamped
+from scraper.border.camera.hls import Blocked, Gap, Stamped
 from scraper.border.camera.runner import TransitRunner
+from scraper.border.camera.stream import FROZEN_SECONDS, StreamFrozen, StreamLost
 
 T0 = datetime(2026, 10, 24, 18, 0, tzinfo=UTC)
 QUAD = [[100, 300], [300, 300], [300, 200], [100, 200]]
@@ -61,7 +62,7 @@ def frame(at):
     return Stamped(np.zeros((360, 640, 3), np.uint8), at, 0)
 
 
-class Runner(unittest.TestCase):
+class RunnerSetUp(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
@@ -77,6 +78,8 @@ class Runner(unittest.TestCase):
     def feed(self, camera, at):
         self.run_._frame(camera, self.run_.lines[camera.id], frame(at))
 
+
+class Runner(RunnerSetUp):
     def test_a_learning_line_is_a_gap_not_zero_cars(self):
         self.ca.learning = True
         self.feed(self.a, T0)
@@ -135,6 +138,91 @@ class Runner(unittest.TestCase):
                                          {"line": "B", "lane": "y", "quad": QUAD}]})
         with self.assertRaises(ValueError):
             runner_mod._one_line(two)
+
+
+class ScriptedReader:
+    """Stands in for hls.HlsReader: yields the given frame times, then raises `end`."""
+
+    def __init__(self, times, end, gaps=()):
+        self.times, self.end, self.gaps = times, end, list(gaps)
+        self.http = unittest.mock.Mock()
+
+    def frames(self, seconds=None):
+        for at in self.times:
+            yield frame(at)
+        raise self.end
+
+
+class Feeding(RunnerSetUp):
+    """What `_feed` does around reconnects, freezes and blocks."""
+
+    def feed_script(self, camera, readers):
+        made = iter(readers)
+
+        def next_reader(cam):
+            try:
+                return next(made)
+            except StopIteration:
+                self.run_._stop.set()
+                raise StreamLost("script over") from None
+
+        with unittest.mock.patch.object(runner_mod, "live_reader", next_reader), \
+                unittest.mock.patch.object(runner_mod, "RECONNECT_S", 0.0):
+            self.run_._feed(camera)
+
+    def test_frames_replayed_after_a_reconnect_are_not_counted_twice(self):
+        seen = []
+        self.ca.add = lambda f: seen.append(f.at) or []
+        first = [T0 + timedelta(seconds=s) for s in range(10)]
+        again = [T0 + timedelta(seconds=s) for s in range(5, 15)]    # overlaps the first read
+        self.feed_script(self.a, [ScriptedReader(first, StreamLost("dropped")),
+                                  ScriptedReader(again, StreamLost("dropped"))])
+        self.assertEqual(seen, sorted(set(seen)))
+        self.assertEqual(len(seen), 15)
+        resumed = [g for g in self.run_.gaps[("loop", "A")] if "reconnecting" in g.reason]
+        self.assertTrue(all(g.seconds > 0 for g in resumed))
+
+    def test_a_frozen_stretch_is_a_gap_not_an_empty_road(self):
+        times = [T0 + timedelta(seconds=s) for s in range(60)]
+        self.feed_script(self.a, [ScriptedReader(times, StreamFrozen("has not changed"))])
+        frozen = [g for g in self.run_.gaps[("loop", "A")] if "frozen" in g.reason]
+        self.assertEqual(len(frozen), 1)
+        self.assertEqual(frozen[0].seconds, FROZEN_SECONDS)
+
+    def test_a_city_camera_that_blocks_us_is_not_read_again(self):
+        city = camera_from_dict("city", {
+            "title": "City", "port_number": "240202", "direction": "north",
+            "frame_size": [640, 360], "lanes": [], "display": False,
+            "source": {"kind": "hls", "url": "https://example.org/x.m3u8",
+                       "clock": "last-modified"},
+            "count_zones": [{"line": "B", "lane": "l1", "quad": QUAD}]})
+        self.run_.cams = (self.a, city)
+        self.run_.lines["city"] = "B"
+        self.run_.counters["city"] = [self.cb]
+        calls = []
+
+        def blocked(cam):
+            calls.append(cam.id)
+            return ScriptedReader([T0], Blocked("HTTP 403"))
+
+        with unittest.mock.patch.object(runner_mod, "live_reader", blocked), \
+                unittest.mock.patch.object(runner_mod, "RECONNECT_S", 0.0):
+            self.run_._feed(city)                 # returns instead of retrying
+        self.assertEqual(calls, ["city"])
+        self.assertIn("city", self.run_.blocked)
+
+    def test_signatures_expire_even_while_the_other_camera_is_down(self):
+        self.ca.cars_on = {T0}
+        self.feed(self.a, T0)
+        self.feed(self.a, T0 + timedelta(seconds=SIGNATURE_TTL_S + 60))   # B never connects
+        self.run_.measure()
+        self.assertEqual(len(self.run_.crossings[("loop", "A")]), 0)
+
+    def test_the_start_moves_past_a_gap_it_would_sit_just_before(self):
+        gap = Gap(T0 + timedelta(minutes=5), 60.0, "segment expired")
+        start, prior = self.run_._start("loop", T0, [gap])
+        self.assertEqual(start, T0 + timedelta(minutes=6))
+        self.assertIsNone(prior)
 
 
 if __name__ == "__main__":

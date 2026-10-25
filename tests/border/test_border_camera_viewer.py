@@ -269,6 +269,33 @@ class Overlay(unittest.TestCase):
         caught.exception.close()
 
 
+class HiddenFeeds(unittest.TestCase):
+    """The City of El Paso feeds are read at the owner's risk and never displayed (ADR-0014)."""
+
+    def test_the_viewer_never_takes_a_camera_marked_not_to_display(self):
+        from types import SimpleNamespace
+
+        from scraper.border.camera import viewer
+        from scraper.border.camera.calibration import load_cameras
+
+        cams = load_cameras()
+        self.assertFalse(cams["city-pdn-north"].display)
+        made = {}
+
+        class Stop(Exception):
+            pass
+
+        def fake_worker(chosen, **kw):
+            made["chosen"] = [c.id for c in chosen]
+            raise Stop
+
+        args = SimpleNamespace(cameras="city-pdn-north,lerdo-south-booths", seconds=60,
+                               every=120, json=False, port=0)
+        with unittest.mock.patch("scraper.border.camera.worker.Worker", fake_worker),                 self.assertRaises(Stop):
+            viewer.cmd_view(args, cams)
+        self.assertEqual(made["chosen"], ["lerdo-south-booths"])
+
+
 class OneWorkerPerStateDir(unittest.TestCase):
     def test_a_second_worker_on_the_same_state_dir_refuses_to_start(self):
         from scraper.border.camera.calibration import load_cameras

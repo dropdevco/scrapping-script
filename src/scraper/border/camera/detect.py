@@ -382,6 +382,7 @@ FIRST_SPEED = 3.0            # box sizes per second a track with no motion yet m
 FIRST_ACROSS = 0.5           # box sizes it may go across the lane, or back, on that first step
 FIRST_SHRINK_MAX = 4.0       # its area may shrink this much on that step: going away at 12 m/s
                              # near the camera, a car's area falls 2.1-3.2x per frame at 2 fps
+MAX_STEP_S = 5.0             # frames further apart than this are a gap even if nobody said so
 MAX_AGE_S = 3.0              # a track unseen this long is dropped. ASSUMPTION: a car hidden
                              # behind a passing truck reappears within about 3 s
 ROOM_S = 0.75                # a car keeps at least this many seconds of its speed as distance to
@@ -755,6 +756,8 @@ class DetectorCounter:
         self.geometry: list[ZoneGeometry] = []
         self.lines: list[str] = sorted({z.line for z in self.zones})
         self._size: tuple[int, int] | None = None
+        self._last_at: datetime | None = None
+        self._gaps: list[Gap] = []
 
     def _setup(self, size: tuple[int, int]) -> None:
         quads = scaled_quads(self.zones, self.camera.frame_size, size)
@@ -779,6 +782,15 @@ class DetectorCounter:
     def add(self, frame: Stamped) -> list[Crossing]:
         if not self.lines:
             return []                           # nothing to count at: never run the model
+        if self._last_at is not None:
+            step = (frame.at - self._last_at).total_seconds()
+            if step <= 0 or step > MAX_STEP_S:
+                # Frames this far apart (or out of order) were not all seen: say so, as the loop
+                # counter does, so the line is not read as seen with no cars.
+                self._gaps.append(Gap(self._last_at, max(step, 0.0),
+                                      f"frames {step:+.1f} s apart"))
+                self.tracker.clear()
+        self._last_at = frame.at
         size = (frame.image.shape[1], frame.image.shape[0])
         if size != self._size:
             self._setup(size)
@@ -824,6 +836,11 @@ class DetectorCounter:
     def gap(self, gap: Gap) -> None:
         """Frames were missed: no track survives across them."""
         self.tracker.clear()
+
+    def gaps(self) -> list[Gap]:
+        """Gaps this counter found itself (crossing.Counter), drained on each call."""
+        out, self._gaps = self._gaps, []
+        return out
 
 
 __all__ = ["CANDIDATE_SCORE", "MODEL_PATH", "MODEL_SHA256", "Detection", "DetectorCounter",

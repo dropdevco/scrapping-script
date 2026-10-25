@@ -26,6 +26,7 @@ from scraper.border.camera.hls import (
     WRAP,
     Clock,
     HlsReader,
+    TimelineCut,
     parse_playlist,
     pts_range,
 )
@@ -203,6 +204,142 @@ class ExpiredSegments(EndToEnd):
         # are simply absent.
         jumps = [(b.at - a.at).total_seconds() for a, b in pairwise(got)]
         self.assertGreater(max(jumps), 1.5)
+
+    test_frames_are_timed_by_the_program_date_time = None
+    test_without_program_time_last_modified_sets_the_clock = None
+    test_the_segment_timestamps_are_read_from_the_transport_stream = None
+    test_a_jump_in_the_sequence_is_reported_as_a_gap = None
+
+
+@unittest.skipUnless(FFMPEG, "needs the ffmpeg command-line tool")
+class TimelineCuts(EndToEnd):
+    """An encoder restart behind a playlist: the read ends at the cut, nothing is stamped wrong."""
+
+    def setUp(self):
+        super().setUp()
+        later = os.path.join(self.dir, "b")
+        os.makedirs(later)
+        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                        "testsrc=size=320x240:rate=10", "-t", "8", "-c:v", "libx264", "-g", "10",
+                        "-pix_fmt", "yuv420p", "-output_ts_offset", "1000", "-f", "hls",
+                        "-hls_time", "2", "-hls_list_size", "0",
+                        os.path.join(later, "live.m3u8")], check=True, timeout=60)
+        with open(os.path.join(later, "live.m3u8"), encoding="utf-8") as f:
+            self.later = [ln for ln in f.read().splitlines()
+                          if ln.startswith("#EXTINF") or ln.endswith(".ts")]
+
+    def _head(self) -> str:
+        head = self.vod.replace("#EXT-X-ENDLIST", "").rstrip("\n")
+        return head.replace("#EXTINF", f"#EXT-X-PROGRAM-DATE-TIME:{T0.isoformat()}\n#EXTINF", 1)
+
+    def _joined_text(self, tag: bool) -> str:
+        tail = [ln if ln.startswith("#") else "b/" + ln for ln in self.later]
+        cut = ["#EXT-X-DISCONTINUITY"] if tag else []
+        return "\n".join([self._head(), *cut, *tail, "#EXT-X-ENDLIST"]) + "\n"
+
+    def _joined(self, name: str, tag: bool) -> str:
+        return self._write(name, self._joined_text(tag))
+
+    def _read_to_cut(self, url):
+        reader = HlsReader(lambda: url, "pdt", (160, 120), 2.0, "chisme-test")
+        self.addCleanup(reader.http.close)
+        got = []
+        with self.assertRaises(TimelineCut):
+            got.extend(reader.frames(None))
+        return got
+
+    def test_a_cut_that_appears_mid_read_ends_it_with_every_frame_before_it_right(self):
+        first, joined = self._head() + "\n", self._joined_text(tag=True)
+        served = iter([first, joined])
+
+        class Live(Quiet):
+            def do_GET(self):
+                if self.path.endswith("live-cut.m3u8"):
+                    body = next(served, joined).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                super().do_GET()
+
+        server = _serve(self.dir, Live)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        got = self._read_to_cut(f"http://127.0.0.1:{server.server_address[1]}/live-cut.m3u8")
+        self.assertGreaterEqual(len(got), 20)
+        latest = T0 + timedelta(seconds=12.5)
+        self.assertTrue(all(T0 - timedelta(seconds=0.2) <= f.at <= latest for f in got))
+
+    def test_a_read_that_starts_after_a_cut_begins_on_the_newest_timeline(self):
+        reader = HlsReader(lambda: self._joined("after.m3u8", tag=True), "pdt", (160, 120), 2.0,
+                           "chisme-test")
+        self.addCleanup(reader.http.close)
+        got = []
+        with self.assertRaises(StreamLost) as caught:
+            got.extend(reader.frames(None))
+        self.assertNotIsInstance(caught.exception, TimelineCut)
+        self.assertGreaterEqual(len(got), 10)
+        self.assertGreaterEqual(min(f.at for f in got), T0 + timedelta(seconds=11.5))
+
+    def test_a_timestamp_jump_without_a_tag_is_caught_too(self):
+        got = self._read_to_cut(self._joined("jump.m3u8", tag=False))
+        latest = T0 + timedelta(seconds=12.5)
+        self.assertTrue(all(f.at <= latest for f in got), [f.at for f in got[-3:]])
+
+    test_frames_are_timed_by_the_program_date_time = None
+    test_without_program_time_last_modified_sets_the_clock = None
+    test_the_segment_timestamps_are_read_from_the_transport_stream = None
+    test_a_jump_in_the_sequence_is_reported_as_a_gap = None
+
+
+class Failures(unittest.TestCase):
+    def test_a_url_that_cannot_be_resolved_starts_no_ffmpeg(self):
+        from unittest import mock
+
+        from scraper.border.camera import hls
+        from scraper.border.camera.stream import StreamDown
+
+        def down():
+            raise StreamDown("not live")
+        with mock.patch.object(hls, "Decoder") as decoder:
+            reader = HlsReader(down, "pdt", (160, 120), 2.0, "chisme-test")
+            self.addCleanup(reader.http.close)
+            with self.assertRaises(StreamDown):
+                next(reader.frames(5))
+        decoder.assert_not_called()
+
+    def test_a_403_is_a_block_not_an_outage(self):
+        from unittest import mock
+
+        from scraper.border.camera.hls import Blocked
+
+        reader = HlsReader(lambda: "https://example.org/x.m3u8", "last-modified", (160, 120),
+                           2.0, "chisme-test")
+        self.addCleanup(reader.http.close)
+        refused = mock.Mock(status_code=403)
+        with mock.patch.object(reader.http, "get", return_value=refused), \
+                self.assertRaises(Blocked):
+            reader._get("https://example.org/x.m3u8")
+
+
+@unittest.skipUnless(FFMPEG, "needs the ffmpeg command-line tool")
+class Watchdog(EndToEnd):
+    """Frames that decode but can never be placed in time are a failed read, not a quiet one."""
+
+    def test_frames_that_cannot_be_stamped_end_the_read(self):
+        from unittest import mock
+
+        from scraper.border.camera import hls
+
+        with mock.patch.object(hls, "STAMP_WATCHDOG_S", 0.0), \
+                mock.patch.object(hls.Clock, "wall", lambda self, pts: None):
+            reader = HlsReader(lambda: self.base + "live.m3u8", "pdt", (160, 120), 2.0,
+                               "chisme-test")
+            self.addCleanup(reader.http.close)
+            with self.assertRaises(StreamLost) as caught:
+                list(reader.frames(None))
+        self.assertIn("could be stamped", str(caught.exception))
 
     test_frames_are_timed_by_the_program_date_time = None
     test_without_program_time_last_modified_sets_the_clock = None

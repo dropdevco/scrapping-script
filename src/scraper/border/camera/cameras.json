@@ -64,6 +64,13 @@
       }
     ],
     "mask": [[0, 0, 900, 58], [230, 64, 218, 112], [828, 64, 218, 112], [448, 196, 342, 96], [500, 290, 212, 22]],
+    "count_zones": [
+      {"line": "A", "lane": "lane-1", "quad": [[358.0, 593.8], [457.4, 593.8], [464.9, 576.8], [367.8, 576.8]]},
+      {"line": "A", "lane": "lane-2", "quad": [[457.4, 593.8], [556.8, 593.8], [562.1, 576.8], [464.9, 576.8]]},
+      {"line": "A", "lane": "lane-3", "quad": [[556.8, 593.8], [656.2, 593.8], [659.3, 576.8], [562.1, 576.8]]},
+      {"line": "A", "lane": "lane-4", "quad": [[656.2, 593.8], [776.9, 593.8], [777.3, 576.8], [659.3, 576.8]]},
+      {"line": "A", "lane": "lane-5", "quad": [[775.5, 593.8], [910.3, 593.8], [907.8, 576.8], [775.9, 576.8]]}
+    ],
     "notes": "Looks north up the bridge from the Juarez end; the US booths are past the far end, out of view. lane-1..lane-3 (left to right) split the carriageway between the yellow left curb and the white bollard line into equal thirds (width assumed 3 x 3.5 m). They are read separately because they queue separately: at 03:16 local on 2026-10-19 only the middle lane was queued. The Feliz Viaje sign hides the road behind it and is masked. lane-4 runs between the white bollards and the orange barrels, lane-5 between the barrels and the right curb; their edges were mapped through this rectangle's homography on a daylight frame (bollards at 1.00 of the width at every depth, curb 1.79-1.89, barrels tapering 1.45 to 1.25 where they end). At 08:40 local on 2026-10-19 the queue had moved from lanes 1-3 to these two. Booth distance (2026-10-22, Google satellite, map scale bar): from the Feliz Viaje gantry at about 31.7463,-106.4866 north along the bridge to the CBP primary-booth canopy at about 31.7500,-106.4868: ~410 m, +/-30 m. The strips do not end at the gantry: they run on under and past the sign. In a 2026-10-22 snapshot the gantry posts reach the road at about image y 405-420, which this calibration puts ~45 m (nominal; the scale is unverified) short of the strips' booth-end row, so booth_distance_m from that row is 410 - 45 = ~365 m, +/-35 m (map, post feet and scale). The gantry was placed from the layout (the parking lot west of the bridge appears beside the middle of the lanes); Street View has no imagery on the bridge deck to confirm it.",
     "clock": [0, 0, 300, 28]
   },
@@ -201,5 +208,91 @@
     "mask": [[0, 0, 300, 58], [180, 62, 234, 80], [908, 68, 236, 84], [878, 150, 216, 22]],
     "clock": [0, 0, 300, 28],
     "notes": "Lerdo, booths in the foreground: cars drive toward the camera and stop at gates staffed by uniformed officers, so the booth end is the near end and the booth is in view (booth_distance_m 0), which makes this the one calibration whose wait does not depend on its unverified scale. Direction is INFERRED as southbound (Mexican customs on arrival in Juarez) from the officers and the flow toward the Juarez end; not confirmed, hence direction_verified false. Two lanes split at the orange divider; width assumed 7 m."
+  },
+  "city-pdn-north": {
+    "title": "City of El Paso bridge camera: Paso del Norte (bridgepdn1)",
+    "port_number": "240202",
+    "direction": "north",
+    "direction_verified": false,
+    "frame_size": [
+      1280,
+      720
+    ],
+    "display": false,
+    "source": {
+      "kind": "hls",
+      "url": "https://zoocams.elpasozoo.org/bridgepdn1.m3u8",
+      "clock": "last-modified"
+    },
+    "lanes": [],
+    "count_zones": [
+      {
+        "line": "B",
+        "lane": "col-1",
+        "quad": [
+          [
+            571.4,
+            336.7
+          ],
+          [
+            631.2,
+            199.2
+          ],
+          [
+            548.6,
+            163.3
+          ],
+          [
+            488.8,
+            300.8
+          ]
+        ]
+      },
+      {
+        "line": "B",
+        "lane": "col-2",
+        "quad": [
+          [
+            803.5,
+            465.9
+          ],
+          [
+            902.4,
+            280.6
+          ],
+          [
+            796.5,
+            224.1
+          ],
+          [
+            697.6,
+            409.4
+          ]
+        ]
+      },
+      {
+        "line": "B",
+        "lane": "col-3",
+        "quad": [
+          [
+            1127.2,
+            562.1
+          ],
+          [
+            1244.6,
+            364.2
+          ],
+          [
+            1132.8,
+            297.9
+          ],
+          [
+            1015.4,
+            495.8
+          ]
+        ]
+      }
+    ],
+    "notes": "The US half of the Paso del Norte bridge, from the City of El Paso's Bridge Cameras page (https://www2.elpasotexas.gov/misc/externally_linked/bridges/cameras.html), read at the owner's risk and NEVER displayed on our pages (ADR-0014, QUESTIONS.md Q-21). A wide-angle camera above the northbound lanes looking north toward downtown El Paso; queued cars seen from behind, about 150-400 px wide near the camera at 1280x720; well lit at night (checked 19:59 local, 2026-10-24). No burned-in clock: frames are timed by segment Last-Modified (hls.py). The CBP canopy is only in the far distance. Count zones col-1..col-3 are PROVISIONAL: drawn from one night frame with no lane markings visible; redraw them from a daylight frame and confirm which column is SENTRI, Ready or general. The camera shows faces through windscreens and plates at close range: frames are only processed in memory at 1280x720 and nothing is cropped, read or stored."
   }
 }

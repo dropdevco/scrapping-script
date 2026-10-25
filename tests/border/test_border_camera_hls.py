@@ -189,6 +189,27 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("2 segment(s)", reader.gaps[0].reason)
 
 
+class ExpiredSegments(EndToEnd):
+    """A segment listed but gone by the time it is fetched is a gap; the read goes on."""
+
+    def test_a_segment_that_404s_is_a_gap_not_a_failure(self):
+        gone = os.path.basename(self.segments[2].uri)
+        os.remove(os.path.join(self.dir, gone))
+        reader, got = self._read(self._with_pdt(), "pdt", 8)
+        self.assertGreaterEqual(len(got), 12)          # 8 s of stream, 2 s of it missing
+        self.assertEqual([g.reason for g in reader.gaps],
+                         [f"segment {self.segments[2].seq} expired before it was fetched"])
+        # The frames on either side keep their true times: the seconds of the missing segment
+        # are simply absent.
+        jumps = [(b.at - a.at).total_seconds() for a, b in pairwise(got)]
+        self.assertGreater(max(jumps), 1.5)
+
+    test_frames_are_timed_by_the_program_date_time = None
+    test_without_program_time_last_modified_sets_the_clock = None
+    test_the_segment_timestamps_are_read_from_the_transport_stream = None
+    test_a_jump_in_the_sequence_is_reported_as_a_gap = None
+
+
 class LiveFrames(unittest.TestCase):
     """How a camera's live stream is opened: its own URL and clock, our honest User-Agent."""
 

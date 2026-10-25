@@ -54,6 +54,10 @@ POLL_RETRIES = 3
 FETCH_TIMEOUT_S = 10
 
 
+class Gone(StreamLost):
+    """HTTP 404/410: the resource is not there (an expired segment, or an expired URL)."""
+
+
 @dataclass(frozen=True)
 class Stamped:
     image: np.ndarray          # BGR, at the reader's size
@@ -314,7 +318,9 @@ class HlsReader:
                 continue
             if r.status_code == 200:
                 return r
-            if r.status_code in (403, 404, 410) or attempt == POLL_RETRIES - 1:
+            if r.status_code in (404, 410):
+                raise Gone(f"HTTP {r.status_code} for {url[:80]}")
+            if r.status_code == 403 or attempt == POLL_RETRIES - 1:
                 raise StreamLost(f"HTTP {r.status_code} for {url[:80]}")
             time.sleep(1)
         raise StreamLost(f"no response for {url[:80]}")
@@ -357,7 +363,15 @@ class HlsReader:
                         self.gaps.append(Gap(self.last_at, missed * pl.target_duration,
                                              f"{missed} segment(s) expired before they were read"))
                     for seg in new:
-                        resp = self._get(seg.uri)
+                        try:
+                            resp = self._get(seg.uri)
+                        except Gone:
+                            # Listed, then expired before we fetched it (seen on bridgepdn1 on
+                            # 2026-10-24): those seconds were never seen. A gap, not a failure.
+                            self.gaps.append(Gap(self.last_at, seg.duration,
+                                                 f"segment {seg.seq} expired before it was fetched"))
+                            self.last_seq = seg.seq
+                            continue
                         span = pts_range(resp.content)
                         if span is not None:
                             wall = self._segment_wall(seg, resp, (span[1] - span[0]) / CLOCK_HZ)

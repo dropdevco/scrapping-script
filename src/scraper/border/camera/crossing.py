@@ -13,15 +13,28 @@ Two counters implement `Counter` and run on the same stamped frames:
 Each returns a `Crossing` when a car leaves the zone across its far edge. A crossing carries the
 capture time of the frame where that was seen (hls.Stamped.at), never an arrival time.
 
-`signature` describes how a car looks (colour, size) so that a few distinctive cars can be
-matched between the two lines as anchors. It lives in memory only, for at most
-SIGNATURE_TTL_S, and is never written anywhere. No plate and no face is ever read (ADR-0014).
+`signature` describes how a car looks, so that a few distinctive cars can be matched between the
+two lines as anchors. Both counters use one form, built by `look()`:
+
+    (saturation x cos hue, saturation x sin hue, value, width share)
+
+Every part is on a 0-1 scale; the first two run -1 to 1, the form transit's default distance
+compares. The first two place the body's colour on a colour wheel: hue is the angle, and how
+coloured the car is gives the distance from the centre. Grey, white and black cars, whose hue is
+noise, sit together near (0, 0), and a red car reads the same at 359 degrees as at 1. The
+vehicle class, where a counter knows it, is kept apart in `vehicle`, so a truck is never matched
+to a car on colour alone.
+
+Signatures live in memory only, for at most SIGNATURE_TTL_S, and are never written anywhere. No
+plate and no face is ever read (ADR-0014).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
+
+import numpy as np
 
 from .hls import Gap, Stamped
 
@@ -44,8 +57,29 @@ class Crossing:
     lane: str
     at: datetime                               # capture time, UTC
     method: str                                # "loop" | "yolox"
-    signature: tuple[float, ...] | None = None # in memory only, never written
+    signature: tuple[float, ...] | None = None # in memory only, never written; see look()
     confidence: float = 1.0
+    vehicle: str | None = None                 # car | truck | bus | motorcycle, when known
+
+
+def look(chroma_x: float, chroma_y: float, value: float, width_share: float) -> tuple[float, ...]:
+    """The shared signature form (module docstring), clamped to its ranges and rounded."""
+    def clamp(v: float, lo: float, hi: float) -> float:
+        return round(min(max(float(v), lo), hi), 3)
+    return (clamp(chroma_x, -1, 1), clamp(chroma_y, -1, 1), clamp(value, 0, 1),
+            clamp(width_share, 0, 1))
+
+
+def chroma(hue_deg, saturation) -> tuple[float, float]:
+    """Mean colour-wheel position of pixels: hue in degrees, saturation 0-1 (arrays or floats)."""
+    h = np.radians(np.asarray(hue_deg, dtype=np.float64))
+    s = np.asarray(saturation, dtype=np.float64)
+    return float(np.mean(s * np.cos(h))), float(np.mean(s * np.sin(h)))
+
+
+def same_vehicle(a: Crossing, b: Crossing) -> bool:
+    """Whether two crossings may be the same vehicle by class: unknown matches anything."""
+    return a.vehicle is None or b.vehicle is None or a.vehicle == b.vehicle
 
 
 class Counter(Protocol):
@@ -56,6 +90,10 @@ class Counter(Protocol):
 
     def gap(self, gap: Gap) -> None:
         """Frames were missed: drop any per-car state that spans the gap."""
+
+    def gaps(self) -> list[Gap]:
+        """Gaps the counter found itself (a stamp jump, a zone still learning its road), drained
+        on each call, so the transit maths cuts there too. A counter may return []."""
 
 
 def zones_from_raw(camera_id: str, raw: list[dict]) -> tuple[Zone, ...]:

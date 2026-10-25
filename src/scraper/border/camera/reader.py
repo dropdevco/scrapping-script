@@ -305,18 +305,21 @@ def _source(camera: Camera, source: str | None) -> str:
     return source or resolve(camera.channel, camera.title)
 
 
-def live_frames(camera: Camera, seconds: float | None):
-    """The camera's live stream as stamped frames (ADR-0014): each carries its capture time
-    from the stream's own clock, so a reading is timed by the road, not by the network."""
+def live_reader(camera: Camera) -> HlsReader:
+    """The camera's live stream (ADR-0014): every frame stamped with its capture time from the
+    stream's own clock, so a reading is timed by the road, not by the network."""
     from ...core.config import settings  # only live reads need the settings
 
     if camera.source == "hls":
         url_fn, size = (lambda: camera.url), camera.frame_size
     else:
         url_fn, size = (lambda: resolve(camera.channel, camera.title)), YOUTUBE_SIZE
-    reader = HlsReader(url_fn, camera.stream_clock, size, FPS, settings.user_agent,
-                       live_region(camera))
-    return reader.frames(seconds)
+    return HlsReader(url_fn, camera.stream_clock, size, FPS, settings.user_agent,
+                     live_region(camera))
+
+
+def live_frames(camera: Camera, seconds: float | None):
+    return live_reader(camera).frames(seconds)
 
 
 def source_frames(camera: Camera, source: str | None, seconds: float):
@@ -475,6 +478,12 @@ def cmd_view(args, cameras) -> int:
     return view(args, cameras)
 
 
+def cmd_transit(args, cameras) -> int:
+    from .runner import cmd_transit as transit
+
+    return transit(args, cameras)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m scraper.border camera", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -506,10 +515,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--every", type=float, default=120)
     p.add_argument("--port", type=int, default=8090)
     p.add_argument("--json", action="store_true", help="also print each signal")
+    p = sub.add_parser("transit", help="crossing time between two cameras' counting lines")
+    p.add_argument("--a", default="pdn-north", help="camera with counting line A (entry)")
+    p.add_argument("--b", default="city-pdn-north", help="camera with counting line B (exit)")
+    p.add_argument("--methods", default="loop,yolox")
+    p.add_argument("--every", type=float, default=60, help="seconds between measurements")
+    p.add_argument("--minutes", type=float, help="stop after this long (default: run on)")
     args = parser.parse_args(argv)
     cameras = load_cameras()
     handler = {"list": cmd_list, "snapshot": cmd_snapshot, "reference": cmd_reference,
-               "read": cmd_read, "run": cmd_run, "view": cmd_view}[args.cmd]
+               "read": cmd_read, "run": cmd_run, "view": cmd_view,
+               "transit": cmd_transit}[args.cmd]
     return handler(args, cameras)
 
 

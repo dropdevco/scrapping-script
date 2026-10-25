@@ -4,15 +4,17 @@
 camera streams and turns them into a wait estimate, as a `measured` signal for the estimator
 ([SPEC §5.1](../border-estimator/SPEC.md#51-measured-queue-length--queue-speed-deterministic)).
 
-It is **deterministic**: fixed image computations, no model, nothing random. The same frames
-always give the same answer, so any reading can be reproduced from a recording.
+The queue reader is **deterministic**: fixed image computations, no model, nothing random. The
+same frames always give the same answer, so any reading can be reproduced from a recording. It
+also measures **crossing time between two cameras** ([below](#crossing-time-between-two-cameras),
+ADR-0014). That uses two counters side by side; one of them uses a pinned YOLOX-S model.
 
 | | |
 |---|---|
 | **Runs** | On a machine we own (Q-3), continuously: `python -m scraper.border camera run` |
-| **Reads** | The FPFCH YouTube live streams (`youtube.com/@fpfch/streams`), found by title. The viewer also fetches CBP's published waits each cycle, **for display only**: they never feed the camera estimate |
+| **Reads** | The FPFCH YouTube live streams (`youtube.com/@fpfch/streams`), found by title. The City of El Paso's bridge cameras (HLS on `zoocams.elpasozoo.org`), for crossing time only: read at the owner's risk and **never displayed** (ADR-0014). The viewer also fetches CBP's published waits each cycle, **for display only**: they never feed the camera estimate |
 | **Writes** | JSON signal lines on stdout; each lane's empty-road reference, `status.json` (what the viewer shows, including `cbp`, `cbp_at`, `cbp_error`) and a heartbeat in `CAMERA_STATE_DIR` (default `~/.chisme/camera`) |
-| **Install** | `pip install -e ".[camera]"` (OpenCV headless, numpy, yt-dlp); Node on `PATH` for yt-dlp's YouTube extraction |
+| **Install** | `pip install -e ".[camera]"` (OpenCV headless, numpy, yt-dlp); Node on `PATH` for yt-dlp's YouTube extraction; the **ffmpeg** command-line tool on `PATH` (the stamped HLS reader). For the model counter: `yolox_s.onnx` from Megvii's YOLOX 0.1.1rc0 release in `~/.chisme/models/` (sha256 `c5c2d13e…998063`, checked on load) |
 | **Decision on record** | Reading YouTube streams is against YouTube's terms; the product owner chose to do it (QUESTIONS.md, Q-7). Frames are analysed in memory; the worker and the viewer **never write one**. Only an operator's explicit `camera snapshot --out` or `camera read --debug` writes a single annotated frame, to check a calibration. |
 
 ---
@@ -58,6 +60,15 @@ Every calibrated lane now has a `booth_distance_m`, so every lane can give minut
 `lerdo-south-booths` sees its booth, so its distance is exact. The other four cameras' distances
 are **map estimates** (2026-10-22) with a ± and `booth_distance_verified: false`, so their
 minutes are shown as approximate (see [What the viewer shows](#what-the-viewer-shows)).
+
+Every live frame is stamped with **when it was captured**, from the stream's own clock (`hls.py`):
+- YouTube: PROGRAM-DATE-TIME plus the frame's PTS;
+- the City: segment Last-Modified, fitted over segments.
+
+It is never stamped with when it arrived. On 2026-10-23 arrival trailed capture by 2.6-19 s,
+and OpenCV's own reader delivered 180 frames in 0.45 s. A segment missed or expired is a gap,
+and no pair of frames is timed across one. A reading's `observed_at` is its last frame's capture
+time.
 
 ---
 
@@ -172,6 +183,45 @@ A stream that fails is never a reading. It raises instead (ADR-0011):
 
 `camera run` alerts Telegram once when a camera stops and once when it comes back, and keeps
 retrying. One camera failing, for any reason, never stops the others or the worker.
+
+---
+
+## Crossing time between two cameras
+
+`python -m scraper.border camera transit` (ADR-0014) measures how long cars take from a counting
+line on one camera (A) to a counting line on another (B). Today the only pair is Paso del Norte
+northbound:
+- **A** is on FPFCH `pdn-north`, the Mexican half of the bridge: a 1.5 m band across all five
+  lanes, 66-67.5 m from the strips' booth end.
+- **B** is on the City of El Paso's `bridgepdn1` (camera `city-pdn-north`, `display: false`), the
+  US half. B's three column zones are **provisional**: drawn from one night frame with no lane
+  markings in view. Redraw them from a daylight frame, and confirm which column is SENTRI, Ready or
+  general.
+
+Both cameras are read continuously. Every frame goes to **two counters**, and their results are
+never mixed:
+
+| Method | How a car is counted | Known limits (rendered and synthetic tests) |
+|---|---|---|
+| `loop` (`loop.py`, deterministic) | A virtual loop per zone: each car's back edge is followed through the zone against a learnt empty road, and counted when it crosses the far edge | 0 missed and 0 false in rendered stop-and-go and crawls with 1-2 m gaps. Cars 0.5 m apart read as one. Half the resolution misses most. Learns the empty road from near-empty moments only, and stays "learning" (a gap) until the lane clears |
+| `yolox` (`detect.py`, YOLOX-S) | Car, truck and bus boxes in the zones' tiles, tracked frame to frame, counted when a track crosses the far edge | Not trusted above 8 m/s. Rare double counts in creeping queues. About 0.3 CPU-s a frame |
+
+Transit = the horizontal gap between the running counts at A and B (`transit.py`). The cars
+between the lines at the start are unknown. They come from **anchors**: a few distinctive cars,
+matched in FIFO order by a colour-and-width signature. Every gap cuts the count into a new epoch,
+and that epoch needs anchors or a carried count before its transits are trusted (unsure ones are
+flagged).
+
+What is written: one record per method per minute to `CAMERA_STATE_DIR/transit-<date>.jsonl`.
+It holds counts, rates, transit statistics per 15-minute window, and epochs: derived numbers
+only. Signatures and single crossings live in memory for at most 3 h. No plate or face is ever
+read.
+
+This is a **minimum, not the full wait**:
+- A→B covers the middle of the bridge only, not the street tail before A nor the stretch and
+  booth after B.
+- A finished transit describes a car that entered one wait ago.
+- Until GPS-timed crossings grade it, it is for grading and calibration, not for display.
 
 ---
 

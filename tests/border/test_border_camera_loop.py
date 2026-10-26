@@ -84,6 +84,10 @@ class WideScene(Scene):
         self.to_image = cv2.getPerspectiveTransform(canvas, np.float32(GROUND) * SUPERSAMPLE)
         self.noise = np.random.default_rng(seed + 1)
 
+    def across(self, car_id: int, front: float) -> float:
+        """A car's centre in metres from the road's left edge, with its front at `front`."""
+        return self.centre(car_id)
+
     def render(self, cars: list[tuple[float, int]]) -> np.ndarray:
         canvas = self.road.copy()
         for front, car_id in cars:
@@ -91,20 +95,32 @@ class WideScene(Scene):
             bottom = min(canvas.shape[0], self._row(front - CAR_M))
             if bottom <= top:
                 continue
-            mid = 2 + self.centre(car_id)
+            mid = 2 + self.across(car_id, front)
             c0 = int((mid - self.car_w / 2) * CANVAS_PPM)
             c1 = int((mid + self.car_w / 2) * CANVAS_PPM)
             colour = PALETTE[car_id % len(PALETTE)]
             canvas[top:bottom, c0:c1] = colour
             shade = tuple(int(x * 0.45) for x in colour)
             w0, w1 = self._row(front - 1.1), self._row(front - 1.7)       # windscreen band
-            canvas[max(top, w0):min(bottom, w1), c0 + 4:c1 - 4] = shade
+            canvas[max(top, w0):max(top, min(bottom, w1)), c0 + 4:c1 - 4] = shade   # as Scene
             cv2.rectangle(canvas, (c0, top), (c1 - 1, bottom - 1), (15, 15, 15), 2)
         big = (FRAME[0] * SUPERSAMPLE, FRAME[1] * SUPERSAMPLE)
         frame = cv2.warpPerspective(canvas, self.to_image, big, flags=cv2.INTER_LINEAR,
                                     borderMode=cv2.BORDER_CONSTANT, borderValue=(55, 60, 58))
         frame = cv2.resize(frame, FRAME, interpolation=cv2.INTER_AREA)
         return (frame + self.noise.normal(0, 2, frame.shape)).clip(0, 255).astype(np.uint8)
+
+
+class Changing(WideScene):
+    """Two 3.5 m lanes; a car moves from the left one to the right one at 1 m/s sideways while
+    driving on at `speed`, its centre on the line between them when its rear is at `on_line`."""
+
+    def __init__(self, speed: float, on_line: float):
+        super().__init__(road_w=7.0, car_w=1.8, lines=(0.0, 3.5, 7.0))
+        self.speed, self.on_line = speed, on_line
+
+    def across(self, car_id: int, front: float) -> float:
+        return min(max(3.5 + (front - CAR_M - self.on_line) / self.speed, 1.75), 5.25)
 
 
 class Frames:
@@ -236,6 +252,39 @@ def stop_and_go(seconds: float, headway: float, advance: float = CAR_M, move_s: 
     return out
 
 
+def staggered(seconds: float, gap: float, delay: float, stand_s: float = 20.0,
+              accel: float = 1.5, top: float = 2.0):
+    """Stop-and-go as queues really start: each car repeats the path of the car ahead `delay`
+    seconds later (Newell's car-following), so it still stands while that one pulls away. The
+    first car moves one headway a cycle, at `accel` up to `top` and down again, then stands
+    `stand_s`. With 1.5 m gaps the rears stand at 11.5 m, 0.7 m short of the far edge."""
+    headway = CAR_M + gap
+    ramp_s = min(top / accel, math.sqrt(headway / accel))       # to full speed, or half way
+    ramp_m = accel * ramp_s ** 2 / 2
+    move_s = 2 * ramp_s + (headway - 2 * ramp_m) / (accel * ramp_s)
+
+    def gone(t: float) -> float:                                 # metres the first car has gone
+        cycles, r = divmod(t, stand_s + move_s)
+        r = min(max(r - stand_s, 0.0), move_s)
+        if r <= ramp_s:
+            m = accel * r * r / 2
+        elif r >= move_s - ramp_s:
+            m = headway - accel * (move_s - r) ** 2 / 2
+        else:
+            m = ramp_m + accel * ramp_s * (r - ramp_s)
+        return cycles * headway + m
+
+    out = []
+    for k in range(int(seconds / DT)):
+        cars, i = [], 0
+        while (front := VIEW_M + 10 + gone(k * DT - i * delay) - i * headway) >= -5:
+            if front <= VIEW_M:
+                cars.append((front, i))
+            i += 1
+        out.append(cars)
+    return out
+
+
 def one_car(car_id: int, speed: float = 1.5, start: float = 2.0, end: float = 22.0):
     return [[(start + speed * k * DT, car_id)]
             for k in range(int((end - start) / (speed * DT)) + 1)]
@@ -260,6 +309,12 @@ class Counting(unittest.TestCase):
 
     def test_stop_and_go_with_one_metre_gaps(self):
         self.assert_counts(stop_and_go(300, headway=5.5), at_least=7)
+
+    def test_stop_and_go_where_each_car_starts_after_the_one_ahead(self):
+        # A car pulling away 1.5 s before the one behind it moves 0.6-0.9 m a frame while the
+        # patch's one shift, which the standing car behind fills, reads far less. Its rear was
+        # not matched, its own was born uncounted: 3 of these cars were missed.
+        self.assert_counts(staggered(240, gap=1.5, delay=1.5), at_least=7)
 
     def test_a_dense_crawl_with_one_metre_gaps(self):
         # Rendered, a 1 m gap leaves 2-3 rows (0.3 m) of clear road at this range: the gap is
@@ -318,6 +373,38 @@ class Lanes(unittest.TestCase):
             run = self.assert_counts(7.0, car_w, NEAR, FAR, lanes=lanes,
                                      centre=lambda car_id, x=x: 3.5 + x)
             self.assertEqual({c.line for c in run.crossings}, {"A"})
+
+    def test_a_wide_vehicle_across_a_painted_line_is_counted_once(self):
+        # A 2.55 m bus reads 2.9-3.0 m from outline to outline. With CAR_MAX_M at 2.8 m and
+        # bounding cars joined across the line too, it was judged by each zone alone and
+        # counted 88 and 100 times in 50 (the audit's run, 2026-10-26).
+        for x in (0.1, -0.3):
+            self.assert_counts(7.0, 2.55, NEAR, FAR, lanes=((0.0, 3.5), (3.5, 7.0)),
+                               centre=lambda car_id, x=x: 3.5 + x)
+
+    def test_two_cars_side_by_side_near_the_line_are_two_cars(self):
+        # Each 0.2 m from the line between their zones: their outlines meet across it, and the
+        # pair was taken for one car across the line (14 cars missed in this minute).
+        scene = WideScene(road_w=7.0, car_w=1.8, lines=(0.0, 3.5, 7.0),
+                          centre=lambda car_id: 3.5 + (1.1 if car_id % 2 else -1.1))
+        run = Run(counter(road_w=7.0, lanes=((0.0, 3.5), (3.5, 7.0))), Frames(scene=scene)).warm()
+        pairs = [[(f, 2 * i + side) for f, i in cars for side in (0, 1)]
+                 for cars in steady(60, 3.0, headway=9.0)]
+        cars, missed, false = score(pairs, run=run)
+        self.assertGreaterEqual(cars, 20)
+        self.assertEqual((missed, false), (0, 0), f"{cars} cars: {missed} missed, {false} false")
+        lanes = [c.lane for c in run.crossings]
+        self.assertEqual(lanes.count("lane-1"), lanes.count("lane-2"))
+
+    def test_a_car_changing_lanes_is_counted_once(self):
+        # Its centre crosses the line with its rear just short of the far edge: counted in the
+        # first zone, then again in the second, empty the frame before, as if it came in there.
+        for speed, on_line in ((1.0, 12.1), (2.0, 11.6), (3.0, 11.3)):
+            run = Run(counter(road_w=7.0, lanes=((0.0, 3.5), (3.5, 7.0))),
+                      Frames(scene=Changing(speed, on_line))).warm()
+            for cars in one_car(RED, speed=speed, start=-2.0, end=30.0):
+                run.add(cars)
+            self.assertEqual(len(run.crossings), 1, (speed, on_line))
 
 
 class NotCars(unittest.TestCase):
@@ -404,16 +491,26 @@ class Learning(unittest.TestCase):
         self.assertEqual(loop.seed({("A", "car"): (grey[1:], edges[1:])}), [("A", "car")])
         self.assertEqual(loop.seed({("A", "other"): (grey, edges)}), [("A", "car")])
 
-    def test_moments_spread_over_time_learn_the_road_if_some_were_empty(self):
-        frames = Frames()
-        queued = [frames.render(cars) for cars in stop_and_go(300, headway=5.5)[::120]]
-        empty = [frames.render([]) for _ in range(4)]
-        loop = self.production()
-        self.assertEqual(loop.learn(queued), [("A", "car")])         # every moment queued
-        self.assertEqual(loop.learn(queued[:3] + empty + queued[3:]), [])
-        cars, missed, false = score(stop_and_go(240, headway=5.5), run=Run(loop, frames))
-        self.assertGreaterEqual(cars, 4)
-        self.assertEqual((missed, false), (0, 0))
+    def test_a_queue_learnt_as_road_is_unlearnt_after_a_long_quiet_spell(self):
+        # A queue standing through the first learning window is learnt as road, and no moment
+        # looks empty against it again. Kept, it read 33 of 48 patch rows as a car on an empty
+        # road 10 minutes later, and 3 m/s flow then counted 27 of 54.
+        run = Run()
+        for _ in range(int(8 / DT)):
+            run.add(queue_fronts(60, 0.0, headway=6.5))
+        self.assertEqual(run.loop.states(), {("A", "car"): "counting"})
+        run.warm(120)            # this bank's quiet spell: 18 s to fill, 13 refreshes of 6 s
+        cars, missed, false = score(steady(60, 3.0, headway=9.0), run=run)
+        self.assertGreaterEqual(cars, 10)
+        self.assertEqual((missed, false), (0, 0), f"{cars} cars: {missed} missed, {false} false")
+
+    def test_a_queue_standing_a_minute_is_not_learnt_as_road(self):
+        # The road held is replaced only after the whole bank has looked one way for
+        # AGREE_REFRESHES refreshes running: with this bank about 100 s, with the real one 32
+        # minutes. One car a cycle, each standing 60 s inside the zone.
+        cars, missed, false = score(stop_and_go(260, headway=6.5, advance=6.5, stand_s=60.0))
+        self.assertGreaterEqual(cars, 3)
+        self.assertEqual((missed, false), (0, 0), f"{cars} cars: {missed} missed, {false} false")
 
 
 class Gaps(unittest.TestCase):
@@ -424,19 +521,45 @@ class Gaps(unittest.TestCase):
             run.add(cars)
         return positions[middle:]
 
-    def test_a_repeated_or_wobbling_stamp_skips_one_frame(self):
-        # hls stamps a frame as PTS plus a running median offset, which can step back a little.
-        # Taken as a reset, that forgot the car in flight: a count lost for good.
+    def test_a_stamp_that_does_not_move_forward_is_a_gap(self):
+        # hls and the runner drop such a frame before any counter sees it. Were one to come,
+        # the loop treats it as the detector does: the car in flight is forgotten and the line
+        # has a gap there, so both methods cut their epochs at the same frames.
         for back in (0.0, 0.1, 0.9):
             run = Run().warm()
             rest = self.half_way(run)
+            last = run.at - timedelta(seconds=DT)
             run.at -= timedelta(seconds=DT + back)        # stamped at, or before, the last frame
-            run.add(rest[0])
-            run.at += timedelta(seconds=back)
-            for cars in rest[1:]:
+            for cars in rest:
                 run.add(cars)
-            self.assertEqual(len(run.crossings), 1, back)
-            self.assertEqual(run.loop.gaps(), [])
+            self.assertEqual(run.crossings, [], back)
+            gap = run.loop.gaps()[0]
+            self.assertEqual((gap.after, gap.seconds), (last, 0.0), back)
+
+    def test_a_car_in_the_zone_when_counting_resumes_is_covered_by_a_gap(self):
+        # It came in unseen, so it is not counted (nor by the detector); it stood 40 s and
+        # crossed 42 s after the gap, long after transit's GAP_PAD_S. The time until it has
+        # left is a gap too, or the line would read as fully seen one car short.
+        run = Run().warm()
+        rear = 2.0
+        while rear < (NEAR + FAR) / 2:                    # drives in at 1 m/s
+            run.add([(rear + CAR_M, WHITE)])
+            rear += 1.0 * DT
+        run.loop.gap(Gap(run.at - timedelta(seconds=DT), 20.0, "segment expired"))
+        run.at += timedelta(seconds=20)
+        resumed = run.at
+        for _ in range(int(40 / DT)):
+            run.add([(rear + CAR_M, WHITE)])
+        crossed = None
+        while rear < 25:
+            rear += 1.0 * DT
+            run.add([(rear + CAR_M, WHITE)])
+            if crossed is None and rear > FAR:
+                crossed = run.at - timedelta(seconds=DT)
+        self.assertEqual(run.crossings, [])
+        (gap,) = run.loop.gaps()
+        self.assertEqual(gap.after, resumed)
+        self.assertGreaterEqual(gap.after + timedelta(seconds=gap.seconds), crossed)
 
     def test_a_car_in_flight_across_a_gap_is_not_counted(self):
         run = Run().warm()
@@ -455,8 +578,11 @@ class Gaps(unittest.TestCase):
         for cars in rest:
             run.add(cars)
         self.assertEqual(run.crossings, [])
-        # ...and reported, so transit cuts its epoch there as at the reader's own gaps.
-        self.assertEqual(run.loop.gaps(), [Gap(last, 30.5, "frames +30.5 s apart")])
+        # ...and reported, so transit cuts its epoch there as at the reader's own gaps; then
+        # the time until the car that was in the zone at the resume has left it.
+        stamp, inside = run.loop.gaps()
+        self.assertEqual(stamp, Gap(last, 30.5, "frames +30.5 s apart"))
+        self.assertEqual(inside.after, last + timedelta(seconds=30.5))
         self.assertEqual(run.loop.gaps(), [])
 
     def test_a_stamp_that_goes_well_back_is_a_gap(self):
@@ -466,8 +592,7 @@ class Gaps(unittest.TestCase):
         for cars in rest:
             run.add(cars)
         self.assertEqual(run.crossings, [])
-        (gap,) = run.loop.gaps()
-        self.assertEqual(gap.seconds, 0.0)
+        self.assertEqual(run.loop.gaps()[0].seconds, 0.0)
 
     def test_without_the_gap_the_same_car_is_counted(self):
         run = Run().warm()
@@ -563,6 +688,19 @@ class Geometry(unittest.TestCase):
         cars, missed, false = score(steady(45, 3.0, headway=9.0), run=Run(loop).warm())
         self.assertGreaterEqual(cars, 8)
         self.assertEqual((missed, false), (0, 0))
+
+
+class Scenes(unittest.TestCase):
+    def test_a_car_driving_out_of_view_paints_only_itself(self):
+        # Its windscreen band, once past the far edge, wrapped round the canvas and shaded the
+        # lane down to the near end: a scene with cars leaving the view was silently wrong.
+        bound = max(y for _, y in zone_quad(50.0, VIEW_M))      # the image row 50 m along
+        for scene in (Scene(), WideScene()):
+            scene.noise = _Still()
+            empty = scene.render([]).astype(np.int16)
+            for front in (60.0, 61.0, 61.8, 62.5):
+                changed = np.abs(scene.render([(front, WHITE)]) - empty).max(axis=(1, 2)) > 0
+                self.assertLess(np.flatnonzero(changed).max(), bound, (type(scene), front))
 
 
 class Determinism(unittest.TestCase):

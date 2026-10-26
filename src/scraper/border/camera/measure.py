@@ -35,7 +35,8 @@ MIN_STRUCTURE = 2.0      # a segment with less profile contrast has nothing to t
 MIN_SPEED_M_S = 0.02     # slower than this over a whole window is a stalled queue
 MIN_FRAMES = 20
 MAX_PAIR_GAP = 3.0       # frame pairs further apart than this many intervals are not timed
-SCALE_SLACK = 0.25       # widening of the range when an unverified scale does not cancel
+SCALE_SLACK = 0.25       # widening of the range when an unverified scale does not cancel.
+                         # ASSUMPTION: no measured basis for 25 %; nobody has timed a scale error
 
 
 @dataclass(frozen=True)
@@ -223,7 +224,7 @@ class LaneEstimate:
     wait_min: float | None = None
     low_min: float | None = None
     high_min: float | None = None
-    lower_bound: bool = False     # wait_min is a floor: part of the queue is out of view
+    lower_bound: bool = False     # a floor: stalled, or the line runs out of view from a booth in it
     scale_verified: bool = False
     detail: dict = field(default_factory=dict)
 
@@ -390,12 +391,14 @@ class LaneWindow:
                                 max(max(quarters), MIN_SPEED_M_S),
                                 max(min(quarters), MIN_SPEED_M_S), cam.scale_verified)
         if beyond:
-            # A floor: the line runs on past the view. Its honest low end is still the range's
-            # low end (short distance, fast speed, scale slack), not the central wait.
+            # The line runs on past the view: no high end. With the booth in view the range's
+            # low end is a floor. With it out of view it is not: the wait times the unseen road
+            # at the visible speed (ASSUMPTION: uniform along the whole stretch), and a line
+            # that merges and opens gaps out there moves faster (ADR-0014).
             high = None
         return LaneEstimate(state="queue", wait_min=wait, low_min=min(low, wait),
                             high_min=None if high is None else max(high, wait),
-                            lower_bound=beyond, **common)
+                            lower_bound=beyond and booth_distance == 0, **common)
 
 
 def wait_bounds(booth_distance: float, uncertainty: float, queue_m: float, fastest: float,
@@ -403,7 +406,9 @@ def wait_bounds(booth_distance: float, uncertainty: float, queue_m: float, faste
     """(low, high) minutes. The road left to the booth is booth_distance +/- uncertainty (a
     map estimate is not a survey), covered at between the fastest and slowest speed seen; and
     while the camera's scale is unverified, a booth out of view widens the range by
-    SCALE_SLACK, because then the distance is in real metres and the speed in nominal ones."""
+    SCALE_SLACK, because then the distance is in real metres and the speed in nominal ones.
+    It does not cover how fast the road out of view moves: that is taken to be the visible
+    speed, so with the booth out of view the low end is no floor."""
     near = max(0.0, booth_distance - uncertainty) + queue_m
     far = booth_distance + uncertainty + queue_m
     low, high = near / fastest / 60, far / slowest / 60
@@ -442,4 +447,4 @@ def rolling(history: list[tuple[float, LaneEstimate]], now: float,
             high = None
     return plain({"speed_m_s": float(speed), "wait_min": wait, "low_min": low, "high_min": high,
                   "windows": len(recent), "seconds": float(seconds),
-                  "lower_bound": latest.beyond_view})
+                  "lower_bound": latest.beyond_view and booth_distance_m == 0})

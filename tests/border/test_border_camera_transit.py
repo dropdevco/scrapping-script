@@ -28,15 +28,18 @@ import pytest
 
 pytest.importorskip("cv2")   # crossing imports hls, which imports the stream reader
 
-from scraper.border.camera.crossing import SIGNATURE_TTL_S, Crossing, Zone
+from scraper.border.camera.crossing import SIGNATURE_TTL_S, Crossing, Zone, look
 from scraper.border.camera.hls import Gap
 from scraper.border.camera.transit import (
+    CHECK_MAX_MIN,
     GAP_PAD_S,
+    MATCH_DISTANCE,
     Anchor,
     Prior,
     _Candidate,
     _largest_chain,
     anchors,
+    colour_distance,
     count_at,
     cumulative,
     drift,
@@ -152,6 +155,43 @@ def simulate(seed: int = 1, minutes: float = 360.0, vivid: float = 0.10,
     gaps = () if gap_b is None else (Gap(T0 + timedelta(minutes=gap_b[0]), gap_b[1], "test"),)
     offset = sum(1 for e, x in zip(enter, exit_) if e < 0 <= x)
     return Sim(a, b, owner, tuple(enter), tuple(exit_), offset, gaps, minutes)
+
+
+@functools.cache
+def wheel(seed: int, transit_min: float, turn_b: float = 0.0, saturation_b: float = 1.0,
+          value_b: float = 0.0, minutes: float = 180.0,
+          ) -> tuple[tuple[Crossing, ...], tuple[Crossing, ...], int]:
+    """A stretch read in crossing.look()'s form (width share included), with hues anywhere on the
+    colour wheel, so a camera that renders colour its own way moves one car's reading onto
+    another's. 1 car in 10 is distinctive (saturation 0.5-0.9), the rest neutral. Every car takes
+    transit_min, give or take 20 s, first in first out. Line B's camera turns hue by turn_b
+    degrees, scales saturation by saturation_b and adds value_b. Returns A's and B's crossings
+    in [T0, T0 + minutes) and the cars between the lines at T0."""
+    cars, noise = random.Random(f"{seed}/wheel"), random.Random(f"{seed}/wheel/noise")
+    enter, exit_, looks = [], [], []
+    t = -WARMUP_S
+    while (t := t + cars.expovariate(RATE / 60)) < minutes * 60:
+        distinctive = cars.random() < 0.10
+        hue = cars.uniform(0, 360)
+        sat = cars.uniform(0.5, 0.9) if distinctive else abs(cars.gauss(0, 0.04))
+        val = cars.uniform(0.3, 0.9) if distinctive else cars.choice((0.9, 0.65, 0.4, 0.1))
+        enter.append(frame(t))
+        exit_.append(t + transit_min * 60 + cars.gauss(0, 20))
+        looks.append((hue, sat, val, cars.uniform(0.53, 0.67)))
+    exit_ = [frame(x) for x in sorted(exit_)]            # first in, first out
+
+    def read(hue, sat, val, width, turn=0.0, k=1.0, dv=0.0):
+        h = math.radians(hue + turn)
+        return look(k * sat * math.cos(h) + noise.gauss(0, 0.02),
+                    k * sat * math.sin(h) + noise.gauss(0, 0.02),
+                    val + dv + noise.gauss(0, 0.02), width + noise.gauss(0, 0.02))
+
+    a = tuple(Crossing("pdn-north", "A", "1", T0 + timedelta(seconds=e), "loop", read(*c))
+              for e, c in zip(enter, looks) if 0 <= e < minutes * 60)
+    b = tuple(Crossing("bridgepdn1", "B", "1", T0 + timedelta(seconds=x), "loop",
+                       read(*c, turn_b, saturation_b, value_b))
+              for x, c in zip(exit_, looks) if 0 <= x < minutes * 60)
+    return a, b, sum(1 for e, x in zip(enter, exit_) if e < 0 <= x)
 
 
 def quiet_stretch(vivid_cars: dict[int, tuple[float, float, float]], cars: int = 120,
@@ -355,6 +395,35 @@ class AnchorTest(unittest.TestCase):
         given = measure(a, b, LO_MIN, HI_MIN, start=T0, offset=0)
         self.assertFalse(any(t.flagged for t in given.transits))
 
+    def test_width_share_is_not_compared_across_the_lines(self):
+        # look()'s width share is a share of each zone's assumed or pixel width, and those differ
+        # between the cameras: here a car fills 0.66 of its zone at A and all of it at B. On all
+        # four parts the readings were 0.34 apart, and no car matched itself.
+        a, b = quiet_stretch({30: VIVID[0], 60: VIVID[1], 90: VIVID[2]})
+        a = [replace(c, signature=(*c.signature, 0.66)) for c in a]
+        b = [replace(c, signature=(*c.signature, 1.0)) for c in b]
+        found = anchors(a, b, LO_MIN, HI_MIN)
+        self.assertEqual([(x.a_index, x.b_index) for x in found], [(31, 31), (61, 61), (91, 91)])
+        self.assertLessEqual(colour_distance(a[30].signature, b[30].signature), MATCH_DISTANCE)
+
+    def test_a_truck_is_not_anchored_to_a_car(self):
+        # crossing.py keeps the class apart so that a truck is never matched to a car on colour
+        # alone. A yellow truck at A, and a yellow car where its partner would be at B:
+        a, b = quiet_stretch({40: VIVID[0]})
+        a = [replace(c, vehicle="truck" if i == 40 else "car") for i, c in enumerate(a)]
+        b = [replace(c, vehicle="car") for c in b]
+        self.assertEqual(anchors(a, b, LO_MIN, HI_MIN), [])
+        b[40] = replace(b[40], vehicle="truck")                 # the truck itself: anchored
+        self.assertEqual([(x.a_index, x.b_index) for x in anchors(a, b, LO_MIN, HI_MIN)],
+                         [(41, 41)])
+        # Rarity is judged among what a car could be matched to: four yellow cars near the
+        # truck do not make the yellow truck common (4 of 60 neighbours would be over 1 in 20).
+        for i in (36, 38, 42, 44):
+            a[i] = replace(a[i], signature=VIVID[0])
+            b[i] = replace(b[i], signature=VIVID[0])
+        self.assertIn((41, 41),
+                      [(x.a_index, x.b_index) for x in anchors(a, b, LO_MIN, HI_MIN)])
+
     def test_largest_chain_and_its_tie_breaks(self):
         def cand(ia, ib):
             return _Candidate(ia, ib, 0.05, 0.01, 1.0)
@@ -467,8 +536,9 @@ class RecordTest(unittest.TestCase):
                    "anchors", "anchors_kept", "anchors_enclosed", "anchor_offset",
                    "anchor_spread", "anchor_outliers", "anchor_p10", "anchor_p90",
                    "drift_cars_per_hour", "drift_minutes_per_hour", "bias_difference"},
-        "windows": {"start", "by_exit", "by_entry", "entered", "exited", "exit_rate",
-                    "between", "gap", "flagged", "anchors", "anchor_residual"},
+        "windows": {"start", "by_exit", "by_entry", "by_exit_complete", "by_entry_complete",
+                    "entered", "exited", "exit_rate", "between", "gap", "flagged", "anchors",
+                    "anchor_residual"},
         "by_exit": {"n", "flagged", "median", "p10", "p90"},
         "by_entry": {"n", "flagged", "median", "p10", "p90"},
         "now": {"at", "between", "exit_rate", "minutes", "flagged"},
@@ -481,6 +551,7 @@ class RecordTest(unittest.TestCase):
         rec = record(m, wins, now_from(m, T0 + timedelta(minutes=359)), lane_type="general")
         text = json.dumps(rec)                           # serialisable as it is
         self._walk(rec, "")
+        self.assertEqual({k for w in rec["windows"] for k in w}, self.ALLOWED["windows"])
         self.assertEqual(len(rec["windows"]), len(wins))
         self.assertEqual(len(rec["epochs"]), len(m.epochs))
         self.assertNotIn("signature", text)
@@ -668,7 +739,7 @@ class LiveTest(unittest.TestCase):
                         start=start if prior is None else None, prior=prior)
             sources.append([e.source for e in m.epochs])
             for w in windows(m):
-                if w.start - timedelta(minutes=HI_MIN) >= m.start and w.end <= end:
+                if w.by_exit_complete:
                     final.setdefault(w.start, w)
             prior = prior_at(m, end + timedelta(minutes=self.STEP_MIN - self.HORIZON_MIN))
             self.assertIsInstance(prior, Prior)
@@ -696,10 +767,56 @@ class LiveTest(unittest.TestCase):
         self.assertEqual(inside.at, m.epochs[1].start)
         self.assertEqual(inside.between, offset_at(m.epochs[1], inside.at))
 
+    def test_nothing_is_counted_past_the_measured_end(self):
+        # Line B stopped at `end` and line A went on. Past `end` the cars between are unknown:
+        # they were A's crossings since then with none leaving, sure and unflagged, and the next
+        # horizon took that as "continued" (240 cars between against 30 in a review run).
+        sim = simulate(steady=True)
+        end = T0 + timedelta(minutes=120)
+        b = [c for c in sim.b if c.at < end]
+        m = measure(sim.a, b, LO_MIN, HI_MIN, start=T0, end=end, offset=sim.offset)
+        self.assertEqual(prior_at(m, end).between, sim.between(end))
+        self.assertIsNone(prior_at(m, end + timedelta(minutes=1)))
+        later = now_from(m, end + timedelta(minutes=60))
+        self.assertTrue(later.flagged)
+        self.assertIsNone(later.between)
+
+    def test_a_count_no_anchor_has_checked_for_long_is_flagged(self):
+        # Colour goes at 150 min, so no anchor checks the count after that, and line A misses
+        # 3 % of its cars, so the count drifts about 10 cars an hour. Chained horizon to horizon,
+        # a sure count stayed "continued" (sure, unflagged) all night, 104 cars out by morning.
+        # It may stay sure CHECK_MAX_MIN after the last anchor's crossing at B, no longer.
+        sim = simulate(steady=True, colourless_after_min=150.0, miss_a=0.03)
+        prior, seen = None, []
+        for end_min in range(self.HORIZON_MIN, int(sim.minutes) + 1, self.STEP_MIN):
+            end = T0 + timedelta(minutes=end_min)
+            start = T0 if prior is None else prior.at
+            a = [c for c in sim.a if start <= c.at < end]
+            b = [c for c in sim.b if start <= c.at < end]
+            m = measure(a, b, LO_MIN, HI_MIN, end=end, start=start if prior is None else None,
+                        prior=prior)
+            current = now_from(m, end)
+            seen.append((end_min, [e.source for e in m.epochs], current.flagged,
+                         current.between - sim.between(end)))
+            prior = prior_at(m, end + timedelta(minutes=self.STEP_MIN - self.HORIZON_MIN))
+        print(f"\nnight horizons (end, sources, flagged, error in cars between): {seen}")
+        self.assertEqual(seen[0][1:3], (["anchors"], False))
+        # The last coloured car crossed A at 95 min and B at 150. Anchors still inside a horizon
+        # (it starts HORIZON_MIN before its end) may confirm the count; once none is, it may stay
+        # sure CHECK_MAX_MIN after the last of them crossed B, and no longer.
+        last_a, last_b = 150 - STEADY_S / 60, 150
+        late = [s for s in seen
+                if s[0] - self.HORIZON_MIN > last_a and s[0] > last_b + CHECK_MAX_MIN]
+        self.assertTrue(late)
+        for end_min, sources, flagged, _ in late:
+            self.assertTrue(flagged, end_min)
+            self.assertFalse(any(s in SURE for s in sources), (end_min, sources))
+
 
 class SignatureScaleTest(unittest.TestCase):
-    """(9) The default distance needs signature components on a 0-1 scale. A counter's raw form
-    (hue in degrees, 0-255 channels) is refused, not turned into look-alike anchors."""
+    """(9) Signatures must be in crossing.look()'s 0-1 form. Any other (hue in degrees, 0-255
+    channels) is refused, not turned into look-alike anchors, and so is a part that is not a
+    number."""
 
     def test_raw_signatures_are_refused(self):
         a, b = quiet_stretch({})
@@ -711,9 +828,91 @@ class SignatureScaleTest(unittest.TestCase):
         self.assertNotIn("217", str(caught.exception))      # per-vehicle data stays out
         with self.assertRaises(ValueError):
             anchors(a, b, LO_MIN, HI_MIN)
-        scaled = measure(a, b, LO_MIN, HI_MIN, start=T0,
-                         distance=lambda u, v: math.dist(u, v) / 255)
-        self.assertEqual(len(scaled.epochs), 1)
+
+    def test_a_part_that_is_not_a_number_is_named_so(self):
+        a, b = quiet_stretch({})
+        a[7] = replace(a[7], signature=(math.nan, 0.0, 0.5, 0.6))
+        with self.assertRaisesRegex(ValueError, "not finite"):
+            measure(a, b, LO_MIN, HI_MIN, start=T0)
+
+
+class LookAlikeTest(unittest.TestCase):
+    """(10) Where a car's true partner cannot match it, look-alikes chain up in its place and
+    scatter by tens of cars: a trip longer than hi_min, or a camera at B that renders colour its
+    own way (15 degrees of hue alone moves a saturation-0.7 car 0.18, past MATCH_DISTANCE). Such
+    an epoch must come out flagged, never sure and wrong. Before the fix, most seeds gave
+    "anchors" 33-588 cars out, unflagged. Signatures are in crossing.look()'s form here."""
+
+    SEEDS = range(1, 9)
+    LO, HI = 0.5, 90.0                      # the runner's bounds
+
+    def outcomes(self, **kw) -> list[tuple[int, str, int | None]]:
+        out = []
+        for seed in self.SEEDS:
+            a, b, truth = wheel(seed, **kw)
+            e = measure(a, b, self.LO, self.HI, start=T0,
+                        end=T0 + timedelta(minutes=180)).epochs[0]
+            out.append((seed, e.source, None if e.offset is None else e.offset - truth))
+        return out
+
+    def test_a_trip_longer_than_hi_min(self):
+        out = self.outcomes(transit_min=110.0)
+        self.assertEqual([o for o in out if o[1] in SURE and abs(o[2]) > 3], [], out)
+
+    def test_colours_rendered_differently_at_b(self):
+        out = self.outcomes(transit_min=47.0, turn_b=15.0, saturation_b=0.8, value_b=0.08)
+        self.assertEqual([o for o in out if o[1] in SURE and abs(o[2]) > 3], [], out)
+
+    def test_true_anchors_still_set_the_offset(self):
+        out = self.outcomes(transit_min=47.0)
+        self.assertEqual([o for o in out if o[1] != "anchors" or abs(o[2]) > 2], [], out)
+
+
+class WindowTest(unittest.TestCase):
+    """(11) What a window says about the measurement it came from."""
+
+    def test_complete_windows_are_marked(self):
+        # A live caller rewrites every window of its horizon each time. A window's by-exit numbers
+        # lack the cars that entered before the horizon's start, its by-entry numbers the cars
+        # still between the lines at its end, and nothing in a record said so.
+        sim = simulate(steady=True)
+        whole = measure(sim.a, sim.b, LO_MIN, HI_MIN, start=T0, offset=sim.offset)
+        batch = {w.start: w for w in windows(whole)}
+        start, end = T0 + timedelta(minutes=7), T0 + timedelta(minutes=322, seconds=30)
+        m = measure([c for c in sim.a if start <= c.at < end],
+                    [c for c in sim.b if start <= c.at < end], LO_MIN, HI_MIN,
+                    start=start, end=end, offset=sim.between(start))
+        wins = windows(m)
+        for w in (wins[0], wins[-1]):          # straddles the start; holds the end
+            self.assertFalse(w.by_exit_complete or w.by_entry_complete, w.start)
+        exits = [w for w in wins if w.by_exit_complete]
+        entries = [w for w in wins if w.by_entry_complete]
+        self.assertTrue(exits and entries)
+        for w in exits:
+            self.assertEqual(w.by_exit, batch[w.start].by_exit, w.start)
+        for w in entries:
+            self.assertEqual(w.by_entry, batch[w.start].by_entry, w.start)
+        short = [w for w in wins if not w.by_exit_complete
+                 and w.by_exit.n < batch[w.start].by_exit.n]
+        self.assertTrue(short)                 # the marks are not idle: those windows lack cars
+        rec = record(m, wins)
+        self.assertEqual([w["by_exit_complete"] for w in rec["windows"]],
+                         [w.by_exit_complete for w in wins])
+
+    def test_windows_count_only_the_measured_span(self):
+        # A live caller passes every crossing it holds: B's from before a start moved past a gap,
+        # A's from after B's last frame. They are outside the measurement and count in no window.
+        sim = simulate(steady=True)
+        start, end = T0 + timedelta(minutes=9), T0 + timedelta(minutes=58, seconds=30)
+        m = measure(sim.a, sim.b, LO_MIN, HI_MIN, start=start, end=end,
+                    offset=sim.between(start))
+        wins = windows(m)
+
+        def n(cs, t0, t1):
+            return sum(1 for c in cs if t0 <= c.at < t1)
+        self.assertEqual(wins[0].exited, n(sim.b, start, T0 + timedelta(minutes=15)))
+        self.assertAlmostEqual(wins[0].exit_rate, wins[0].exited / 6)
+        self.assertEqual(wins[-1].entered, n(sim.a, T0 + timedelta(minutes=45), end))
 
 
 def _realised_bias(sim: Sim, line: str) -> float:

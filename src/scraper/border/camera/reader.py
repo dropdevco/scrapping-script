@@ -214,8 +214,13 @@ class CameraReader:
 
     def read(self, source_frames, save: bool = True) -> list[LaneEstimate]:
         windows: dict[str, LaneWindow] = {}
-        raw_images: list[Image] = []
-        for item in source_frames:
+        # Frames for the bank, spread over a read of unknown length: keep every `stride`-th and
+        # halve the list (doubling the stride) once it passes 2 * SAMPLES_PER_WINDOW. A read then
+        # holds a few images (~3.3 MB each at 480p), never one per frame: that was ~400 MB per
+        # camera-minute, with every camera read at once.
+        kept: list[Image] = []
+        stride = 1
+        for n, item in enumerate(source_frames):
             # Live frames come stamped with their capture time (hls.Stamped); recorded clips are
             # bare frames taken to be 1/FPS apart.
             frame, at = (item.image, item.at) if isinstance(item, Stamped) else (item, None)
@@ -230,12 +235,16 @@ class CameraReader:
                            for lane, strip in self.strips(size).items()}
             for window in windows.values():
                 window.add(raw, None if at is None else at.timestamp())
-            raw_images.append(raw)
+            if n % stride == 0:
+                kept.append(raw)
+                if len(kept) > 2 * SAMPLES_PER_WINDOW:
+                    kept, stride = kept[::2], stride * 2
             self.last_frame, self.last_at = frame, at
         self.last_windows = windows
-        if raw_images:
-            step = max(1, len(raw_images) // SAMPLES_PER_WINDOW)
-            self.bank.extend(self._sample(im) for im in raw_images[::step][:SAMPLES_PER_WINDOW])
+        if kept:
+            picks = kept if len(kept) <= SAMPLES_PER_WINDOW else [
+                kept[j * len(kept) // SAMPLES_PER_WINDOW] for j in range(SAMPLES_PER_WINDOW)]
+            self.bank.extend(self._sample(im) for im in picks)
             if len(self.bank) >= BANK_MIN:
                 self._rebuild()
                 if save:
@@ -415,11 +424,6 @@ def cmd_reference(args, cameras) -> int:
     return 0
 
 
-def _estimate(cam: Camera, source: str | None, seconds: float,
-              debug: str | None = None) -> list[LaneEstimate]:
-    return _estimate_with(cam, source, seconds, debug)[0]
-
-
 def _estimate_with(cam: Camera, source: str | None, seconds: float,
                    debug: str | None = None) -> tuple[list[LaneEstimate], CameraReader]:
     reader = CameraReader(cam)
@@ -451,8 +455,8 @@ def cmd_read(args, cameras) -> int:
             continue
         ev = sig["evidence"]
         wait = "unknown" if sig["minutes"] is None else f"{sig['minutes']} min"
-        if ev["lower_bound"] and sig["minutes"] is not None:
-            wait = f"at least {sig['minutes']} min"
+        if ev["lower_bound"] and sig["low"] is not None:
+            wait = f"at least {sig['low']} min"        # a floor is its range's low end
         speed = "-" if ev["speed_m_s"] is None else f"{ev['speed_m_s']:.2f} m/s"
         print(f"{cam.id}/{ev['lane']}: {ev['state']}, queue {ev['queue_m']:.0f} m"
               f"{'+' if ev['beyond_view'] else ''}, speed {speed}, wait {wait}"

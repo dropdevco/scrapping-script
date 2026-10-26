@@ -65,7 +65,9 @@ def bridge_name(camera: Camera) -> str:
 
 def _approx_reasons(lane, scale_verified: bool) -> list[str]:
     """Why a lane's minutes are approximate. Only a booth out of view can make them so: with
-    the booth in view the distance is the visible line and the scale cancels."""
+    the booth in view the distance is the visible line and the scale cancels. Out of view
+    they always are, however well the distance is known: the road to the booth is timed at
+    the speed of the line in view."""
     if not lane.booth_distance_m:
         return []
     reasons = []
@@ -73,6 +75,9 @@ def _approx_reasons(lane, scale_verified: bool) -> list[str]:
         reasons.append("booth distance is a map estimate")
     if not scale_verified:
         reasons.append("camera scale unverified")
+    # ASSUMPTION: uniform speed all the way to the booth. ADR-0014 names "the queue out of
+    # view behaves differently" as a suspected cause of PDN north reading 99-128 against 47.
+    reasons.append("road out of view assumed to move like the line in view")
     return reasons
 
 
@@ -97,9 +102,10 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
     """One lane, as the viewer shows it: a number of minutes whenever one can be stood behind,
     labelled for what it is, and a reason when there is none.
 
-    - queued: the 15-minute rolling wait and its range ("≈" when the booth is out of view and
-      its distance or the camera's scale is unverified). A line running out of view is a floor,
-      stated at its range's low end ("≥");
+    - queued: the 15-minute rolling wait and its range ("≈" whenever the booth is out of view:
+      the road to it is timed at the visible speed, and its distance or the camera's scale may
+      be unverified too). A line running out of view has no high end; it is a floor, stated at
+      its range's low end ("≥"), only when the booth is in view;
     - a minute with a line but too little movement to time it: this minute's line, timed at
       the last 15 minutes' speed. Never an older line's wait: a short line at the booth is
       always too short to time, and showing the wait of a long line from ten minutes ago
@@ -126,13 +132,14 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
             why = f"line not moving over the last {n} reading{'' if n == 1 else 's'}"
         else:
             minutes, low, high = roll.get("wait_min"), roll.get("low_min"), roll.get("high_min")
-            kind = "floor" if (roll.get("lower_bound") or est.beyond_view) else "estimate"
+            floor = distance == 0 and (roll.get("lower_bound") or est.beyond_view)
+            kind = "floor" if floor else "estimate"
     elif est.state == "insufficient":
         if est.queue_m > 0 and distance is not None and timed:
             minutes = (distance + est.queue_m) / speed / 60
             low, high = wait_bounds(distance, uncertainty, est.queue_m, speed, speed, scale_verified)
             low, high = min(low, minutes), max(high, minutes)
-            kind = "floor" if est.beyond_view else "estimate"
+            kind = "floor" if est.beyond_view and distance == 0 else "estimate"
             note = "this minute's line, timed at the last 15 minutes' speed"
         elif est.queue_m > 0 and distance is None:
             why = "booth distance not measured"
@@ -157,8 +164,8 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
             why = "no line in view, and no recent line on this camera to time one"
     else:
         why = "not enough movement to measure"
-    if kind == "floor":
-        high = None
+    if est.beyond_view:
+        high = None                     # the line runs on past the view: no high end
     approx = bool(reasons) and kind in ("estimate", "floor", "upper")
     value, range_text = _display(kind, minutes, low, high, approx)
     bits = []

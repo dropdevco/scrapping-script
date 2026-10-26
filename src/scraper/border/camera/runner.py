@@ -11,9 +11,10 @@ Their crossings and gaps are kept in memory. Every `every` seconds each method i
 its own (transit.measure), and one record per method is appended to
 CAMERA_STATE_DIR/transit-YYYY-MM-DD.jsonl. A record holds derived numbers only: counts, rates,
 transit statistics per window, epochs. No frame, signature, single crossing or single transit is
-ever written. Crossings, and the signatures in them, are dropped after SIGNATURE_TTL_S. Each
-measurement covers at most that long, chained to the one before by the cars-between count
-(transit.prior_at).
+ever written. Crossings, and the signatures in them, are dropped after SIGNATURE_TTL_S (of stream
+time, plus the wall time since the newest frame arrived). Each measurement covers at most that
+long, chained to the one before by the cars-between count (transit.prior_at) when its start
+moves and that count can be checked.
 
 A line is not seen while:
 - its stream is down (between the last frame before and the first frame after), or a segment
@@ -38,6 +39,7 @@ import logging
 import os
 import threading
 import time
+import zipfile
 from collections import deque
 from datetime import UTC, datetime, timedelta
 
@@ -51,12 +53,12 @@ from .reader import live_reader, state_dir
 from .stream import FROZEN_SECONDS, StreamError, StreamFrozen
 
 LO_MIN = 0.5             # the fastest believable trip from line A to line B, minutes
-# The slowest believable trip, minutes. FHWA's crossing-time guide drops matches over 120 min,
-# but an anchor is only trusted when both ends lie inside the measured span with hi_min to
-# spare (transit's "enclosed"). Within the 3 h a signature may be kept (ADR-0014), that needs
-# 2 x hi_min under 3 h: at 120, no trip shorter than 60 min could ever anchor, and PDN's run
-# about 47. So 90, and a trip over 90 min between the lines is never anchored. ASSUMPTION
-# that A->B (the middle of the bridge, not the whole wait) stays under that.
+# The slowest trip an anchor may have, minutes. An anchor is only trusted when both its ends lie
+# inside the measured span with hi_min to spare (transit's "enclosed"), so a trip of T min needs
+# an epoch longer than 2 x hi_min - T, and no epoch is longer than the 3 h a signature may be
+# kept (ADR-0014). Half of that, 90, is the largest hi_min at which a trip of any length can
+# anchor (at FHWA's 120, no trip under 60 min could). ASSUMPTION that A->B (the middle of the
+# bridge, not the whole wait) stays under 90 min, until a hand-timed or GPS-timed A->B says.
 HI_MIN = SIGNATURE_TTL_S / 60 / 2
 RECONNECT_S = 10.0       # wait before opening a stream again after it failed
 SAVE_EVERY_S = 600       # how often the loop counters' learnt roads are saved
@@ -83,10 +85,12 @@ class TransitRunner:
         self.learning_since: dict[str, datetime | None] = {}   # camera -> when loop learning began
         self.first_at: dict[str, datetime] = {}
         self.last_at: dict[str, datetime] = {}
-        self.previous: dict[str, transit.Measurement] = {}
+        self.seen_mono: dict[str, float] = {}   # camera -> time.monotonic() of its latest frame
+        # method -> the last measurement, and the prior it was opened with
+        self.previous: dict[str, tuple[transit.Measurement, transit.Prior | None]] = {}
         self.errors: dict[str, str] = {}
         self.blocked: set[str] = set()      # cameras whose server refused us: never retried
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._stop = threading.Event()
         self._saved_at = time.monotonic()
 
@@ -138,7 +142,10 @@ class TransitRunner:
                                            "stream down or reconnecting"))
                     resumed = False
                     while seen_gaps < len(reader.gaps):
-                        self._gap(cam, reader.gaps[seen_gaps])
+                        gap = reader.gaps[seen_gaps]
+                        if gap.after is not None and frame.at <= gap.after:
+                            break   # found ahead of the frames: it reaches the counters with them
+                        self._gap(cam, gap)
                         seen_gaps += 1
                     self._frame(cam, line, frame)
             except Blocked as exc:
@@ -180,8 +187,6 @@ class TransitRunner:
                 self.gaps[(m, line)].append(gap)
 
     def _frame(self, cam: Camera, line: str, frame) -> None:
-        self.first_at.setdefault(cam.id, frame.at)
-        self.last_at[cam.id] = frame.at
         self.errors.pop(cam.id, None)
         for counter in self.counters[cam.id]:
             found = counter.add(frame)
@@ -191,6 +196,10 @@ class TransitRunner:
                 self.gaps[(counter.method, line)].extend(own)
             if counter.method == "loop":
                 self._learning(cam, line, counter, frame.at)
+        with self._lock:    # seen only once its crossings and gaps are kept
+            self.first_at.setdefault(cam.id, frame.at)
+            self.last_at[cam.id] = frame.at
+            self.seen_mono[cam.id] = time.monotonic()
 
     def _learning(self, cam: Camera, line: str, counter, at: datetime) -> None:
         """While any loop zone of the line is learning, the line's loop count is short: that
@@ -211,27 +220,32 @@ class TransitRunner:
 
     def seen_until(self) -> datetime | None:
         """Both lines are observed up to the older of their latest frames."""
-        if len(self.last_at) < 2:
-            return None
-        return min(self.last_at.values())
+        with self._lock:
+            if len(self.last_at) < 2:
+                return None
+            return min(self.last_at.values())
 
     def measure(self) -> dict[str, tuple[transit.Measurement, transit.Now | None]]:
-        if not self.last_at:
-            return {}
-        # Per-vehicle data goes after SIGNATURE_TTL_S by the newest frame either camera has,
-        # even while the other camera is down and nothing can be measured.
-        cutoff = max(self.last_at.values()) - timedelta(seconds=SIGNATURE_TTL_S)
         with self._lock:
+            if not self.last_at:
+                return {}
+            # Per-vehicle data goes after SIGNATURE_TTL_S by the newest frame either camera has,
+            # plus the wall time since it arrived: even while the other camera is down and
+            # nothing can be measured, and while both are.
+            mono = time.monotonic()
+            cutoff = max(at + timedelta(seconds=mono - self.seen_mono.get(cid, mono))
+                         for cid, at in self.last_at.items()) - timedelta(seconds=SIGNATURE_TTL_S)
             for m in self.methods:
                 self._expire(m, cutoff)
-        at = self.seen_until()
-        if at is None or len(self.first_at) < 2:
-            return {}
-        horizon = max(max(self.first_at.values()), cutoff)
-        if horizon >= at:
-            return {}                            # one camera is more than the TTL behind
-        out = {}
-        with self._lock:
+            at = self.seen_until()
+            if at is None or len(self.first_at) < 2:
+                return {}
+            horizon = max(max(self.first_at.values()), cutoff)
+            if horizon >= at:
+                # One camera is more than the TTL behind: no measurement before it is kept.
+                self.previous.clear()
+                return {}
+            out = {}
             for m in self.methods:
                 a = list(self.crossings[(m, self.line_a)])
                 b = list(self.crossings[(m, self.line_b)])
@@ -243,9 +257,10 @@ class TransitRunner:
                                                gaps_b=gb, start=start if prior is None else None,
                                                end=at, prior=prior)
                 except ValueError as exc:        # e.g. `start` inside a gap
-                    log.info("%s: not measurable yet: %s", m, exc)
+                    log.warning("%s: not measurable: %s", m, exc)
+                    self.previous.pop(m, None)   # start afresh next tick, not from a stale one
                     continue
-                self.previous[m] = measured
+                self.previous[m] = (measured, prior)
                 current = transit.now_from(measured, at) if measured.epochs else None
                 out[m] = (measured, current)
         return out
@@ -257,8 +272,15 @@ class TransitRunner:
         The start never moves backwards (once an earlier measurement moved it past a gap, it
         stays there), and it is never left just before a gap: the count carried across a gap
         needs RATE_WINDOW_MIN of rate before it, so a start inside that stretch moves to the
-        gap's end. Then the count is carried from the previous measurement at that start."""
-        prev = self.previous.get(method)
+        gap's end.
+
+        A count is carried only from a measurement that saw the start. While the start stays
+        where the previous measurement started, this one opens as that one did, never from the
+        previous one's own output: a first look-alike guess fed back every tick could be neither
+        confirmed nor disputed, and would stand until anchors outvoted it. When the start moves,
+        the count at it is carried only if its uncertainty is known, so that anchors can check
+        it; otherwise the measurement starts afresh."""
+        prev, opened = self.previous.get(method, (None, None))
         start = horizon
         if prev is not None and prev.start > start:
             start = prev.start
@@ -271,8 +293,12 @@ class TransitRunner:
             for g0, g1 in spans:
                 if g0 - lead <= start < g1:
                     start, moved = g1, True
-        prior = transit.prior_at(prev, start) if prev is not None and prev.start <= start else None
-        return start, prior
+        if prev is None or not prev.start <= start <= prev.end:
+            return start, None
+        if start == prev.start:
+            return start, opened
+        prior = transit.prior_at(prev, start)
+        return start, prior if prior is not None and prior.uncertainty is not None else None
 
     def _gaps_for(self, method: str, line: str, at: datetime) -> list[Gap]:
         gaps = list(self.gaps[(method, line)])
@@ -295,14 +321,24 @@ class TransitRunner:
 
     def records(self, measured: dict) -> list[dict]:
         out = []
-        for (m, current) in measured.values():
-            rec = transit.record(m, transit.windows(m), current)
-            rec.update({"written_at": datetime.now(UTC).isoformat(),
-                        "seen_until": m.end.isoformat(),
+        for method, (m, current) in measured.items():
+            rec = transit.record(m, transit.windows(m), current, lane_type=self._lane_type())
+            rec.update({"method": method,    # m.method is "unknown" when neither line had a car
+                        "written_at": datetime.now(UTC).isoformat(),
+                        # to the minute: the latest frame's time can be a car's crossing time
+                        "seen_until": m.end.replace(second=0, microsecond=0).isoformat(),
                         "line_a": f"{self.cams[0].id}:{self.line_a}",
                         "line_b": f"{self.cams[1].id}:{self.line_b}"})
             out.append(rec)
         return out
+
+    def _lane_type(self) -> str:
+        """The lane type every zone at both lines is confirmed as, else "mixed". transit pairs
+        the k-th car at A with the (offset + k)-th at B, which holds within one lane type only:
+        pooled with general lanes, SENTRI and Ready cars reorder, and in simulation a window's
+        median then comes out near the flow-weighted mean of the types, the trip of none."""
+        types = {z.lane_type for cam in self.cams for z in cam.count_zones}
+        return types.pop() if len(types) == 1 and None not in types else "mixed"
 
     def write(self, records: list[dict]) -> None:
         if not records:
@@ -396,11 +432,12 @@ def _load_refs(cam: Camera) -> dict:
     if not path.exists():
         return {}
     try:
-        with np.load(path) as saved:
+        # Opened here, not by np.load: np.load leaves the file open when the zip is truncated.
+        with open(path, "rb") as f, np.load(f) as saved:
             keys = {k.rsplit("|", 1)[0] for k in saved.files}
             return {tuple(k.split("|", 1)): (saved[f"{k}|grey"].copy(), saved[f"{k}|edges"].copy())
                     for k in keys}
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as exc:
         log.warning("%s: unreadable loop roads (%s); learning afresh", cam.id, exc)
         return {}
 

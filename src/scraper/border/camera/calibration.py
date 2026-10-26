@@ -186,6 +186,3 @@ class Strip:
         w, h = self.size
         corners = np.float32([[(0, 0), (w, 0), (w, h), (0, h)]])
         return cv2.perspectiveTransform(corners, np.linalg.inv(self.matrix))[0]
-
-    def metres(self, rows: float) -> float:
-        return rows / PX_PER_M

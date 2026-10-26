@@ -39,10 +39,12 @@ order to numpy's sort.
 Small cars get more pixels: the model sees only the region around the camera's count zones,
 not the whole frame. That region is cut into overlapping tiles when it is much wider than tall
 and its cars would otherwise be small in the 640x640 input. At pdn-north the cars are 52-69 px
-wide at 854x480 where they enter, so tiles magnify them. (ASSUMPTION until its zones are drawn:
-a band of lanes there gives about a 700 x 250 px region, two tiles and 1.5x.) At bridgepdn1 the
-cars are 150-400 px wide near the camera, already large at half scale, so one pass is enough. Each pass
-costs the same, so tiles are the price. On 2026-10-24 at 4 threads, a frame took 102 ms wall
+wide at 854x480 where they enter, so tiles magnify them. Its drawn line A gives a region of
+852 x 293 px at 1280x720 and 568 x 195 px at 854x480, each cut into two tiles, scaled 1.28x
+and 1.92x respectively, so a lane is about 127 px wide in the model's input at either size
+(cameras.json through `plan_tiles`, 2026-10-26). At bridgepdn1 the cars are 150-400 px wide
+near the camera, already large at half scale, so one pass is enough. Each pass costs the
+same, so tiles are the price. On 2026-10-24 at 4 threads, a frame took 102 ms wall
 and 0.34 CPU-s with one pass, and 205-251 ms and 0.69-0.78 CPU-s with two. Two streams at
 2 fps keep up with one pass each, or one pass plus two. A camera with no count zones never runs
 the model: it has nothing to count.
@@ -118,9 +120,6 @@ def default_model_path() -> Path:
     """Where the model is looked for: $CHISME_MODEL_DIR, else ~/.chisme/models."""
     base = os.environ.get(MODEL_DIR_ENV)
     return (Path(base) if base else Path.home() / ".chisme" / "models") / MODEL_FILE
-
-
-MODEL_PATH = default_model_path()               # as the environment stood at import
 
 
 class ModelRefused(RuntimeError):
@@ -719,7 +718,7 @@ def _crossing(a: tuple[float, float], b: tuple[float, float], level: float) -> f
     return t if 0.0 <= t <= 1.0 else None
 
 
-def signature(image: np.ndarray, box: Sequence[float], cls: int,
+def signature(image: np.ndarray, box: Sequence[float],
               zone_width: float) -> tuple[float, ...] | None:
     """The shared form (crossing.look): the body's colour on the colour wheel, its brightness,
     and the box width over the zone width. The class is not part of it: it travels as
@@ -750,6 +749,13 @@ class DetectorCounter:
                  zones: Sequence[Zone] | None = None):
         self.camera = camera
         self.zones = tuple(zones if zones is not None else camera.count_zones)
+        w, h = camera.frame_size
+        for z in self.zones:
+            # A far edge no box can reach reads as a line with no cars, never as one unseen.
+            # Zones are scaled with the frames read, so inside at this size is inside at all.
+            if not all(0 <= x <= w and 0 <= y <= h for x, y in z.quad):
+                raise ValueError(f"{camera.id} zone {z.line}/{z.lane}: its near and far edges "
+                                 f"are not inside the {w}x{h} frame")
         self.detector = detector if detector is not None else Yolox.load()
         self.tracker = Tracker(self._heading)
         self.tiles: list[Tile] = []
@@ -802,7 +808,7 @@ class DetectorCounter:
             for zg in self._count(track, before, track.point):
                 crossings.append(Crossing(
                     self.camera.id, zg.zone.line, zg.zone.lane, frame.at, self.method,
-                    signature(frame.image, track.box, track.cls, zg.far_width),
+                    signature(frame.image, track.box, zg.far_width),
                     round(float(np.median(track.scores)), 3), VEHICLE_CLASSES.get(track.cls)))
         return crossings
 
@@ -843,6 +849,6 @@ class DetectorCounter:
         return out
 
 
-__all__ = ["CANDIDATE_SCORE", "MODEL_PATH", "MODEL_SHA256", "Detection", "DetectorCounter",
-           "ModelRefused", "Tile", "Track", "Tracker", "Yolox", "decode", "default_model_path",
-           "load_net", "nms", "plan_tiles", "preprocess", "read_model", "signature", "vehicles"]
+__all__ = ["CANDIDATE_SCORE", "MODEL_SHA256", "Detection", "DetectorCounter", "ModelRefused",
+           "Tile", "Track", "Tracker", "Yolox", "decode", "default_model_path", "load_net", "nms",
+           "plan_tiles", "preprocess", "read_model", "signature", "vehicles"]

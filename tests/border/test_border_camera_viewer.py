@@ -21,6 +21,7 @@ from scraper.border.camera.viewer import serve
 from scraper.border.camera.worker import lane_summary
 
 NOW = datetime(2026, 10, 19, 23, 0, tzinfo=UTC)
+HIDDEN = "road out of view assumed to move like the line in view"
 
 
 def est(state, queue=40.0, speed=0.5, beyond=False):
@@ -86,14 +87,20 @@ class LaneSummary(unittest.TestCase):
         self.assertEqual((out["low_min"], out["high_min"]), (15.0, 27.0))
         self.assertEqual(out["display_value"], "≈ 20")
         self.assertIn("range 15–27 min", out["display_detail"])
-        self.assertEqual(out["approx_reasons"], ["booth distance is a map estimate"])
+        self.assertEqual(out["approx_reasons"], ["booth distance is a map estimate", HIDDEN])
 
     def test_an_unverified_scale_is_named_as_the_reason_not_the_map(self):
         roll = {"wait_min": 20.0, "low_min": 16.0, "high_min": 25.0, "speed_m_s": 0.4}
         out = lane_summary(est("queue"), far(uncertainty=0.0, verified=True), roll, NOW,
                            scale_verified=False)
-        self.assertEqual(out["approx_reasons"], ["camera scale unverified"])
+        self.assertEqual(out["approx_reasons"], ["camera scale unverified", HIDDEN])
         self.assertNotIn("map estimate", out["display_detail"])
+
+    def test_a_surveyed_booth_out_of_view_is_still_approximate(self):
+        # Distance and scale known, the road out of view is still timed at the visible speed.
+        roll = {"wait_min": 20.0, "low_min": 18.0, "high_min": 22.0, "speed_m_s": 0.4}
+        out = lane_summary(est("queue"), far(uncertainty=0.0, verified=True), roll, NOW)
+        self.assertEqual((out["display_value"], out["approx_reasons"]), ("≈ 20", [HIDDEN]))
 
     def test_a_booth_in_view_is_never_approximate(self):
         roll = {"wait_min": 3.0, "low_min": 2.0, "high_min": 4.0, "speed_m_s": 0.4}
@@ -101,14 +108,28 @@ class LaneSummary(unittest.TestCase):
         self.assertFalse(out["approx"])
 
     def test_a_queue_running_out_of_view_is_a_floor_stated_at_its_low_end(self):
-        # The floor is the range's low end (short distance, scale slack), not the central wait.
+        # The floor is the range's low end (fastest speed), not the central wait.
         roll = {"wait_min": 16.0, "low_min": 13.0, "high_min": None, "speed_m_s": 0.5,
                 "lower_bound": True}
-        out = lane_summary(est("queue", beyond=True), far(), roll, NOW)
+        out = lane_summary(est("queue", beyond=True), lane(0), roll, NOW)
         self.assertTrue(out["lower_bound"])
         self.assertEqual(out["display_value"], "≥ 13")
         self.assertIsNone(out["high_min"])
         self.assertIn("at least", out["display_detail"])
+
+    def test_a_queue_running_out_of_view_with_the_booth_out_of_view_is_no_floor(self):
+        # 365 m out of view timed at the visible line's speed: if that stretch moves faster
+        # (merges, gaps), the true wait is below the range's low end, so no "at least".
+        roll = {"wait_min": 70.8, "low_min": 52.0, "high_min": None, "speed_m_s": 0.1,
+                "lower_bound": False}
+        out = lane_summary(est("queue", queue=60, speed=0.1, beyond=True), far(365, 35), roll,
+                           NOW, scale_verified=False)
+        self.assertEqual((out["kind"], out["lower_bound"]), ("estimate", False))
+        self.assertEqual(out["display_value"], "≈ 71")
+        self.assertIsNone(out["high_min"])
+        self.assertNotIn("≥", out["display_value"])
+        self.assertNotIn("at least", out["display_detail"])
+        self.assertIn(HIDDEN, out["display_detail"])
 
     def test_a_minute_too_short_to_time_uses_this_minutes_line_not_an_older_wait(self):
         # 15 minutes ago a long line gave 12 min; now a 30 m line sits at the booth, too short
@@ -119,10 +140,20 @@ class LaneSummary(unittest.TestCase):
         self.assertIn("this minute's line", out["note"])
 
     def test_a_minute_too_short_to_time_whose_line_runs_out_of_view_is_still_a_floor(self):
+        roll = {"wait_min": 20.0, "speed_m_s": 0.05}
+        out = lane_summary(est("insufficient", queue=60, speed=None, beyond=True), lane(0), roll,
+                           NOW)
+        self.assertTrue(out["lower_bound"])
+        self.assertEqual(out["display_value"], f"≥ {round(60 / 0.05 / 60)}")
+
+    def test_a_minute_too_short_to_time_with_the_booth_out_of_view_is_an_estimate(self):
+        # No floor, and no high end either: the line runs on past the view.
         roll = {"wait_min": 20.0, "speed_m_s": 0.5}
         out = lane_summary(est("insufficient", queue=60, speed=None, beyond=True), far(), roll, NOW)
-        self.assertTrue(out["lower_bound"])
-        self.assertEqual(out["display_value"], f"≥ {round((360 + 60) / 0.5 / 60)}")
+        self.assertEqual((out["kind"], out["lower_bound"]), ("estimate", False))
+        self.assertEqual(out["display_value"], f"≈ {round((400 + 60) / 0.5 / 60)}")
+        self.assertIsNone(out["high_min"])
+        self.assertNotIn("range", out["display_detail"])
 
     def test_a_minute_with_no_line_and_too_few_frames_says_so(self):
         out = lane_summary(est("insufficient", queue=0, speed=None), lane(0), {"speed_m_s": 0.5},

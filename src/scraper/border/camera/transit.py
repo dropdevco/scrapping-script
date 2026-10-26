@@ -27,9 +27,14 @@ Three things keep the counts honest.
   as evidence on its own only when its epoch encloses it: its A crossing more than hi_min before
   the epoch's end and its B crossing at least hi_min after its start. Whichever car each one
   really is, its partner then crossed inside the epoch, and the true pairing competed with the
-  look-alike for a place in the chain. At least MIN_ANCHORS enclosed anchors near their own
-  trend line make the epoch's offset, and the other anchors near that line are kept too. Without
-  them, an epoch's anchors can only confirm an offset carried into it, never set one unflagged.
+  look-alike for a place in the chain. True anchors agree with their own trend line to a car or
+  two. A chain of look-alikes does not: where the true partners cannot match at all (a trip
+  longer than hi_min, or a camera at B that renders colour its own way), it scattered by 100 cars
+  and more in review runs (2026-10-26), and was taken as sure. So the epoch's offset is set by at
+  least MIN_ANCHORS enclosed anchors within OUTLIER_CARS of the enclosed anchors' line, and only
+  when they are at least half of the enclosed ones; the other anchors near that line are kept
+  too. Without them, an epoch's anchors can only confirm an offset carried into it, never set
+  one unflagged.
 - Drift. A counter that misses or double counts drifts. If A counts a share bias_A too many and B
   a share bias_B, a transit read with a fixed offset is off by about
   bias_A x (minutes since the start, at A) - bias_B x (minutes since the start, at B). Once the
@@ -51,25 +56,29 @@ The signatures' TTL. ADR-0014 decision 4 keeps a signature for at most SIGNATURE
 stretch with the older signatures dropped, its early epochs would lose their anchors and with
 them their transits (review, 2026-10-24: 162 transits and 13 windows changed at 6 h). So a live
 caller measures over a horizon no longer than the TTL and starts each horizon from the last:
-`prior_at(previous, at)` gives the cars between the lines at `at`, a count with no per-vehicle
-data, and `measure(..., prior=...)` continues from it, its own anchors checking it. A window's
-by-exit numbers are complete in a horizon once every car that left in it entered after the
-horizon's start (window start - hi_min >= start), its by-entry numbers once every car that
-entered in it has left (window end + hi_min <= end). Right after a gap they rest on the carried
-offset, flagged, until enough of the new epoch is seen for its anchors to confirm it (about one
-transit plus hi_min): a caller that writes a window once must either wait that long after a gap
-or accept a flag a later horizon would clear. LiveTest runs this.
+`prior_at(previous, at)` gives the cars between the lines at `at` (none past the end of what was
+measured), a count with no per-vehicle data, and `measure(..., prior=...)` continues from it,
+its own anchors checking it. A sure count its anchors cannot check (at night, with no colour)
+stays sure for CHECK_MAX_MIN after anchors or a given count last set it, and is then flagged
+("carried"): a count's error grows with every car counted (Drift above), and nothing else would
+flag it. A window's by-exit numbers are complete in a horizon once every car that left in it
+entered after the horizon's start and the window is over (window start - hi_min >= start,
+window end <= end), its by-entry numbers once the window lies in the horizon and every car that
+entered in it has left (window start >= start, window end + hi_min <= end). Each Window, and
+each window of the record, says which of the two it is; over a horizon of 2 x hi_min no window
+is both, so a reader takes each half from a record that marks it complete. Right after a gap
+they rest on the carried offset, flagged, until enough of the new epoch is seen for its anchors
+to confirm it (about one transit plus hi_min): a caller that writes a window once must either
+wait that long after a gap or accept a flag a later horizon would clear. LiveTest runs this.
 
-Signatures are compared with `distance` (Euclidean by default) against MATCH_DISTANCE. That
-assumes a vector of components scaled to about 0-1 in which neutral colours sit together, such as
-(saturation x cos hue, saturation x sin hue, value, width share). On 2026-10-24 neither counter
-emits that: loop.py gives (hue in degrees, saturation 0-255, value 0-255, width in metres,
-seconds in the zone) and detect.py (COCO class, hue / 180, saturation, value, width share). Raw
-hue wraps at red and is noise for a grey car, so under plain Euclidean distance a grey car would
-look rare and a red one would not match itself; seconds in the zone depend on speed, not looks.
-So with the default distance a component beyond SIGNATURE_LIMIT is refused (ValueError) rather
-than turned into silent look-alike anchors. Until the counters share a form, pass a `distance`
-that handles theirs.
+Signatures are crossing.look()'s form, (saturation x cos hue, saturation x sin hue, value, width
+share), which both counters emit. Two are compared by `colour_distance` against MATCH_DISTANCE,
+on colour and value only: the width share is a share of each zone's assumed or pixel width, and
+those differ between the cameras, so one car's two readings could differ by more than
+MATCH_DISTANCE on width alone. A signature in any other form (hue in degrees, 0-255 channels, a
+class id) or with a part that is not a number is refused (ValueError) rather than turned into
+silent look-alike anchors. A crossing's `vehicle` class, where the counter knows it, must agree
+too (`_same_class`).
 
 Everything here is a fixed computation: the same crossings give the same output, whatever order
 they come in, with deterministic tie-breaks and no randomness. Per-vehicle data (signatures,
@@ -81,7 +90,7 @@ from __future__ import annotations
 import math
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -98,11 +107,10 @@ MIN_EXIT_RATE = 0.05         # cars/min: slower is a stopped line, and between /
 GAP_PAD_S = 5.0              # ASSUMPTION: a reader resumes mid-segment; one 5 s City segment more
                              # past a gap is treated as unseen, so a half-read segment is not
                              # counted as if it were whole
-MATCH_DISTANCE = 0.15        # ASSUMPTION: signature components are scaled to about 0-1 (see
-                             # above), so two readings of one car, or two cars of one shade,
-                             # fall within this
-SIGNATURE_LIMIT = 1.5        # with the default distance, a component beyond +-1.5 is not on that
-                             # scale (hue in degrees, 0-255 channels, a class id): refused
+MATCH_DISTANCE = 0.15        # ASSUMPTION: two readings of one car, or two cars of one shade,
+                             # fall within this in look()'s colour and value (see above)
+SIGNATURE_LIMIT = 1.5        # a part beyond +-1.5 is not look()'s 0-1 form (hue in degrees,
+                             # 0-255 channels, a class id): refused
 RARITY_HALF_MIN = 15         # a car's look is judged against its line's cars within 15 min of it
 MIN_POPULATION = 20          # fewer neighbours than this cannot say that a look is rare
 RARE_SHARE = 0.05            # distinctive: at most 1 in 20 neighbours look alike. ASSUMPTION
@@ -116,10 +124,17 @@ MIN_ANCHORS = 3              # fewer enclosed anchors than this do not set an of
                              # anchors than this do not confirm one: a single look-alike would
 INLIER_MIN_CARS = 3          # an anchor this close to the anchors' trend line is always kept,
 INLIER_MADS = 4              # and one further than 4 median deviations from it never is
-ANCHORED_SD = 2.0            # ASSUMPTION: an anchored offset is good to about 2 cars (AnchorTest
-                             # and GapTest find it within 2 of the truth)
+ANCHORED_SD = 2.0            # ASSUMPTION: an anchored offset is good to about 2 cars. Calibrated
+                             # on the test simulator only (AnchorTest and GapTest find it within
+                             # 2 of the truth there), which is strictly first-in-first-out, has
+                             # one lane type and 1 car in 10 distinctive, and whose cameras agree
+                             # to 0.03. Not yet measured against a hand count, so the offset_sd
+                             # written for an anchored epoch is this assumption, not a measurement
 AGREE_SDS = 3.0              # anchors agree with a carried offset within OUTLIER_CARS + 3 of its
                              # standard deviations
+CHECK_MAX_MIN = 60           # ASSUMPTION: a sure count stays sure this long after anchors (or a
+                             # given count) last set it. If |bias_A - bias_B| is at most 1 %, its
+                             # transits are then off by up to about 0.6 min (ADR-0014, Drift)
 DRIFT_MIN_DT_MIN = 10        # Theil-Sen pairs closer in time than this say nothing about drift
 DRIFT_MIN_ENDS = 5           # and a slope needs this many anchors at each end of those pairs
 DRIFT_MAX_ANCHORS = 400      # Theil-Sen looks at every pair: thin evenly to this many anchors
@@ -132,7 +147,8 @@ class Transit:
     entered_at: datetime         # capture time of the crossing at A
     exited_at: datetime          # capture time of the crossing at B it pairs with
     minutes: float
-    flagged: bool = False        # its offset was not anchored after the last gap
+    flagged: bool = False        # its epoch's offset is not sure: not given, not anchored, and
+                                 # not continued from either within CHECK_MAX_MIN
 
 
 @dataclass(frozen=True)
@@ -188,6 +204,7 @@ class Prior:
     between: int
     sure: bool                   # its epoch's offset was given, anchored, or continued from one
     uncertainty: float | None    # cars, about one standard deviation; None when not known
+    checked_at: datetime | None = None   # when anchors or a given count last set it; None: `at`
 
 
 @dataclass(frozen=True)
@@ -206,9 +223,10 @@ class Epoch:
                                                 # rest on ("given": shown against it, unused)
     line: tuple[float, float] | None = None     # that line (offset at `start`, cars per minute),
                                                 # when the offsets come from the anchors
-    enclosed: int = 0            # enclosed anchors near their own line (see the module docstring)
+    enclosed: int = 0            # enclosed anchors that agree with their line (module docstring)
     incoming: int | None = None  # the offset carried into it (across a gap, or a prior)
     uncertainty: float | None = None   # of `offset`, cars, about one sd; None when not known
+    checked_at: datetime | None = None # when anchors or a given count last set the offset
 
 
 @dataclass(frozen=True)
@@ -218,10 +236,11 @@ class Measurement:
     end: datetime
     epochs: tuple[Epoch, ...]
     transits: tuple[Transit, ...]
-    a_times: tuple[datetime, ...]                    # every crossing at A, in order
+    a_times: tuple[datetime, ...]                    # every crossing at A in [start, end), in order
     b_times: tuple[datetime, ...]
     gaps_a: tuple[tuple[datetime, datetime], ...]    # unseen stretches at A, padded
     gaps_b: tuple[tuple[datetime, datetime], ...]
+    hi_min: float                                    # the longest trip it allowed for
 
 
 @dataclass(frozen=True)
@@ -239,6 +258,10 @@ class Window:
     end: datetime
     by_exit: Stats               # transits that crossed B in the window
     by_entry: Stats              # transits that crossed A in it; n < entered while cars are between
+    by_exit_complete: bool       # every car that left in it entered after the measurement's start
+                                 # (start - hi_min >= m.start), and it is over (end <= m.end)
+    by_entry_complete: bool      # it lies in the measurement (start >= m.start), and every car
+                                 # that entered in it has had hi_min to leave (end + hi_min <= m.end)
     entered: int                 # crossings at A in the window
     exited: int                  # crossings at B
     exit_rate: float | None      # cars/min at B over the window's seen time
@@ -339,11 +362,19 @@ def _now(ta: Sequence[datetime], tb: Sequence[datetime], offset: int, at: dateti
 
 # --- anchors --------------------------------------------------------------------------------
 
-def look_alike_shares(crossings: Sequence[Crossing],
-                      distance: Callable[[Sequence[float], Sequence[float]], float] = math.dist,
-                      match_distance: float = MATCH_DISTANCE) -> list[float | None]:
+def colour_distance(p: Sequence[float], q: Sequence[float]) -> float:
+    """How unlike two signatures look: Euclidean over look()'s colour and value, its first three
+    parts. The width share is left out. It is a share of each zone's assumed or pixel width, and
+    those differ between the cameras (B's zones have no ground rectangle; detect.py's share is of
+    the zone's far edge in pixels), so one car's two readings could differ by more than
+    MATCH_DISTANCE on width alone: 0.34 for a car filling 80 % of a zone (review, 2026-10-26)."""
+    return math.dist(p[:3], q[:3])
+
+
+def look_alike_shares(crossings: Sequence[Crossing]) -> list[float | None]:
     """For each crossing (in capture order), the share of its line's cars within RARITY_HALF_MIN
-    that look like it. None when it has no signature or too few neighbours to judge."""
+    that look like it: within MATCH_DISTANCE, of a class it could be matched to. None when it has
+    no signature or too few neighbours to judge."""
     signed = [(i, c) for i, c in enumerate(crossings) if c.signature is not None]
     times = [c.at for _, c in signed]
     half = timedelta(minutes=RARITY_HALF_MIN)
@@ -354,7 +385,8 @@ def look_alike_shares(crossings: Sequence[Crossing],
         if population < MIN_POPULATION:
             continue
         alike = sum(1 for m in range(lo, hi)
-                    if m != n and distance(c.signature, signed[m][1].signature) <= match_distance)
+                    if m != n and _same_class(c, signed[m][1])
+                    and colour_distance(c.signature, signed[m][1].signature) <= MATCH_DISTANCE)
         shares[i] = alike / population
     return shares
 
@@ -369,43 +401,31 @@ class _Candidate:
 
 
 def anchors(a: Sequence[Crossing], b: Sequence[Crossing], lo_min: float, hi_min: float,
-            start: datetime | None = None, *,
-            distance: Callable[[Sequence[float], Sequence[float]], float] = math.dist,
-            match_distance: float = MATCH_DISTANCE,
-            within: tuple[datetime, datetime] | None = None) -> list[Anchor]:
+            start: datetime | None = None) -> list[Anchor]:
     """Distinctive cars matched between A and B by signature.
 
     A pair is a candidate when both cars are distinctive on their own line (look-alike share at
-    most RARE_SHARE), it reached B lo_min to hi_min minutes after A, and the two signatures are
-    within match_distance. Of the candidates, the largest set in which no two pairs cross is
-    kept: first-in-first-out allows no other. Ties go to the higher total confidence, then to the
-    earlier pairs. With `within` = (s, e), only the anchors of that set which the stretch
-    encloses are returned: A more than hi_min before e, B at least hi_min after s. (Filtering
-    the candidates instead would drop the true partner of an enclosed car whenever that partner
-    is not enclosed itself, and leave the car only look-alikes to pair with.) Each anchor's
-    confidence is the product of
-    - how alike the two readings are (1 at the same reading, 0 at match_distance);
+    most RARE_SHARE), it reached B lo_min to hi_min minutes after A, the two signatures are
+    within MATCH_DISTANCE (`colour_distance`), and their classes agree. Of the candidates, the
+    largest set in which no two pairs cross is kept: first-in-first-out allows no other. Ties go
+    to the higher total confidence, then to the earlier pairs. Each anchor's confidence is the
+    product of
+    - how alike the two readings are (1 at the same reading, 0 at MATCH_DISTANCE);
     - how rare the look is (1 for a look nobody shares, 0 at RARE_SHARE);
     - 1 / (1 + the other candidates of either car that look at least as alike);
     - the lower of the two crossings' own confidences."""
     oa, ob = ordered(a, start), ordered(b, start)
-    found = _chain(_scored(oa, ob, lo_min, hi_min, distance, match_distance), oa, ob)
-    if within is not None:
-        found = _enclosed(found, *within, hi_min)
-    return found
+    return _chain(_scored(oa, ob, lo_min, hi_min), oa, ob)
 
 
-def _scored(oa: Sequence[Crossing], ob: Sequence[Crossing], lo_min: float, hi_min: float,
-            distance: Callable[[Sequence[float], Sequence[float]], float],
-            match_distance: float) -> list[tuple[_Candidate, float]]:
+def _scored(oa: Sequence[Crossing], ob: Sequence[Crossing], lo_min: float,
+            hi_min: float) -> list[tuple[_Candidate, float]]:
     """Every candidate pair with its confidence, sorted by (ia, ib). See `anchors`."""
     if not 0 <= lo_min < hi_min:
         raise ValueError("anchors need 0 <= lo_min < hi_min")
-    if distance is math.dist:
-        _check_scale(oa)
-        _check_scale(ob)
-    sa = look_alike_shares(oa, distance, match_distance)
-    sb = look_alike_shares(ob, distance, match_distance)
+    _check_scale(oa)
+    _check_scale(ob)
+    sa, sb = look_alike_shares(oa), look_alike_shares(ob)
     rare_b = [(j, c) for j, c in enumerate(ob) if _rare(sb[j])]
     tb = [c.at for _, c in rare_b]
     lo, hi = timedelta(minutes=lo_min), timedelta(minutes=hi_min)
@@ -415,8 +435,8 @@ def _scored(oa: Sequence[Crossing], ob: Sequence[Crossing], lo_min: float, hi_mi
             continue
         for m in range(bisect_left(tb, ca.at + lo), bisect_right(tb, ca.at + hi)):
             j, cb = rare_b[m]
-            d = distance(ca.signature, cb.signature)
-            if d <= match_distance:
+            d = colour_distance(ca.signature, cb.signature)
+            if d <= MATCH_DISTANCE and _same_class(ca, cb):
                 cands.append(_Candidate(i + 1, j + 1, d, max(sa[i], sb[j]),
                                         min(ca.confidence, cb.confidence)))
     by_a: dict[int, list[float]] = defaultdict(list)
@@ -428,7 +448,7 @@ def _scored(oa: Sequence[Crossing], ob: Sequence[Crossing], lo_min: float, hi_mi
     for c in cands:
         rivals = max(sum(1 for d in by_a[c.ia] if d <= c.distance),
                      sum(1 for d in by_b[c.ib] if d <= c.distance)) - 1
-        confidence = ((1 - c.distance / match_distance) * (1 - c.share / RARE_SHARE)
+        confidence = ((1 - c.distance / MATCH_DISTANCE) * (1 - c.share / RARE_SHARE)
                       * c.confidence / (1 + rivals))
         scored.append((c, max(0.0, confidence)))
     return scored
@@ -452,15 +472,26 @@ def _enclosed(found: Sequence[Anchor], s: datetime, e: datetime,
 
 
 def _check_scale(crossings: Sequence[Crossing]) -> None:
-    """The default distance needs components on a 0-1 scale. Nothing of the signature is put in
-    the message: it is per-vehicle data."""
+    """Signatures must be look()'s 0-1 form. Nothing of the signature is put in the message: it
+    is per-vehicle data."""
     for c in crossings:
-        if c.signature is not None and not all(-SIGNATURE_LIMIT <= v <= SIGNATURE_LIMIT
-                                               for v in c.signature):
+        if c.signature is None:
+            continue
+        if not all(math.isfinite(v) for v in c.signature):
+            raise ValueError(f"{c.camera} ({c.method}): a signature component is not finite")
+        if not all(-SIGNATURE_LIMIT <= v <= SIGNATURE_LIMIT for v in c.signature):
             raise ValueError(
                 f"{c.camera} ({c.method}): a signature component lies beyond "
-                f"+-{SIGNATURE_LIMIT}. The default distance needs components on a 0-1 scale "
-                "(see the transit module docstring); pass a `distance` for this form")
+                f"+-{SIGNATURE_LIMIT}, so it is not crossing.look()'s 0-1 form")
+
+
+def _same_class(p: Crossing, q: Crossing) -> bool:
+    """Whether two crossings may be one vehicle by class: an unknown class matches anything.
+    crossing.same_vehicle's rule, repeated so that the maths imports no image library.
+    ASSUMPTION: YOLOX gives a vehicle the same class at A, where it sees the back, and at B,
+    where it sees the front. A pickup read as a car at one and a truck at the other loses its
+    anchor."""
+    return p.vehicle is None or q.vehicle is None or p.vehicle == q.vehicle
 
 
 def _rare(share: float | None) -> bool:
@@ -534,7 +565,11 @@ def drift(found: Sequence[Anchor], exit_rate: float | None,
           entry_rate: float | None = None) -> Drift | None:
     """The trend of the anchors' offsets against the time they crossed A, as a Theil-Sen slope:
     the median of the slopes between pairs of anchors at least DRIFT_MIN_DT_MIN apart, so a few
-    wrong anchors cannot tilt it.
+    wrong anchors cannot tilt it. An epoch's drift is taken over the anchors its offsets rest on
+    (each car takes the median of those near it in time), not from its trend line. The line is
+    fitted to the enclosed anchors alone and only fills in where kept anchors are few; over that
+    shorter span it read bias_A - bias_B 0.0101 off the realised value in DriftLawTest (156
+    anchors), against 0.0060 from all 206 kept anchors (review, 2026-10-26).
 
     If A counts a share bias_A too many and B bias_B, an anchor's offset grows by
     (bias_B - bias_A) x (cars crossing A per hour). Divided by the exit rate, that is minutes of
@@ -585,10 +620,10 @@ def _fit(found: Sequence[Anchor], start: datetime,
     ys = [x.offset for x in found]
     slope = _theil_sen(xs, ys) if len(found) >= REANCHOR_MIN_ANCHORS else None
     slope = 0.0 if slope is None else slope
-    at_start = _quantile(sorted(y - slope * x for x, y in zip(xs, ys)), 0.5)
+    line = (_quantile(sorted(y - slope * x for x, y in zip(xs, ys)), 0.5), slope)
 
     def off(x: Anchor) -> float:
-        return abs(x.offset - at_start - slope * _minutes(x.entered_at - start))
+        return abs(x.offset - _on(line, start, x.entered_at))
 
     keep = max(INLIER_MIN_CARS, INLIER_MADS * _quantile(sorted(off(x) for x in found), 0.5))
     near = [x for x in found if off(x) <= keep]
@@ -596,7 +631,13 @@ def _fit(found: Sequence[Anchor], start: datetime,
     near += [x for x in extra
              if off(x) <= keep and x.a_index not in used_a and x.b_index not in used_b]
     near.sort(key=lambda x: (x.a_index, x.b_index))
-    return (at_start, slope), tuple(near)
+    return line, tuple(near)
+
+
+def _on(line: tuple[float, float], start: datetime, at: datetime) -> float:
+    """The line's offset for a car crossing A at `at`."""
+    at_start, slope = line
+    return at_start + slope * _minutes(at - start)
 
 
 # --- a whole run: epochs, gaps, windows -----------------------------------------------------
@@ -606,32 +647,35 @@ class _Incoming:
     """An offset carried into an epoch, across a gap or from a prior."""
     offset: int
     uncertainty: float | None    # cars, about one sd; None when not known
-    continued: bool              # a sure count with no gap in between: stays sure unchecked
+    continued: bool              # a sure count with no gap in between: stays sure unchecked ...
+    checked_at: datetime | None  # ... until CHECK_MAX_MIN after anchors or a given count set it
 
 
 def measure(a: Sequence[Crossing], b: Sequence[Crossing], lo_min: float, hi_min: float, *,
             gaps_a: Sequence[Gap] = (), gaps_b: Sequence[Gap] = (),
             start: datetime | None = None, end: datetime | None = None,
-            offset: int | None = None, prior: Prior | None = None,
-            distance: Callable[[Sequence[float], Sequence[float]], float] = math.dist,
-            match_distance: float = MATCH_DISTANCE) -> Measurement:
-    """Transits for one counter's crossings at A and B, cut into epochs at every gap.
+            offset: int | None = None, prior: Prior | None = None) -> Measurement:
+    """Transits for one counter's crossings at A and B in [start, end), cut into epochs at every
+    gap. Crossings outside that span are left out.
 
     `offset`, if given, is the cars between the lines at `start` (say from a hand count), and the
     first epoch uses it as it is. `prior` (`prior_at` on an earlier measurement) is that count
     carried from before; `start` defaults to prior.at. The first epoch takes it like an offset
-    carried across a gap, except that a sure prior its anchors cannot check stays sure. Either
-    needs `start` seen: a gap over it raises ValueError.
+    carried across a gap, except that a sure prior its anchors cannot check stays sure until
+    CHECK_MAX_MIN after its last check. Either needs `start` seen: a gap over it raises
+    ValueError.
 
     Every other epoch's offset comes from the first of these that applies:
-    - "anchors": at least MIN_ANCHORS enclosed anchors near their line that do not dispute the
-      offset carried in. Short of that, at least MIN_ANCHORS anchors near their line whose
-      offset at the epoch's start lies within OUTLIER_CARS + AGREE_SDS sd of the carried one.
-      Each car then takes the median of the kept anchors within REANCHOR_HALF_MIN of it, or
-      their line where there are too few.
+    - "anchors": at least MIN_ANCHORS enclosed anchors that agree with their line (module
+      docstring) and do not dispute the offset carried in. Short of that, at least MIN_ANCHORS
+      anchors near their line whose offset at the epoch's start lies within
+      OUTLIER_CARS + AGREE_SDS sd of the carried one. Each car then takes the median of the
+      kept anchors within REANCHOR_HALF_MIN of it, or their line where there are too few.
     - "disputed": enclosed anchors that disagree with the carried offset. Used, flagged.
-    - "continued": a sure prior its anchors cannot check. Used as it is.
-    - "carried": the offset carried across the gap. Used, flagged.
+    - "continued": a sure prior its anchors cannot check, last checked (by anchors' crossings at
+      B, or a given count) no more than CHECK_MAX_MIN before the epoch's end. Used as it is.
+    - "carried": the offset carried across the gap, or a sure prior checked longer ago. Used,
+      flagged.
     - "few-anchors": anchors that cannot stand on their own, with nothing carried in to check:
       used, flagged.
     - "unknown": no offset and no transits.
@@ -648,15 +692,16 @@ def measure(a: Sequence[Crossing], b: Sequence[Crossing], lo_min: float, hi_min:
         raise ValueError("a given offset is the cars between the lines at `start`: give it")
     method = _method(a, b)
     oa, ob = ordered(a), ordered(b)
-    ta, tb = [c.at for c in oa], [c.at for c in ob]
     if start is None:
-        firsts = [t[0] for t in (ta, tb) if t]
+        firsts = [o[0].at for o in (oa, ob) if o]
         if not firsts:
             raise ValueError("no crossings and no start")
         start = min(firsts)
     if end is None:
-        lasts = [t[-1] for t in (ta, tb) if t]
+        lasts = [o[-1].at for o in (oa, ob) if o]
         end = max(lasts) + _TICK if lasts else start
+    oa, ob = ordered(oa, start, end), ordered(ob, start, end)
+    ta, tb = [c.at for c in oa], [c.at for c in ob]
     ga, gb = _merge(_intervals(gaps_a)), _merge(_intervals(gaps_b))
     blackouts = [(max(s, start), min(e, end)) for s, e in _merge(ga + gb) if e > start and s < end]
     bounds, s = [], start
@@ -676,35 +721,38 @@ def measure(a: Sequence[Crossing], b: Sequence[Crossing], lo_min: float, hi_min:
         if epochs:
             incoming = _carry(epochs[-1], ta, tb, epochs[-1].end, s, ga, gb, start)
         elif prior is not None:
-            incoming = _Incoming(prior.between, prior.uncertainty, continued=prior.sure)
+            incoming = _Incoming(prior.between, prior.uncertainty, continued=prior.sure,
+                                 checked_at=prior.at if prior.checked_at is None
+                                 else prior.checked_at)
         ea, eb = ordered(oa, s, e), ordered(ob, s, e)
-        epoch = _epoch(ea, eb, s, e, lo_min, hi_min, distance, match_distance,
-                       offset if not epochs else None, incoming)
+        epoch = _epoch(ea, eb, s, e, lo_min, hi_min, offset if not epochs else None, incoming)
         epochs.append(epoch)
         if epoch.offset is not None:
             eta, etb = [c.at for c in ea], [c.at for c in eb]
             out += _pair(eta, etb, _offsets(epoch, eta), flagged=epoch.source not in _SURE)
     return Measurement(method, start, end, tuple(epochs), tuple(out), tuple(ta), tuple(tb),
-                       tuple(ga), tuple(gb))
+                       tuple(ga), tuple(gb), hi_min)
 
 
 def _epoch(ea: Sequence[Crossing], eb: Sequence[Crossing], s: datetime, e: datetime,
-           lo_min: float, hi_min: float,
-           distance: Callable[[Sequence[float], Sequence[float]], float],
-           match_distance: float, given: int | None, incoming: _Incoming | None) -> Epoch:
+           lo_min: float, hi_min: float, given: int | None,
+           incoming: _Incoming | None) -> Epoch:
     """One epoch's offset and where it came from (see `measure`)."""
-    found = _chain(_scored(ea, eb, lo_min, hi_min, distance, match_distance), ea, eb)
+    found = _chain(_scored(ea, eb, lo_min, hi_min), ea, eb)
     enclosed = _enclosed(found, s, e, hi_min)
-    enclosed_near = _fit(enclosed, s)[1] if enclosed else ()
+    # True anchors agree with their own line to a car or two. A chain of look-alikes scatters
+    # by tens of cars, and INLIER_MADS of its own deviations would still take it all in.
+    own, own_near = _fit(enclosed, s, extra=found) if enclosed else (None, ())
+    agree = [x for x in enclosed if abs(x.offset - _on(own, s, x.entered_at)) <= OUTLIER_CARS]
+    if 2 * len(agree) < len(enclosed):
+        agree = []
     line: tuple[float, float] | None = None
     inliers: tuple[Anchor, ...] = ()
     off: int | None = None
     uncertainty: float | None = None
-    if given is not None:
-        source, off, uncertainty = "given", given, 0.0
-        inliers = _fit(found, s)[1] if found else ()     # shown against the given offset
-    elif len(enclosed_near) >= MIN_ANCHORS:
-        line, inliers = _fit(enclosed, s, extra=found)
+    checked_at: datetime | None = None
+    if given is None and len(agree) >= MIN_ANCHORS:
+        line, inliers = own, own_near
         off = _line_offsets(line, inliers, s, [s])[0]
         if (incoming is not None and incoming.uncertainty is not None
                 and abs(off - incoming.offset) > _tolerance(incoming.uncertainty)):
@@ -714,18 +762,26 @@ def _epoch(ea: Sequence[Crossing], eb: Sequence[Crossing], s: datetime, e: datet
     else:
         fit_line, fit_near = _fit(found, s) if found else (None, ())
         fit_off = _line_offsets(fit_line, fit_near, s, [s])[0] if fit_line is not None else None
-        if incoming is not None:
+        if given is not None:
+            source, off, uncertainty, checked_at = "given", given, 0.0, s
+            inliers = fit_near                   # shown against the given offset
+        elif incoming is not None:
             if (len(fit_near) >= MIN_ANCHORS and incoming.uncertainty is not None
                     and abs(fit_off - incoming.offset) <= _tolerance(incoming.uncertainty)):
                 source, line, inliers = "anchors", fit_line, fit_near
                 off, uncertainty = fit_off, ANCHORED_SD
             else:
-                source = "continued" if incoming.continued else "carried"
+                checked_at = incoming.checked_at
+                fresh = (checked_at is not None
+                         and e - checked_at <= timedelta(minutes=CHECK_MAX_MIN))
+                source = "continued" if incoming.continued and fresh else "carried"
                 off, uncertainty = incoming.offset, incoming.uncertainty
         elif found:
             source, line, inliers, off = "few-anchors", fit_line, fit_near, fit_off
         else:
             source = "unknown"
+    if source == "anchors":       # checked as each anchor crossed B: at A it is a trip earlier
+        checked_at = max(x.exited_at for x in inliers)
     minutes = _minutes(e - s)
     exit_rate = len(eb) / minutes if minutes > 0 else None
     entry_rate = len(ea) / minutes if minutes > 0 else None
@@ -733,9 +789,10 @@ def _epoch(ea: Sequence[Crossing], eb: Sequence[Crossing], s: datetime, e: datet
                  estimate=offset_from_anchors(found),
                  drift=drift(inliers or found, exit_rate, entry_rate),
                  anchors=tuple(found), inliers=inliers, line=line,
-                 enclosed=len(enclosed_near),
+                 enclosed=len(agree),
                  incoming=incoming.offset if incoming is not None else None,
-                 uncertainty=uncertainty)
+                 uncertainty=uncertainty,
+                 checked_at=checked_at if source in _SURE else None)
 
 
 def _tolerance(uncertainty: float) -> float:
@@ -759,12 +816,11 @@ def _line_offsets(line: tuple[float, float], inliers: Sequence[Anchor], start: d
                   times: Sequence[datetime]) -> list[int]:
     marks = [x.entered_at for x in inliers]              # in A order
     half = timedelta(minutes=REANCHOR_HALF_MIN)
-    at_start, slope = line
     out = []
     for t in times:
         lo, hi = bisect_left(marks, t - half), bisect_right(marks, t + half)
         if hi - lo < REANCHOR_MIN_ANCHORS:
-            out.append(_round(at_start + slope * _minutes(t - start)))
+            out.append(_round(_on(line, start, t)))
         else:
             out.append(_round(_quantile(sorted(x.offset for x in inliers[lo:hi]), 0.5)))
     return out
@@ -784,7 +840,8 @@ def now_from(m: Measurement, at: datetime) -> Now:
 def prior_at(m: Measurement, at: datetime) -> Prior | None:
     """The cars between the lines at `at` (crossings at `at` itself not yet counted), for
     `measure(prior=...)` to start from. If `at` falls in a gap, the prior is taken where the next
-    epoch starts, and its `at` says so. None when no epoch from `at` on has an offset."""
+    epoch starts, and its `at` says so. None when no epoch from `at` on has an offset, and past
+    m.end: nothing after it was measured."""
     epoch = _epoch_at(m, at)
     if epoch is None:
         later = [e for e in m.epochs if e.start > at]
@@ -793,13 +850,15 @@ def prior_at(m: Measurement, at: datetime) -> Prior | None:
         epoch, at = later[0], later[0].start
     if epoch.offset is None:
         return None
-    return Prior(at, _between(m, at), epoch.source in _SURE, epoch.uncertainty)
+    return Prior(at, _between(m, at), epoch.source in _SURE, epoch.uncertainty,
+                 epoch.checked_at)
 
 
 def windows(m: Measurement, width_min: float = WINDOW_MIN) -> list[Window]:
-    """Per window of `width_min` (aligned to the clock), the transits by exit and by entry time,
-    the counts, the exit rate, the cars between at the window's end, and the drift residual."""
-    width = timedelta(minutes=width_min)
+    """Per window of `width_min` (aligned to the clock), the transits by exit and by entry time
+    and whether each is complete, the counts, the exit rate, the cars between at the window's
+    end, and the drift residual."""
+    width, hi = timedelta(minutes=width_min), timedelta(minutes=m.hi_min)
     origin = _floor(m.start, width)
     count = max(1, math.ceil((m.end - origin) / width))
     by_exit: list[list[Transit]] = [[] for _ in range(count)]
@@ -831,6 +890,8 @@ def windows(m: Measurement, width_min: float = WINDOW_MIN) -> list[Window]:
         res = sorted(residuals[k])
         out.append(Window(
             start=w0, end=w1, by_exit=sx, by_entry=sn,
+            by_exit_complete=w0 - hi >= m.start and w1 <= m.end,
+            by_entry_complete=w0 >= m.start and w1 + hi <= m.end,
             entered=_count(m.a_times, w0, w1), exited=exited,
             exit_rate=exited / seen_b if seen_b >= MIN_RATE_SPAN_MIN else None,
             between=_between(m, min(w1, m.end)),
@@ -892,6 +953,7 @@ def _window_record(w: Window) -> dict:
                 "p90": _r(s.p90)}
     return {
         "start": _iso(w.start), "by_exit": stats(w.by_exit), "by_entry": stats(w.by_entry),
+        "by_exit_complete": w.by_exit_complete, "by_entry_complete": w.by_entry_complete,
         "entered": w.entered, "exited": w.exited, "exit_rate": _r(w.exit_rate, 3),
         "between": w.between, "gap": w.gap, "flagged": w.flagged, "anchors": w.anchors,
         "anchor_residual": _r(w.anchor_residual),
@@ -955,7 +1017,7 @@ def _carry(prev: Epoch, ta: Sequence[datetime], tb: Sequence[datetime], g0: date
     if prev.uncertainty is not None:
         uncertainty = math.sqrt(prev.uncertainty ** 2 + through_a[1] + through_b[1])
     return _Incoming(_round(between + through_a[0] - through_b[0]), uncertainty,
-                     continued=False)
+                     continued=False, checked_at=None)
 
 
 def _through(times: Sequence[datetime], gaps: Sequence[tuple[datetime, datetime]],
@@ -982,9 +1044,9 @@ def _through(times: Sequence[datetime], gaps: Sequence[tuple[datetime, datetime]
 
 
 def _epoch_at(m: Measurement, at: datetime) -> Epoch | None:
-    for i, e in enumerate(m.epochs):
-        last = i == len(m.epochs) - 1
-        if e.start <= at and (at < e.end or (last and e.end >= m.end)):
+    """The epoch holding `at`; the last one also holds m.end itself, but nothing past it."""
+    for e in m.epochs:
+        if e.start <= at and (at < e.end or at == e.end == m.end):
             return e
     return None
 

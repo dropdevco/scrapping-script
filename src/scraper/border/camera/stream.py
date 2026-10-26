@@ -128,10 +128,14 @@ def resolve(channel: str, title: str) -> str:
 
 def frames(url: str, fps: float, seconds: float,
            live_region: tuple[float, float, float, float] | None = None) -> Iterator[np.ndarray]:
-    """Frames at `fps` for `seconds` of stream time, from a live or recorded source.
+    """Frames at `fps` for `seconds` of a recorded clip's own time (`--source`). Live reads do
+    not come through here: hls.HlsReader stamps each frame with its capture time.
 
-    Paced by the stream's own frame count, not the wall clock, so a recorded clip and a live
-    stream sample the same moments and replaying a recording reproduces a live read.
+    The caller times these frames as exactly 1/fps apart, so each one is the clip's frame
+    nearest k/fps by its frame count, never the wall clock. Taking every round(source/fps)-th
+    frame instead drifted: from a 25 fps clip every 12th frame is 0.48 s apart, and a rendered
+    queue's speed read 3 % low. Now a frame is at most half a source frame from its slot, with
+    no drift. A clip slower than `fps` cannot give frames 1/fps apart and is refused.
 
     `live_region` (x, y, w, h as fractions of the frame) is where the picture must keep
     changing while the stream is alive: the burned-in clock on the bridge cameras. A frozen
@@ -142,7 +146,10 @@ def frames(url: str, fps: float, seconds: float,
     if not cap.isOpened():
         raise StreamLost(f"could not open {url[:80]}")
     source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    step = max(1, round(source_fps / fps))
+    if source_fps < fps:
+        cap.release()
+        raise ValueError(f"{url[:80]} runs at {source_fps:g} fps, slower than the {fps:g} fps "
+                         f"asked for")
     wanted = round(seconds * fps)
     check = frozen_check(fps, live_region)
     i, n = 0, 0
@@ -150,7 +157,7 @@ def frames(url: str, fps: float, seconds: float,
         while n < wanted:
             if not cap.grab():
                 raise StreamLost(f"stream ended after {n} of {wanted} frames")
-            if i % step == 0:
+            if i >= round(n * source_fps / fps):
                 ok, frame = cap.retrieve()
                 if not ok:
                     raise StreamLost(f"frame {n} could not be decoded")

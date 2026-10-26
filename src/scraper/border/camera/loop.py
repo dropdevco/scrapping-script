@@ -21,12 +21,11 @@ short, so the caller must treat that time as a gap, never as no cars. Learning n
 EMPTY_MIN_SAMPLES near-empty moments, and a lane queued since the counter started has none:
 rendered, 30 minutes of stop-and-go with 1-3 m gaps never learnt it. So references() hands the
 learnt roads to a caller that keeps them across restarts and seed() takes them back (checked
-against the zone's patch, as reader.py checks a saved strip), and learn() learns from moments
-the caller spreads over an hour or more. This module writes nothing itself. ADR-0014 decision
-2 says the loop is judged against "the learnt empty road the queue reader already keeps"; this
-counter keeps its own, at a finer structure scale (zone_features) and on its own patches, and
-whether the worker saves it the way reader.py saves strips is the lead's call against that
-decision.
+only against the shape of the zone's patch: see seed()). This module writes nothing itself.
+ADR-0014 decision 2 says the loop is judged against "the learnt empty road the queue reader
+already keeps"; this counter keeps its own, at a finer structure scale (zone_features) and on
+its own patches, and whether the worker saves it the way reader.py saves strips is the lead's
+call against that decision.
 
 How a car is counted. The textbook loop counts a car when its zone goes from occupied to clear.
 Stopped queues leave 1-3 m between cars, so a zone longer than the gap never clears between two
@@ -38,10 +37,12 @@ zone's far edge. A rear standing on the edge cannot count twice, a gap need only
 somewhere in the patch, and a rear hidden for a while (the queue closed the gap) is carried
 along until it shows again or leaves. Direction: only a rear first seen at the zone's near edge
 (within a frame's motion), behind every known rear, is counted, so something that appears
-inside the zone (a person, a shadow, a car changing lanes into it) is never counted there.
-Frames must come in capture order: a stamp that steps back less than STAMP_SLACK_S skips that
-frame; a longer step back, or frames more than MAX_STEP_S apart, drop the cars in flight and
-are reported by gaps(), to be passed to transit with the reader's own gaps.
+inside the zone (a person, a shadow, a car changing lanes into it where cars are in view) is
+never counted there. Frames must come in capture order (hls and the runner drop any other): a
+stamp that does not move forward, or frames more than MAX_STEP_S apart, drop the cars in
+flight and are reported by gaps(), to be passed to transit with the reader's own gaps. A car
+already in a zone when counting starts or resumes after any gap came in unseen and is never
+counted, so the time until it has left is reported by gaps() as well (_track).
 
 Each crossing carries a signature of how the car looked while it was in the zone: its body's
 mean colour as a point on the colour wheel (saturation x cos and x sin of hue), its median
@@ -72,9 +73,26 @@ these default cases the first version gave the same numbers, case for case:
   0-0.3 m either side of the line, 3 m and 1.5 m zones: every car counted once on the line.
 - Not cars: a 10-minute empty road, a person-sized blob crossing sideways 140 times at 7 places
   in and around the zone, a hard 3 m shadow across the lane swept along it 10 times: 0 counted.
-- learn(): nine or twelve moments of 1 m stop-and-go or crawl, four of them empty, learnt the
-  road, and 10 minutes of 1 m stop-and-go then counted 16 of 16; with three empty, or none, the
-  zone stayed "learning".
+Added 2026-10-26, after the audit's fixes (the 3 m zone's flows, stop-and-go for 10 minutes and
+crawl, and the 1.5 m zone's flows, re-run on the code before and after: the same numbers):
+- Staggered starts, as queues really start: each car repeats the path of the one ahead 1, 1.5
+  or 2 s later, at 1.5 or 2.5 m/s^2 up to 2 m/s, 20 s stands, 2.0, 1.5 and 1.0 m gaps, 7-8 stop
+  places, 5 minutes each: 2 of 1522 cars missed, 5 false; before, 230 missed. Starting
+  together, the same cases: 0 of 541 missed.
+- Two 1.8 m cars side by side, one in each of two 3.5 m zones, each 0.1-0.6 m from the line
+  between them, painted or not, 3 m/s for 150 s: 50 of 50 a lane (before: 22-66 within 0.3 m).
+  Vehicles of 2.2-2.55 m across that line, painted or not: once each (before, a 2.55 m one
+  across an unpainted line: 15 and 24 of 50).
+- A car changing lanes across a shared line at 1-6 m/s, its centre on the line with its rear
+  anywhere from 9.8 to 12.8 m: counted once, in one zone (before, twice in 11 of those 36
+  cases, all at 1-3 m/s with the centre crossing within 1.2 m of the far edge).
+- A road learnt wrong (test-sized bank): a standing queue learnt as road, a 1.6 m dark patch
+  and a 0.3 m dark stripe laid on the road after learning read 33, 17 and 6 of 48 patch rows
+  as a car on the empty road; after 2 minutes of empty road, 0, and 3 m/s flow counted 54 of
+  54 (before: unchanged after 10 minutes, and 27, 9 and 0 missed). With the real bank, the
+  queue learnt as road was replaced after 30-35 minutes of empty road; a road learnt right
+  held through a 10-minute standstill (0 of 54 missed in the flow after) and through 30
+  minutes of 1 m stop-and-go (0 of 48 missed).
 
 Where it fails, plainly:
 - 0.5 m gaps: 0 of 35 cars counted. The image's own 3x3 smoothing and Sobel spread each car
@@ -83,19 +101,28 @@ Where it fails, plainly:
   30 of 31 cars missed in stop-and-go and 51 of 51 in a crawl (the first version missed 25 and
   34, by flicker more than by sight). 2 m gaps miss 3 of 27 with 3 false; steady flow counts.
 - A queue that stands still through the whole first learning window (BANK_MIN samples,
-  SAMPLE_EVERY_S apart) is learnt as road. Rendered with a test-sized bank on the first version
-  (not re-run), 5 minutes of stop-and-go after it: 4 of 6 missed, 3 false. A queue moving
-  through the window is refused.
+  SAMPLE_EVERY_S apart) is learnt as road, and so is a road changed for good (a repair patch,
+  paint, a nudged camera): the bank's refresh starts from the road held, and no moment looks
+  empty against a wrong one. Until the whole bank has looked like one picture for
+  AGREE_REFRESHES refreshes running (about 32 minutes of empty road), the zone counts short
+  while states() says "counting": rendered, 27 of 54 cars missed. A queue moving through the
+  window is refused. A queue standing wholly still that long is learnt as road (ASSUMPTION:
+  none does).
 - The bank learns slowly in traffic. With the real bank (a sample every 10 s) on a 1.5 m zone,
   free flow at 3-4 m/s with random 3-8 m gaps learnt after 330-470 s (the first version, whose
   looser row test did not see the leftover cars in the median it starts from: 130-350 s); free
   flow at 2 m/s with 2-5 m gaps, regular 4.5 m gaps sampled in step with the bank, and
-  stop-and-go with 1-3 m gaps did not learn in 20-30 minutes. Hence seed() and learn(). The
-  bank does not start from the most agreeing sample (_agreeing), which would learn faster: its
-  samples are 10 s apart, and a queue standing for 40 s gives four that agree.
-- A car whose centre crosses a lane line while its rear is in the zone changes zones mid-way and
-  is counted in neither. A car straddling two zones carries only its own zone's part of itself
-  into its signature (a narrower width, part of its colour).
+  stop-and-go with 1-3 m gaps did not learn in 20-30 minutes. Hence seed(). The bank does not
+  start from the sample most others look empty against, which would learn faster: its samples
+  are 10 s apart, and a queue standing for 40 s gives four that agree.
+- A car whose centre crosses a lane line while its rear is in the zone changes zones mid-way:
+  rendered with the other zone empty, it is counted once; with cars in the other zone it may
+  be counted in neither (not rendered). A car straddling two zones carries only its own
+  zone's part of itself into its signature (a narrower width, part of its colour).
+- After any gap, a car already in a zone is not counted (above). The gap reported for it runs
+  to the first car counted that came in after it, or to the zone seen clear, so it also covers
+  a car at the near edge that is counted: rendered, a car standing 40 s after a gap got a gap of
+  40-43 s whether or not it was counted.
 - Not rendered, so not measured: a car seen from behind hides about h_car x d / (h_cam - h_car)
   of road ahead of it, so gaps shrink with distance from the camera; cars with no visible
   outline or shadow against the road; motorbikes (narrower than ROW_SPAN_M), and two side by
@@ -128,8 +155,10 @@ ROW_SPAN_M = 1.1         # a row holds a car when its foreground spans this far 
 INSIDE_M = 2.6           # the widest clear stretch within one car's row (a 2.55 m bus between its
                          # outlines): foreground further apart is two things: see _things()
 EDGE_M = 0.25            # foreground this close to a lane line on both sides of it runs across it
-CAR_MAX_M = 2.8          # outer edge to outer edge, the widest one car can read (a 2.55 m bus and
-                         # its outline's spread): see _across()
+CAR_MAX_M = 3.2          # outer edge to outer edge, the widest one car can read: rendered, a 2.55 m
+                         # bus reads 2.9-3.0 m with its outline's spread. ASSUMPTION: two cars side
+                         # by side read wider (each 1.6 m or more, apart by 0.1 m or more): see
+                         # _across()
 HOLD_M = 0.25            # a car centred this close to a lane line stays in the zone that had it
 BESIDE_PX = 2.0          # zones whose shared corners are this close (frame_size pixels) are beside
                          # each other: pdn-north's lane-4 and lane-5 overlap by 1.4 px
@@ -153,9 +182,11 @@ SAMPLE_EVERY_S = 10.0    # one reference sample per this much capture time
 BANK_SIZE = 36           # samples kept: six minutes of moments to learn the empty road from
 BANK_MIN = 12            # two minutes of moments before a first reference is trusted
 REFRESH_SAMPLES = 12     # relearn from the bank every two minutes of new samples
+AGREE_REFRESHES = 13     # ASSUMPTION: no queue stands wholly still in a zone for BANK_SIZE x
+                         # SAMPLE_EVERY_S + AGREE_REFRESHES x REFRESH_SAMPLES x SAMPLE_EVERY_S
+                         # (about 32 min). A road learnt wrong, or a road that changed, is replaced
+                         # after that long a quiet spell; until then it counts short, silently
 MAX_STEP_S = 5.0         # frames further apart than this are a gap even if nobody said so
-STAMP_SLACK_S = 1.0      # ASSUMPTION: a frame stamped no later than the last one, by less than
-                         # this, is a stamp that wobbled, not the stream going back: see add()
 PAD_PX = 4               # crop margin, so the blur and Sobel kernels see real pixels at the zone
 WIDTH_SCALE_M = 3.0      # ASSUMPTION: no one car is wider (a bus is 2.55 m); the signature gives a
                          # car's width as a share of it
@@ -236,6 +267,9 @@ class _Loop:
     bank: deque = field(default_factory=lambda: deque(maxlen=BANK_SIZE))
     last_sample: datetime | None = None
     new_samples: int = 0
+    agreeing: int = 0                        # refreshes running whose whole bank agreed: _sample()
+    blind: datetime | None = None            # since the frame counting resumed with a car in the
+                                             # zone that may never be counted: see _track()
     rears: list[_Rear] = field(default_factory=list)
     last_profile: np.ndarray | None = None   # last frame's structure along the patch
     last_rows: np.ndarray | None = None      # last frame's occupied patch rows, near end first
@@ -354,8 +388,11 @@ def _across(left: np.ndarray, right: np.ndarray, rows_l: np.ndarray, rows_r: np.
     lane-1 to lane-3 are equal thirds of the carriageway, not painted lanes, so cars need not
     keep off their lines. A row holds a car across the line when its foreground runs on across
     it (within EDGE_M on both sides), or when each zone holds only a sliver of it (its side
-    outline) and the two lie a car's width apart (ROW_SPAN_M to CAR_MAX_M, outer edge to outer
-    edge). Each run of such rows goes whole to one zone, by its median centre, so a car does
+    outline); either way only when its two sides lie a car's width apart (ROW_SPAN_M to
+    CAR_MAX_M, outer edge to outer edge). Two cars side by side, each near the line, meet across
+    it too, and read wider: rendered, while the bound held for slivers only, two 1.8 m cars each
+    0.1-0.3 m from the line were taken for one, and a lane counted 15-63 of 50. Each run of such
+    rows goes whole to one zone, by its median centre, so a car does
     not flicker between the two row by row; and a car within HOLD_M of the line stays with the
     zone that held those rows the frame before, so it does not flicker frame by frame either
     (its centre is read to half a pixel: rendered, a car 0.05 m off the line changed zones from
@@ -368,8 +405,8 @@ def _across(left: np.ndarray, right: np.ndarray, rows_l: np.ndarray, rows_r: np.
     outer = (cl - first_l) + (last_r + 1)               # px from its left side to its right side
     joined = (last_l >= cl - edge) & (first_r >= 0) & (first_r < edge)
     sliver = ((first_l >= 0) & (first_r >= 0) & (last_l - first_l + 1 < wide)
-              & (last_r - first_r + 1 < wide) & (outer <= CAR_MAX_M * PX_PER_M))
-    across = (joined | sliver) & (outer >= wide) & seen
+              & (last_r - first_r + 1 < wide))
+    across = (joined | sliver) & (outer >= wide) & (outer <= CAR_MAX_M * PX_PER_M) & seen
     centre = ((last_r + 1) - (cl - first_l)) / 2.0      # px right of the line
     for a, b in _runs(across):
         c = float(np.median(centre[a:b + 1]))
@@ -413,7 +450,9 @@ def departure(g: np.ndarray, ref: Reference, valid: np.ndarray) -> np.ndarray:
 def displacement(cur: np.ndarray, prev: np.ndarray, step_s: float) -> float | None:
     """Rows the patch content moved toward its far end between two frames, or None.
 
-    One shift for the whole patch: queued cars move together, and a stopped queue reads 0.
+    One shift for the whole patch, and a stopped queue reads 0. Queued cars do not all move
+    together: each starts a second or two after the one ahead, so a car pulling away from one
+    still standing behind it moves further than this says (_track allows for it).
     Normalised correlation over integer shifts, refined to a fraction of a row by a parabola
     through the peak. None when either frame is flat (nothing to follow) or nothing matches."""
     n = len(cur)
@@ -490,9 +529,12 @@ class LoopCounter:
     def seed(self, references: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]]
              ) -> list[tuple[str, str]]:
         """Take roads learnt earlier (references()) and return the zones still learning. A road
-        whose shape is not its zone's patch any more (the zone, or the camera's ground
-        rectangle, changed since) is refused, as reader.py refuses a stale strip reference.
-        The counter's own bank keeps refreshing a seeded road like one it learnt."""
+        whose shape is not its zone's patch any more (the zone's metres, or the camera's ground
+        rectangle, changed since) is refused. Only the shape is checked, as reader.py checks a
+        strip reference: a zone redrawn elsewhere with the same metres takes the old road
+        (pdn-north's lane-1 to lane-3 share one patch shape), so the caller must keep each road
+        with its zone's quad and the camera's geometry and drop it when those changed. The
+        counter's own bank keeps refreshing a seeded road like one it learnt."""
         for lp, geo in zip(self._loops, self._layout(self.camera.frame_size).zones):
             given = references.get((lp.zone.line, lp.zone.lane))
             if given is None:
@@ -502,78 +544,36 @@ class LoopCounter:
             if (grey.shape == shape and edges.shape == shape and np.isfinite(grey).all()
                     and np.isfinite(edges).all()):
                 lp.reference = Reference(grey.copy(), edges.copy())
-                lp.new_samples = 0
-        return [key for key, state in self.states().items() if state == "learning"]
-
-    def learn(self, frames) -> list[tuple[str, str]]:
-        """Learn every zone's empty road from frames (Stamped or images, all one size) taken at
-        separate moments, the way `camera reference` learns the queue reader's strips, and
-        return the zones still learning. A zone with EMPTY_MIN_SAMPLES near-empty moments among
-        them is (re)learnt from those, found as the bank finds them or, when most moments are
-        queued, from the largest set of moments that agree (_agreeing()); any other zone is
-        left as it was.
-
-        The counter's own bank holds BANK_SIZE moments SAMPLE_EVERY_S apart, six minutes; a
-        pass whose moments the caller spreads over an hour or more finds a lull the bank would
-        not. There is no fallback to a median of busy moments, as reader.emptiest_reference
-        has: rendered, the median of nine moments of a queue with 1 m gaps, five minutes apart,
-        held parts of the cars, and 1 m stop-and-go then counted with 6-7 of 16 cars missed and
-        3-4 false."""
-        samples: list[list[tuple[np.ndarray, np.ndarray]]] = [[] for _ in self._loops]
-        size = None
-        for frame in frames:
-            image = frame.image if isinstance(frame, Stamped) else frame
-            h, w = image.shape[:2]
-            if size not in (None, (w, h)):
-                raise ValueError(f"{self.camera.id}: learning frames must be one size")
-            size = (w, h)
-            layout = self._layout(size)
-            x0, y0, x1, y1 = layout.crop
-            features = image_features(image[y0:y1, x0:x1])
-            for kept, geo in zip(samples, layout.zones):
-                kept.append(zone_features(geo, features))
-        if size is not None:
-            for lp, kept, geo in zip(self._loops, samples, self._layout(size).zones):
-                ref = emptiest(kept, geo.valid, None)
-                if ref is None:
-                    start = _agreeing(kept, geo.valid)
-                    ref = None if start is None else emptiest(kept, geo.valid, start)
-                if ref is not None:
-                    lp.reference, lp.new_samples = ref, 0
+                lp.new_samples = lp.agreeing = 0
         return [key for key, state in self.states().items() if state == "learning"]
 
     def gap(self, gap: Gap) -> None:
         """Missed frames: forget every car in flight. The learnt road stays: it does not move."""
-        for lp in self._loops:
-            _forget(lp)
+        self._forget()
         self._last_at = None
 
     def gaps(self) -> list[Gap]:
-        """The gaps this counter found in the frames' own stamps since the last call, and
-        cleared: frames more than MAX_STEP_S apart, or a stamp that went back STAMP_SLACK_S or
-        more. Every car in flight was forgotten there, as at a gap the reader reports, so they
-        belong with the reader's gaps for this line (transit.measure's gaps_a / gaps_b)."""
+        """The gaps this counter found since the last call, and cleared: frames more than
+        MAX_STEP_S apart, or a stamp that did not move forward, where every car in flight was
+        forgotten as at a gap the reader reports; and, after any gap, the time until a car that
+        was already in a zone when counting resumed has left it (_track). They belong with the
+        reader's gaps for this line (transit.measure's gaps_a / gaps_b)."""
         out, self._gaps = self._gaps, []
         return out
 
     def add(self, frame: Stamped) -> list[Crossing]:
         """One frame's crossings.
 
-        A frame stamped no later than the one before, by less than STAMP_SLACK_S, is skipped:
-        hls stamps a frame as its PTS plus a running median offset, which can step back a little
-        when the median moves. Taken as a reset, it forgot every car in flight (each a count
-        lost for good); skipped, it costs one frame. A longer step back, or frames more than
-        MAX_STEP_S apart, forgets the cars in flight and is recorded as a gap (gaps())."""
+        Frames come in capture order: hls and the runner drop a frame stamped no later than
+        the last. A stamp that does not move forward, or frames more than MAX_STEP_S apart,
+        forget the cars in flight and are recorded as a gap (gaps()), as detect.py does."""
         h, w = frame.image.shape[:2]
         layout = self._layout((w, h))
         step = None
         if self._last_at is not None:
             step = (frame.at - self._last_at).total_seconds()
-            if -STAMP_SLACK_S < step <= 0:
-                return []
             if not 0 < step <= MAX_STEP_S:
-                for lp in self._loops:
-                    _forget(lp)
+                self._forget()
                 self._gaps.append(Gap(self._last_at, max(step, 0.0),
                                       f"frames {step:+.1f} s apart"))
                 step = None
@@ -622,13 +622,13 @@ class LoopCounter:
 
         A rear is the near end of a run of car rows with seen road behind it. Each frame every
         known rear is carried on by the patch's displacement and matched to a rear seen within
-        MATCH_M of there. A known rear that is not seen again has left when it was carried past
-        the patch's far end, or when the patch ahead of it is clear and nothing says it stood
-        still; it vanished, uncounted, when the patch ahead is clear but the motion says it
-        cannot have reached the far edge. Otherwise the gap behind it has closed, and it is
-        carried along hidden until it shows again or leaves. A rear first seen behind every
-        known one, at or within one frame's motion of the zone's near edge, came in across that
-        edge: only those are counted."""
+        MATCH_M of there (twice that ahead of it). A known rear not seen again has left when it
+        was carried past the patch's far end, or when the patch ahead of it is clear and nothing
+        says it stood still; it vanished, uncounted, when the patch ahead is clear but the
+        motion says it cannot have reached the far edge. Otherwise the gap behind it has closed,
+        and it is carried along hidden until it shows again or leaves. A rear first seen behind
+        every known one, at or within one frame's motion of the zone's near edge, came in across
+        that edge: only those are counted."""
         n = len(occ)
         zone = _zone(geo)
         near_edge, far_edge = zone.start, zone.stop
@@ -649,7 +649,10 @@ class LoopCounter:
                      for r in lp.rears]
         # Where a rear may be now: carried by the steady motion, by this frame's own (a start
         # from standing shows here a frame before the median follows), by its own last step,
-        # or standing. The nearest seen rear within MATCH_M of any of them is the same rear.
+        # or standing. The nearest seen rear within MATCH_M of any of them is the same rear;
+        # within twice that when it is ahead of all of them, as a car pulling away from one
+        # still standing behind it outruns the patch's one shift (rendered, staggered starts
+        # lost 230 of 1522 cars without this), or when it was lost.
         guesses = [{p, r.pos + (raw if raw is not None else r.step), r.pos + r.step, r.pos}
                    for r, p in zip(lp.rears, predicted)]
         matched: dict[int, tuple[int, int]] = {}
@@ -657,7 +660,8 @@ class LoopCounter:
             best = None
             for i, r in enumerate(lp.rears):
                 off = min(abs(a - q) for q in guesses[i])
-                if i not in matched and off <= tol * (2 if r.lost else 1) and (
+                loose = r.lost or a > max(guesses[i])
+                if i not in matched and off <= tol * (2 if loose else 1) and (
                         best is None or off < best[0]):
                     best = (off, i)
             if best is not None:
@@ -702,15 +706,21 @@ class LoopCounter:
         nearest = min((r.pos for r, _ in live), default=math.inf)
         # With no motion to go by, a car that was nowhere in the patch, or was just coming in
         # at its near end with its rear still behind it, came in across the near edge too,
-        # however far on its rear is first seen (free flow moves 4-5 m between frames).
-        unfollowed = lp.last_rows is not None and (
-            not lp.last_rows.any() or move is None and bool(lp.last_rows[0]))
+        # however far on its rear is first seen (free flow moves 4-5 m between frames). One
+        # that was nowhere in the patch has its rear short of the far edge: past it, it would
+        # have gone the near margin, the zone and its own length in one frame, 6.5 m or more for
+        # a 3.5 m car in line A's 1.5 m zone, over FAST_M_S at reader.FPS. A rear first seen
+        # there is a car changing lanes into the zone, counted in its own (rendered: counted in
+        # both in 11 of 36 lane changes, at 1-3 m/s, its centre crossing within 1.2 m of it).
+        empty = lp.last_rows is not None and not lp.last_rows.any()
+        entering = lp.last_rows is not None and move is None and bool(lp.last_rows[0])
         reach = near_edge + (move or 0.0) + tol + gap_rows
         for a, b in sorted(seen):
             if (a, b) in taken:
                 continue
             long = b - a + 1 >= birth_rows               # a car's length ahead of it, not a bumper
             near = a <= reach and (long or b == n - 1)
+            unfollowed = entering or empty and a < far_edge
             from_near = a < nearest - tol and (near or (unfollowed and long))
             live.append((_Rear(float(a), from_near), (a, b)))
             nearest = min(nearest, a)
@@ -725,7 +735,31 @@ class LoopCounter:
                 out.append(Crossing(self.camera.id, lp.zone.line, lp.zone.lane, at, self.method,
                                     r.look.signature()))
         lp.rears = sorted((r for r, _ in live), key=lambda r: r.pos)
+        # A car in the zone when counting starts or resumes came in unseen and is not counted,
+        # whether its rear shows then or later. Until each has left, the line's count may be
+        # short: a gap, to the first car counted that came in after them, which is behind them
+        # all, or to the zone seen clear. Rendered: a car standing 40 s after a gap crossed
+        # 42 s after it, long after transit's GAP_PAD_S.
+        if lp.last_rows is None:
+            lp.blind = at if occ[zone].any() else None
+        elif lp.blind is not None and (out or not occ[zone].any()):
+            self._unblind(lp, at)
         return out
+
+    def _unblind(self, lp: _Loop, until: datetime | None) -> None:
+        if lp.blind is not None and until is not None and until > lp.blind:
+            self._gaps.append(Gap(lp.blind, (until - lp.blind).total_seconds(),
+                                  f"zone {lp.zone.line}/{lp.zone.lane}: a car in it when "
+                                  f"counting resumed"))
+        lp.blind = None
+
+    def _forget(self) -> None:
+        """Forget every car in flight, and close any gap still open since a resume at the last
+        frame seen."""
+        for lp in self._loops:
+            self._unblind(lp, self._last_at)
+            lp.rears, lp.last_profile, lp.last_rows = [], None, None
+            lp.moves.clear()
 
     def _sample(self, lp: _Loop, g: np.ndarray, e: np.ndarray, valid: np.ndarray,
                 at: datetime) -> None:
@@ -740,7 +774,20 @@ class LoopCounter:
                 lp.reference = emptiest(list(lp.bank), valid, None)
                 lp.new_samples = 0
         elif lp.new_samples >= REFRESH_SAMPLES:
-            fresh = emptiest(list(lp.bank), valid, lp.reference)
+            # The refresh starts from the road held, so a wrong one (a queue learnt as road, a
+            # road changed for good) is never replaced from it: no moment looks empty against
+            # it. A full bank in which every moment looks empty against the bank's own road,
+            # for AGREE_REFRESHES refreshes running, replaces it.
+            bank = list(lp.bank)
+            fresh = emptiest(bank, valid, lp.reference)
+            whole = None
+            if fresh is None and len(bank) == BANK_SIZE:
+                whole = emptiest(bank, valid, None)
+                if whole is not None and len(_empty(bank, whole, valid)[1]) < len(bank):
+                    whole = None
+            lp.agreeing = lp.agreeing + 1 if whole is not None else 0
+            if lp.agreeing >= AGREE_REFRESHES:
+                fresh, lp.agreeing = whole, 0
             if fresh is not None:
                 lp.reference = fresh
             lp.new_samples = 0
@@ -812,11 +859,6 @@ def _zone(geo: _Geometry) -> slice:
     return slice(rows - geo.zone.stop, rows - geo.zone.start)
 
 
-def _forget(lp: _Loop) -> None:
-    lp.rears, lp.last_profile, lp.last_rows = [], None, None
-    lp.moves.clear()
-
-
 def emptiest(samples: list[tuple[np.ndarray, np.ndarray]], valid: np.ndarray,
              current: Reference | None) -> Reference | None:
     """reader.emptiest_reference, with "empty" judged the way the counter judges a car, and no
@@ -836,9 +878,7 @@ def emptiest(samples: list[tuple[np.ndarray, np.ndarray]], valid: np.ndarray,
         return None
     ref = current or Reference.from_strips(samples)
     for _ in range(3):
-        kept = [_despeckled(foreground(g, e, ref, valid)) for g, e in samples]
-        empty = [k for k, fg in enumerate(kept)
-                 if _close(_car_rows(fg, valid), round(CLOSE_M * PX_PER_M)).mean() <= EMPTY_ROWS]
+        kept, empty = _empty(samples, ref, valid)
         if len(empty) < EMPTY_MIN_SAMPLES:
             return None
         ref = _clear_median([samples[k] for k in empty], [kept[k].any(axis=1) for k in empty],
@@ -846,26 +886,13 @@ def emptiest(samples: list[tuple[np.ndarray, np.ndarray]], valid: np.ndarray,
     return ref
 
 
-def _agreeing(samples: list[tuple[np.ndarray, np.ndarray]],
-              valid: np.ndarray) -> Reference | None:
-    """The sample the most others look near-empty against, as a reference to start emptiest()
-    from; None when no sample has EMPTY_MIN_SAMPLES (itself included). Ties go to the earliest.
-
-    For learn() only. emptiest() starts from the median of all the samples, which is a picture
-    of cars once most of them are queued: rendered, five queued moments and four empty ones
-    learnt nothing, because the empty moments differed from that median. Empty moments all look
-    alike and moving queues do not, so the largest set of samples that agree is the road. A
-    queue standing in the same place in that many samples agrees with itself too. ASSUMPTION:
-    moments minutes apart, as learn() asks for, never catch one; the bank's samples are ten
-    seconds apart and could (a 40 s stand fills four), so the bank never starts here."""
-    best, most = None, EMPTY_MIN_SAMPLES - 1
-    for k, (g, e) in enumerate(samples):
-        ref = Reference(g, e)
-        agree = sum(float(occupied_rows(foreground(g2, e2, ref, valid), valid).mean())
-                    <= EMPTY_ROWS for g2, e2 in samples)
-        if agree > most:
-            best, most = ref, agree
-    return best
+def _empty(samples: list[tuple[np.ndarray, np.ndarray]], ref: Reference,
+           valid: np.ndarray) -> tuple[list[np.ndarray], list[int]]:
+    """Each sample's foreground against `ref`, lone pixels dropped, and the indexes of the
+    samples nearly empty against it: at most EMPTY_ROWS of their rows hold a car."""
+    fgs = [foreground(g, e, ref, valid) for g, e in samples]
+    return ([_despeckled(fg) for fg in fgs],
+            [k for k, fg in enumerate(fgs) if occupied_rows(fg, valid).mean() <= EMPTY_ROWS])
 
 
 def _clear_median(samples: list[tuple[np.ndarray, np.ndarray]], busy: list[np.ndarray],

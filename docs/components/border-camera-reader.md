@@ -203,8 +203,8 @@ never mixed:
 
 | Method | How a car is counted | Known limits (rendered and synthetic tests) |
 |---|---|---|
-| `loop` (`loop.py`, deterministic) | A virtual loop per zone: each car's back edge is followed through the zone against a learnt empty road, and counted when it crosses the far edge | 0 missed and 0 false in rendered stop-and-go and crawls with 1-2 m gaps. Cars 0.5 m apart read as one. Half the resolution misses most. Learns the empty road from near-empty moments only, and stays "learning" (a gap) until the lane clears |
-| `yolox` (`detect.py`, YOLOX-S) | Car, truck and bus boxes in the zones' tiles, tracked frame to frame, counted when a track crosses the far edge | Not trusted above 8 m/s. Rare double counts in creeping queues. About 0.3 CPU-s a frame |
+| `loop` (`loop.py`, deterministic) | A virtual loop per zone: each car's back edge is followed through the zone against a learnt empty road, and counted when it crosses the far edge | 0 missed and 0 false in rendered stop-and-go and crawls with 1-2 m gaps, but the rendered cars are flat, so no car hides the road. From `pdn-north`, which sees the traffic from behind, a stopped car hides roughly 1.5-2.5 m of road ahead of its bumper at line A (ASSUMPTION: camera pose from the unverified 10.5 × 30 m rectangle, typical car shapes). With that road painted over, the loop counted cars with 1.1 m of road showing and none with 0.5 m, so stopped gaps under about 2.5-3.5 m may read as one car. That result does not carry over to line A until line A is hand-counted. Cars 0.5 m apart read as one. Half the resolution misses most. Learns the empty road from near-empty moments only, and stays "learning" (a gap) until the lane clears |
+| `yolox` (`detect.py`, YOLOX-S) | Car, truck and bus boxes in the zones' tiles, tracked frame to frame, counted when a track crosses the far edge | Not trusted above 8 m/s. Not trusted in creeping queues until a hand count at line A settles it: in `detect.py`'s exact-box simulation, boxes jittering by about 1.5 px at `pdn-north` counted some cars twice, and a rebuild of that simulation lost more cars than it counted twice. How much real YOLOX boxes jitter has not been measured. About 0.3 CPU-s a frame |
 
 Transit = the horizontal gap between the running counts at A and B (`transit.py`). The cars
 between the lines at the start are unknown. They come from **anchors**: a few distinctive cars,
@@ -225,11 +225,17 @@ It holds counts, rates, transit statistics per 15-minute window, and epochs: der
 only. Signatures and single crossings live in memory for at most 3 h. No plate or face is ever
 read.
 
-This is a **minimum, not the full wait**:
+This is **not the full wait, and not a bound on it**:
 - A→B covers the middle of the bridge only, not the street tail before A nor the stretch and
   booth after B.
-- A finished transit describes a car that entered one wait ago.
-- Until GPS-timed crossings grade it, it is for grading and calibration, not for display.
+- It is read by exit: it is the A→B time of cars that crossed A about one transit earlier. In a
+  queue that is clearing, a car entering now takes less.
+- Every lane at A and every column at B is counted together: `runner.py` does not split them by
+  lane type, and no lane type is confirmed. So it mixes lane types: it reads above a fast lane's (SENTRI, Ready) A→B and below
+  the general lane's.
+- An error in the offset, or drift, moves it either way.
+- Until GPS-timed crossings grade it, it is for grading and calibration, not for display. It
+  grades the queue reader only on the same stretch (ADR-0014).
 
 ---
 
@@ -277,7 +283,7 @@ silently.** Whatever was not verified says so, and travels with every reading.
    already learnt keep theirs, and are never rebuilt from those few minutes of samples. A reference
    saved for a different calibration, or unreadable, is deleted and relearnt; references are
    written whole and then moved into place, so a killed worker cannot leave half a file. Readings in the first hour after install are the least reliable: the one miss in the
-   evaluation below had a single 45-second clip of history.
+   evaluation below (under the earlier rules) had a single 45-second clip of history.
 9. **A negative speed means `booth` points the wrong way.** On footage with traffic, the
    reader's signed speed toward the booth is a check on the calibration's direction.
 
@@ -321,14 +327,17 @@ bridge is not administered by FPFCH.
 | Rectification, occupancy, motion, window logic, the range | 36 tests on rendered perspective queues of known length and speed, plus the range, calibration fields and saved references (`tests/border/test_border_camera.py`) | Speed 0.99–1.04× truth from 0.1 to 3 m/s; length within ±5 m; scale cancels; the range widens by the distance's ± and by the 25 % scale slack only when the booth is out of view; a stale or corrupt reference is replaced without a crash on Windows; learning one lane leaves the others' saved road untouched |
 | Stream handling | 13 tests against small recorded videos and a mocked channel (`test_border_camera_stream.py`) | Down / frozen / lost all raise |
 | What the viewer shows, and the worker | 27 tests (`test_border_camera_viewer.py`) | Every row of [What the viewer shows](#what-the-viewer-shows); the published signal pairs the rolling wait with its own range; an unexpected failure, a closed output or a full disk marks the camera `error` and the worker carries on; CBP is fetched alongside the cameras; one worker per state folder |
-| Queue vs. no queue on real footage | 45 lane-rounds hand-labelled from nine 20-minute rounds of PDN north (3 lanes) and PDN south (2 columns), 02:16–04:56 local on 2026-10-19, 21 queued. Each round read with a reference learnt only from the rounds before it, as the worker would have it | **39/40 correct** (round 1 has no history). The miss: PDN south, left column, 02:36, with one 45 s clip of history |
+| Queue vs. no queue on real footage | 45 lane-rounds hand-labelled from nine 20-minute rounds of PDN north (3 lanes) and PDN south (2 columns), 02:16–04:56 local on 2026-10-19, 21 queued. Each round read with a reference learnt only from the rounds before it, as the worker would have it. The structure test, the emptiest-moment references, `QUEUE_DENSITY` and `RUN_OCCUPANCY` were all chosen against these same labels, so this is a score on the tuning set, not a held-out result | **40/40** under the current queue rules (commit `47df461`; `measure.py`'s queue rules have not changed since). **39/40** under the rules before it (`7515bec`): the miss was PDN south, left column, 02:36, with one 45 s clip of history. Round 1 has no history and is not scored |
 | Speed on real footage | First and last frames of each clip compared by eye | Stalled lanes read 0.00–0.03 m/s; a lane that advanced about one car length (7–10 m) in 44 s read 0.16–0.23 m/s. Absolute metres are nominal until a calibration's scale is verified |
 | Lane types, scale | Not verified for any camera | `null` / `false` in `cameras.json` |
 | Booth distances | `lerdo-south-booths`: booth in view, exact. The other four: Google satellite map with its scale bar (2026-10-22), then corrected to each strip's booth-end row from a live frame. For PDN north, the strip runs ~45 m past the Feliz Viaje gantry's posts. For the two near-booth cameras, the camera position implied by their calibration puts the strip's row ~30 m (PDN south) and ~17 m (BOTA) in front of the camera | PDN north 365 ± 35 m, PDN south 510 ± 75 m, BOTA 615 ± 70 m, Lerdo north 335 ± 35 m; all `booth_distance_verified: false`. Lerdo north is **not yet corrected**: its strip ends short of the far gantry by a gap the flat-road calibration cannot measure (the road climbs there), so 335 m is likely low |
-| Daylight and dawn | Lerdo–Stanton northbound (`lerdo-north`), empty overnight and queued once the port opened at 6 a.m.; replayed the way the worker runs from 03:16 to 07:56 local | 15/15 rounds right, through the change from streetlight to sun |
+| Daylight and dawn | Lerdo–Stanton northbound (`lerdo-north`), empty overnight and queued once the port opened at 6 a.m.; replayed the way the worker runs from 03:16 to 07:56 local | 15/15 rounds right, through the change from streetlight to sun. Also in-sample: the rule letting a queue start anywhere, and `MIN_RUN_M`, were written after a missed lane at 07:16 in these same rounds, which were then re-scored |
 | Direction, measured | Signed speed toward the booth across 15 rounds | `bota-south-approach` was first set the wrong way round (red lights at night suggested it); speed was negative every round, so it was flipped. `lerdo-south-booths` positive every round |
 | A complete wait | `lerdo-south-booths`, booth in view so scale cancels | Empty until 06:36 local, then waits of 1.0–7.6 min |
 | The live worker | `camera run` on PDN north and the Lerdo booths for five minutes | Four cycles, rolling speeds accumulating, heartbeat written; its first run found a JSON crash, now fixed and tested |
+
+**No held-out score exists yet.** Label new rounds (PDN by day, low sun, rain) before quoting an
+accuracy.
 
 **Known risks:**
 - **Low sun.** Long shadows of railings and gantries are structure too. At 08:40 local they lit

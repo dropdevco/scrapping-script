@@ -43,6 +43,20 @@ def varied(n: int) -> list[np.ndarray]:
     return [rng.integers(0, 255, (36, 64, 3), dtype=np.uint8) for _ in range(n)]
 
 
+def numbered(n: int) -> list[np.ndarray]:
+    """Frames that carry their own index: sixteens on the left half, units on the right."""
+    out = []
+    for i in range(n):
+        f = np.empty((36, 64, 3), np.uint8)
+        f[:, :32], f[:, 32:] = (i // 16) * 16 + 8, (i % 16) * 16 + 8
+        out.append(f)
+    return out
+
+
+def number(frame: np.ndarray) -> int:
+    return int(frame[:, :32].mean() // 16) * 16 + int(frame[:, 32:].mean() // 16)
+
+
 class Finding(unittest.TestCase):
     LISTING = (
         stream.Listed("a1", PREFIX + "Zaragoza (Av. Waterfill) - Vista Sur", True),
@@ -100,6 +114,22 @@ class Frames(unittest.TestCase):
     def test_an_unopenable_source_is_lost(self):
         with self.assertRaises(stream.StreamLost):
             list(stream.frames(str(self.dir / "missing.mp4"), fps=2, seconds=1))
+
+    def test_frames_stay_1_over_fps_apart_when_the_clip_rate_is_not_a_multiple(self):
+        # The reader times them as 0.5 s apart. Every 12th frame of a 25 fps clip is 0.48 s:
+        # 0.38 s off by 10 s in, and speeds 3 % low. Each is now the frame nearest its slot.
+        for source in (25, 15, 24):
+            path = clip(self.dir / f"rate{source}.mp4", numbered(250), fps=source)
+            got = [number(f) for f in stream.frames(path, fps=2, seconds=10)]
+            self.assertEqual(len(got), 20)
+            off = max(abs(n - k * source / 2) for k, n in enumerate(got))
+            self.assertLessEqual(off, 0.5, (source, got))
+
+    def test_a_clip_slower_than_the_rate_is_refused(self):
+        # Every frame of it would be timed as 0.5 s apart when they are 1 s apart.
+        path = clip(self.dir / "slow.mp4", varied(10), fps=1)
+        with self.assertRaises(ValueError):
+            next(stream.frames(path, fps=2, seconds=5))
 
 
 class CalibrationFile(unittest.TestCase):

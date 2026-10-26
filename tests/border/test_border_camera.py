@@ -104,6 +104,15 @@ class Queues(unittest.TestCase):
         self.assertIsNone(est.high_min)
         self.assertGreaterEqual(est.queue_m, 55)
 
+    def test_a_queue_longer_than_the_view_with_the_booth_out_of_view_is_not_a_floor(self):
+        # The wait assumes the unseen road to the booth moves at the visible speed; if it moves
+        # faster the true wait is shorter, so the range's low end is no "at least".
+        est = run(camera(booth_distance_m=120), moving_queue(90, lambda t: 0.6))
+        self.assertTrue(est.beyond_view, est.detail)
+        self.assertFalse(est.lower_bound)
+        self.assertIsNone(est.high_min)
+        self.assertIsNotNone(est.wait_min)
+
     def test_the_wait_includes_the_unseen_stretch_to_the_booth(self):
         est = run(camera(booth_distance_m=120), moving_queue(30, lambda t: 0.6))
         self.assertAlmostEqual(est.wait_min, (120 + 32) / 0.6 / 60, delta=0.6)
@@ -242,6 +251,26 @@ class Serialisation(unittest.TestCase):
         self.assertIs(decoded["evidence"]["beyond_view"], True)
 
 
+class ReadCommand(unittest.TestCase):
+    def test_a_floor_is_printed_at_its_low_end_not_the_central_wait(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+
+        from scraper.border.camera import reader as reader_module
+
+        cam = camera()
+        sig = {"minutes": 9, "low": 7, "high": None,
+               "evidence": {"lane": "car", "state": "queue", "queue_m": 60.0, "beyond_view": True,
+                            "speed_m_s": 0.11, "lower_bound": True}}
+        args = SimpleNamespace(camera=cam.id, source=None, seconds=60, debug=None, json=False)
+        out = io.StringIO()
+        with unittest.mock.patch.object(reader_module, "_read_once", return_value=[sig]), \
+                contextlib.redirect_stdout(out):
+            reader_module.cmd_read(args, {cam.id: cam})
+        self.assertIn("wait at least 7 min", out.getvalue())
+
+
 class WaitBounds(unittest.TestCase):
     def test_the_low_end_is_the_short_distance_at_the_fastest_speed(self):
         low, high = wait_bounds(100, 0, 20, fastest=0.4, slowest=0.2, scale_verified=True)
@@ -282,9 +311,17 @@ class RollingRange(unittest.TestCase):
     def test_a_line_running_out_of_view_has_a_low_end_and_no_high_end(self):
         out = rolling([(0, self.window(beyond=True))], now=0, booth_distance_m=400,
                       uncertainty_m=40, scale_verified=False)
-        self.assertTrue(out["lower_bound"])
         self.assertIsNone(out["high_min"])
         self.assertAlmostEqual(out["low_min"], 400 / 0.2 / 60 / (1 + SCALE_SLACK))
+        # Not a floor: the low end still assumes the 400 m out of view moves like the visible
+        # line, and a line that merges and opens gaps out there moves faster.
+        self.assertFalse(out["lower_bound"])
+
+    def test_a_line_running_out_of_view_from_a_booth_in_view_is_a_floor(self):
+        out = rolling([(0, self.window(beyond=True))], now=0, booth_distance_m=0)
+        self.assertTrue(out["lower_bound"])
+        self.assertIsNone(out["high_min"])
+        self.assertAlmostEqual(out["low_min"], 40 / 0.2 / 60)
 
 
 def raw_camera(**lane):
@@ -357,6 +394,42 @@ class SavedReferences(unittest.TestCase):
         reader = CameraReader(self.cam)
         self.assertEqual(reader.prepare(), ["car"])
         self.assertFalse(_state_path(self.cam, "car.reference").exists())
+
+    def test_a_read_holds_a_few_images_not_one_per_frame(self):
+        # Every frame's float32 grey and edges were kept for the whole read only to sample three
+        # at the end: ~400 MB per 480p camera-minute, five cameras at once in the worker.
+        import weakref
+
+        from scraper.border.camera import reader as reader_module
+        from scraper.border.camera.reader import SAMPLES_PER_WINDOW
+
+        reader = self.learnt()
+        banked = len(reader.bank)
+        alive, sampled, frames = [], [], 100
+        features = reader_module.image_features
+
+        def tracked(frame):
+            image = features(frame)
+            object.__setattr__(image, "n", len(alive))
+            alive.append(weakref.ref(image))
+            return image
+
+        def source():
+            empty = Scene().render([])
+            for n in range(frames):
+                if n == frames - 1:
+                    held = sum(ref() is not None for ref in alive)
+                    self.assertLessEqual(held, 2 * SAMPLES_PER_WINDOW + 2)
+                yield empty
+
+        sample = reader._sample
+        with unittest.mock.patch.object(reader_module, "image_features", tracked), \
+                unittest.mock.patch.object(reader, "_sample",
+                                           lambda im: sampled.append(im.n) or sample(im)):
+            reader.read(source(), save=False)
+        self.assertEqual(len(reader.bank) - banked, SAMPLES_PER_WINDOW)
+        self.assertEqual(len(set(sampled)), SAMPLES_PER_WINDOW)
+        self.assertGreaterEqual(sampled[-1] - sampled[0], frames // 2)
 
     def test_learning_one_lane_leaves_the_others_road_untouched(self):
         self.learnt().save()

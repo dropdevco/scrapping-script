@@ -393,6 +393,17 @@ class Counting(unittest.TestCase):
         found, _ = run(path(range(305, 150, -10)), camera=big)
         self.assertEqual([n for n, _ in found], [9])
 
+    def test_a_zone_whose_far_edge_is_above_the_frame_is_refused(self):
+        # No box can reach that far edge: the line would read as seen with no cars, forever.
+        quad = [(100, 60), (200, 60), (200, -40), (100, -40)]
+        with self.assertRaisesRegex(ValueError, "A/1"):
+            DetectorCounter(cam([("A", "1", quad)]), detector=Scripted([]))
+
+    def test_a_zone_wholly_outside_the_frame_is_refused(self):
+        quad = [(700, 250), (800, 250), (800, 220), (700, 220)]
+        with self.assertRaisesRegex(ValueError, "A/1"):
+            DetectorCounter(cam([("A", "1", quad)]), detector=Scripted([]))
+
     def test_a_camera_without_zones_never_runs_the_model(self):
         detector = Scripted([[car(150, 300)]] * 20)
         counter = DetectorCounter(cam(zones=[]), detector=detector)
@@ -629,19 +640,19 @@ class Signature(unittest.TestCase):
         box = (120, 180, 180, 220)                              # 60 x 40
         image[180:200, 120:180] = (40, 40, 200)                 # body: red in BGR
         image[200:220, 120:180] = (255, 255, 255)               # lower half: a white panel
-        sig = signature(image, box, CAR, 100.0)
+        sig = signature(image, box, 100.0)
         self.assertGreater(sig[0], 0.7)                         # red: saturated, at 0 degrees
         self.assertAlmostEqual(sig[1], 0.0, places=2)
         self.assertAlmostEqual(sig[2], 200 / 255, places=2)
         self.assertAlmostEqual(sig[3], 0.6)
         image[200:220, 120:180] = (0, 0, 0)
-        self.assertEqual(signature(image, box, CAR, 100.0), sig)
+        self.assertEqual(signature(image, box, 100.0), sig)
 
     def test_a_red_that_straddles_the_hue_wrap_stays_red(self):
         image = np.zeros((40, 60, 3), np.uint8)
         image[:, :30] = (0, 10, 200)                            # hue ~2 degrees
         image[:, 30:] = (10, 0, 200)                            # hue ~356 degrees
-        x, y = signature(image, (0, 0, 60, 40), CAR, 60)[:2]
+        x, y = signature(image, (0, 0, 60, 40), 60)[:2]
         self.assertGreater(x, 0.8)
         self.assertLess(abs(y), 0.05)
 

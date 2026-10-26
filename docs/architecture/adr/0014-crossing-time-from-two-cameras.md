@@ -103,6 +103,11 @@ measured:
 - **Drift.** Counts drift. Transit error grows with (count bias at A − count bias at B) × hours since the
   last anchor. Both methods must be checked against hand counts, and later GPS crossings, before any
   number is published.
+- **Grading compares like with like.** A transit grades the queue reader only on the stretch both
+  measure: the reader's A→B is distance(A, B) ÷ its queue speed, which needs a measured A–B distance
+  (none is measured yet). Full waits are graded only against GPS-timed crossings. A full wait built
+  from a transit plus the reader's own tail before A and stretch after B shares those parts with the
+  reader, so the reader's errors there would cancel and go unseen. Found by the audit on 2026-10-26.
 - **A 90-minute ceiling.** Signatures are kept at most 3 h. An anchor is only trusted when both ends of the
   trip lie inside the measured span with the ceiling to spare, so the slowest trip from A to B that can be
   anchored is 90 min, not FHWA's 120. A→B is the middle of the bridge, not the whole wait (ASSUMPTION that

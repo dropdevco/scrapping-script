@@ -30,6 +30,7 @@ plate and no face is ever read (ADR-0014).
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -62,12 +63,18 @@ class Crossing:
     vehicle: str | None = None                 # car | truck | bus | motorcycle, when known
 
 
-def look(chroma_x: float, chroma_y: float, value: float, width_share: float) -> tuple[float, ...]:
-    """The shared signature form (module docstring), clamped to its ranges and rounded."""
-    def clamp(v: float, lo: float, hi: float) -> float:
-        return round(min(max(float(v), lo), hi), 3)
-    return (clamp(chroma_x, -1, 1), clamp(chroma_y, -1, 1), clamp(value, 0, 1),
-            clamp(width_share, 0, 1))
+def look(chroma_x: float, chroma_y: float, value: float,
+         width_share: float) -> tuple[float, ...] | None:
+    """The shared signature form (module docstring), clamped to its ranges and rounded. None,
+    no signature, when a part is not a finite number: min and max pass a NaN through, and transit
+    refuses every crossing of a method while one component lies off the scale."""
+    x, y, v, w = parts = (float(chroma_x), float(chroma_y), float(value), float(width_share))
+    if not all(math.isfinite(p) for p in parts):
+        return None
+
+    def clamp(p: float, lo: float, hi: float) -> float:
+        return round(min(max(p, lo), hi), 3)
+    return clamp(x, -1.0, 1.0), clamp(y, -1.0, 1.0), clamp(v, 0.0, 1.0), clamp(w, 0.0, 1.0)
 
 
 def chroma(hue_deg, saturation) -> tuple[float, float]:
@@ -92,8 +99,10 @@ class Counter(Protocol):
         """Frames were missed: drop any per-car state that spans the gap."""
 
     def gaps(self) -> list[Gap]:
-        """Gaps the counter found itself (a stamp jump, a zone still learning its road), drained
-        on each call, so the transit maths cuts there too. A counter may return []."""
+        """Gaps the counter found in the frames themselves (a stamp jump), drained on each call,
+        so the transit maths cuts there too. A counter may return []. A zone still learning its
+        road is not one of them: LoopCounter.states() shows it, and the caller must cut there as
+        well (runner._learning), or the learning time reads as time with no cars."""
 
 
 def zones_from_raw(camera_id: str, raw: list[dict]) -> tuple[Zone, ...]:

@@ -70,7 +70,8 @@ class Scene:
             canvas[top:bottom, c0:c1] = colour
             shade = tuple(int(x * 0.45) for x in colour)
             w0, w1 = self._row(front - 1.1), self._row(front - 1.7)      # windscreen band
-            canvas[max(top, w0):min(bottom, w1), c0 + 4:c1 - 4] = shade
+            # Past the far edge w1 is negative: an end below `top` keeps it from wrapping round.
+            canvas[max(top, w0):max(top, min(bottom, w1)), c0 + 4:c1 - 4] = shade
             cv2.rectangle(canvas, (c0, top), (c1 - 1, bottom - 1), (15, 15, 15), 2)
         big = (FRAME[0] * SUPERSAMPLE, FRAME[1] * SUPERSAMPLE)
         frame = cv2.warpPerspective(canvas, self.to_image, big, flags=cv2.INTER_LINEAR,

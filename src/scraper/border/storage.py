@@ -1,4 +1,4 @@
-"""Persistence for the border_* tables (migrations 0013-0015).
+"""Persistence for the border_* tables (migrations 0013-0017, and 0021 for the estimator).
 
 Same contract as core/storage.py: with SUPABASE_URL / SUPABASE_KEY unset the whole
 layer is a no-op and the feed still answers with live numbers, and a failed write is
@@ -21,6 +21,16 @@ from ..core.storage import Storage
 from .cbp import PORTS, Snapshot
 
 log = logging.getLogger("scraper.border.storage")
+
+# PostgREST returns at most this many rows a request and says nothing when it cut an
+# answer short (the same cap the engine's backfills page around). ASSUMPTION: the
+# project keeps Supabase's default max_rows of 1000; a lower cap would end a paged read
+# after its first page, so it must not be set below this.
+PAGE_ROWS = 1000
+# What fusion needs of a stored signal (Signal.from_row), and captured_at, when we first
+# read it. evidence is left out: it is for audit, and fusion never reads it.
+SIGNAL_COLUMNS = ("port_number,lane,direction,kind,source,state,minutes,low,high,"
+                  "observed_at,independent,reporter_hash,content_hash,captured_at")
 
 
 _FROM_SETTINGS = object()
@@ -95,6 +105,63 @@ class BorderStore:
         return await self._call("prune", lambda c: c.rpc("border_prune", {
             "keep_readings_days": keep_readings_days, "keep_runs_days": keep_runs_days,
             "keep_alerts_days": keep_alerts_days}))
+
+    # -- the estimator (0021) ------------------------------------------------
+    async def save_signals(self, rows: list[dict]) -> int:
+        """Insert border_signals rows (Signal.to_row). content_hash is UNIQUE, so a claim
+        read again, such as CBP's between its hourly updates, writes nothing, as in
+        save_readings. Returns rows actually new."""
+        if not rows:
+            return 0
+        written = await self._call("save_signals", lambda c: c.table("border_signals").upsert(
+            rows, on_conflict="content_hash", ignore_duplicates=True))
+        return len(written) if isinstance(written, list) else 0
+
+    async def signals_since(self, since_iso: str) -> list[dict] | None:
+        """Every signal observed at or after a moment, oldest first, each with captured_at.
+        Paged: at the fixtures' 29 new signals a poll, the three hours fusion reads come
+        to roughly 550 rows [A], within reach of the cap and growing with every source
+        added. None when off or any page failed, so the caller can tell that from no
+        signals: a short history would quietly change the estimate."""
+        if not self.enabled:
+            return None
+        rows: list[dict] = []
+        while True:
+            start = len(rows)
+            page = await self._call("signals_since", lambda c, start=start: c.table("border_signals")
+                                    .select(SIGNAL_COLUMNS).gte("observed_at", since_iso)
+                                    .order("observed_at").order("content_hash")
+                                    .range(start, start + PAGE_ROWS - 1))
+            if page is None:
+                return None
+            rows.extend(page)
+            if len(page) < PAGE_ROWS:
+                return rows
+
+    async def source_trust(self, since_day: str) -> list[dict] | None:
+        """border_source_trust rows from an El Paso day on, newest first. None when off or
+        failed: weighing every source at its prior because a read failed would look just
+        like sources no crossing has graded yet."""
+        return await self._call("source_trust", lambda c: c.table("border_source_trust")
+                                .select("source,direction,day,trust").gte("day", since_day)
+                                .order("day", desc=True))
+
+    async def save_estimates(self, rows: list[dict]) -> int:
+        """Insert one fusion run's border_estimates rows (Estimate.to_row). Every run adds
+        rows rather than replacing them: grading needs the estimate that stood when each
+        timed crossing began (SPEC §4.6). Returns the rows written."""
+        if not rows:
+            return 0
+        written = await self._call("save_estimates", lambda c: c.table("border_estimates")
+                                   .insert(rows))
+        return len(written) if isinstance(written, list) else 0
+
+    async def prune_estimator(self, keep_days: int = 60, keep_reports_days: int = 30) -> dict | None:
+        """Rows removed per table by border_prune_estimator (0021): signals and estimates
+        after keep_days, crowd messages and the signals made from them after Q-14's 30.
+        None when off or failed."""
+        return await self._call("prune_estimator", lambda c: c.rpc("border_prune_estimator", {
+            "keep_days": keep_days, "keep_reports_days": keep_reports_days}))
 
     # -- reads -------------------------------------------------------------
     async def current_waits(self) -> list[dict]:

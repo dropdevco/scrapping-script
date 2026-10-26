@@ -23,7 +23,7 @@ PORTS = {
     "bridge of the americas": "240201",
     "stanton": "240204",
     "santa teresa": "240801",
-    "tornillo": "240221",
+    "tornillo": "240401",
 }
 # "General Lanes: At 6:00 pm MDT 43 min delay" — the CBP phrasing, passed straight
 # through. The segment must stop at the next lane label: a passenger card is followed

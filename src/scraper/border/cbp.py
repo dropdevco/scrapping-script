@@ -4,7 +4,11 @@ The feed is the only source of live numbers. It has four traps, all handled here
 
 1. delay_minutes arrives as a string, and missing values are "" or "N/A", never null.
 2. operational_status casing is inconsistent: "no delay" vs "Lanes Closed".
-3. crossing_name is EMPTY for port 240221 (Tornillo), so names come from the registry.
+3. Its names are not ours, and one id is a decoy. Tornillo is port 240401, which the
+   feed calls "Marcelino Serna" / "Tornillo". Port 240221 is an "El Paso" entry with an
+   empty crossing_name that reads "Update Pending" on every lane; it was registered as
+   Tornillo until 2026-10, so Tornillo always read "no data". Checked live on 2026-10-12
+   (240401 read 30 min) and 2026-10-26 (20 min). Names come from the registry.
 4. update_time is prose ("At 10:00 pm MDT") and is sometimes ahead of the clock.
 
 Sources never compute their own content_hash in the Chisme engine; here the fetch and
@@ -36,8 +40,9 @@ UNKNOWN_AGE = 45
 # ("Centro", "Puente Libre", "Lerdo", "Zaragoza"). Curated and correctly spelled — they
 # are written into the knowledge base — unlike `aliases`, which also carries the
 # misspellings the lookup has to tolerate.
-# Registry mirrors border_ports in 0013_border_waits.sql. Kept in code as well so the
-# feed works with no database, the way Storage degrades to a no-op.
+# Registry mirrors border_ports in 0013_border_waits.sql (Tornillo's id corrected in
+# 0020). Kept in code as well so the feed works with no database, the way Storage
+# degrades to a no-op.
 PORTS: dict[str, dict] = {
     "240202": {"name": "Paso del Norte", "name_es": "Paso del Norte (Santa Fe)", "slug": "paso-del-norte",
                "aliases": ["pdn", "santa fe", "puente santa fe", "centro"], "order": 10,
@@ -54,7 +59,7 @@ PORTS: dict[str, dict] = {
     "240801": {"name": "Santa Teresa", "name_es": "Jerónimo–Santa Teresa", "slug": "santa-teresa",
                "aliases": ["santa teresa", "jeronimo", "jerónimo", "san jeronimo"], "order": 50,
                "known_as": ["Jerónimo", "San Jerónimo"]},
-    "240221": {"name": "Tornillo–Guadalupe", "name_es": "Guadalupe–Tornillo", "slug": "tornillo",
+    "240401": {"name": "Tornillo–Guadalupe", "name_es": "Guadalupe–Tornillo", "slug": "tornillo",
                "aliases": ["tornillo", "guadalupe", "marcelino serna"], "order": 60,
                "known_as": ["Guadalupe", "Marcelino Serna"]},
 }

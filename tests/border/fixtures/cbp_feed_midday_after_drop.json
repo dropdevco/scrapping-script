@@ -3732,13 +3732,13 @@
       "maximum_lanes": "2",
       "standard_lanes": {
         "update_time": "",
-        "operational_status": "Lanes Closed",
+        "operational_status": "Update Pending",
         "delay_minutes": "",
         "lanes_open": ""
       },
       "FAST_lanes": {
         "update_time": "",
-        "operational_status": "Lanes Closed",
+        "operational_status": "Update Pending",
         "delay_minutes": "",
         "lanes_open": ""
       }
@@ -3746,20 +3746,20 @@
     "passenger_vehicle_lanes": {
       "maximum_lanes": "4",
       "standard_lanes": {
-        "update_time": "At 1:00 pm MDT",
-        "operational_status": "delay",
-        "delay_minutes": "10",
-        "lanes_open": "2"
+        "update_time": "",
+        "operational_status": "Update Pending",
+        "delay_minutes": "",
+        "lanes_open": ""
       },
       "NEXUS_SENTRI_lanes": {
         "update_time": "",
-        "operational_status": "Lanes Closed",
+        "operational_status": "Update Pending",
         "delay_minutes": "",
         "lanes_open": ""
       },
       "ready_lanes": {
         "update_time": "",
-        "operational_status": "Lanes Closed",
+        "operational_status": "Update Pending",
         "delay_minutes": "",
         "lanes_open": ""
       }
@@ -3767,14 +3767,14 @@
     "pedestrian_lanes": {
       "maximum_lanes": "2",
       "standard_lanes": {
-        "update_time": "At 1:00 pm MDT",
-        "operational_status": "no delay",
-        "delay_minutes": "0",
-        "lanes_open": "2"
+        "update_time": "",
+        "operational_status": "Update Pending",
+        "delay_minutes": "",
+        "lanes_open": ""
       },
       "ready_lanes": {
         "update_time": "",
-        "operational_status": "Lanes Closed",
+        "operational_status": "Update Pending",
         "delay_minutes": "",
         "lanes_open": ""
       }

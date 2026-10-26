@@ -31,7 +31,7 @@ SNAPSHOT = cbp.build(json.loads(FIXTURE.read_text(encoding="utf-8")), datetime(2
     ("avisame cuando ready a pie en paso del norte este en 15", "240202"),
     ("alert me when the free bridge drops below 30", "240201"),
     ("avísame cuando sarragoza baje de 20", "240203"),          # typed on a phone
-    ("avísame cuando tornilo baje de 20", "240221"),
+    ("avísame cuando tornilo baje de 20", "240401"),
 ])
 def test_the_bridge_named_is_the_bridge_found(message, port):
     found = SNAPSHOT.port(requests.bridge_text(message))

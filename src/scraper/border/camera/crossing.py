@@ -18,12 +18,13 @@ two lines as anchors. Both counters use one form, built by `look()`:
 
     (saturation x cos hue, saturation x sin hue, value, width share)
 
-Every part is on a 0-1 scale; the first two run -1 to 1, the form transit's default distance
-compares. The first two place the body's colour on a colour wheel: hue is the angle, and how
-coloured the car is gives the distance from the centre. Grey, white and black cars, whose hue is
-noise, sit together near (0, 0), and a red car reads the same at 359 degrees as at 1. The
-vehicle class, where a counter knows it, is kept apart in `vehicle`, so a truck is never matched
-to a car on colour alone.
+Every part is on a 0-1 scale; the first two run -1 to 1. The first two place the body's colour
+on a colour wheel: hue is the angle, and how coloured the car is gives the distance from the
+centre. Grey, white and black cars, whose hue is noise, sit together near (0, 0), and a red car
+reads the same at 359 degrees as at 1. transit compares the first three parts only
+(transit.colour_distance): the width share is a share of each zone's width, and the two cameras
+measure that differently. The vehicle class, where a counter knows it, is kept apart in
+`vehicle`, and transit never matches a truck to a car on colour alone (transit._same_class).
 
 Signatures live in memory only, for at most SIGNATURE_TTL_S, and are never written anywhere. No
 plate and no face is ever read (ADR-0014).
@@ -82,11 +83,6 @@ def chroma(hue_deg, saturation) -> tuple[float, float]:
     h = np.radians(np.asarray(hue_deg, dtype=np.float64))
     s = np.asarray(saturation, dtype=np.float64)
     return float(np.mean(s * np.cos(h))), float(np.mean(s * np.sin(h)))
-
-
-def same_vehicle(a: Crossing, b: Crossing) -> bool:
-    """Whether two crossings may be the same vehicle by class: unknown matches anything."""
-    return a.vehicle is None or b.vehicle is None or a.vehicle == b.vehicle
 
 
 class Counter(Protocol):

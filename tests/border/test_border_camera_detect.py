@@ -456,12 +456,14 @@ LOW = Pinhole((854, 480), 600.0, 4.0, 7)      # like pdn-north: a car 25 m out i
 
 class Road:
     """A detector that returns every car's exact box, clipped to the tiles it is shown, with
-    seeded misses, jitter (a share of the box's width) and scores. It keeps which car each box
-    it returned came from, so a count can be traced to a car."""
+    seeded misses, jitter (a share of the box's width, or `jitter_px` pixels whatever its size)
+    and scores. It keeps which car each box it returned came from, so a count can be traced to
+    a car."""
 
     def __init__(self, camera: Pinhole, seed: int, missed: float = 0.0, jitter: float = 0.0,
-                 scores: tuple[float, float] = (0.8, 0.8)):
+                 scores: tuple[float, float] = (0.8, 0.8), jitter_px: float = 0.0):
         self.camera, self.missed, self.jitter, self.scores = camera, missed, jitter, scores
+        self.jitter_px = jitter_px
         self.rng = np.random.default_rng(seed)
         self.cars: list[tuple[float, int]] = []     # (rear bumper, metres from the pole; car id)
         self.owner: dict = {}
@@ -481,7 +483,8 @@ class Road:
                 continue                            # mostly outside what the model sees
             if self.rng.random() < self.missed:
                 continue
-            j = self.rng.normal(0, self.jitter, 4) * (c[2] - c[0])
+            j = (self.rng.normal(0, self.jitter_px, 4) if self.jitter_px
+                 else self.rng.normal(0, self.jitter, 4) * (c[2] - c[0]))
             found.append((Detection(tuple(float(c[i] + j[i]) for i in range(4)),
                                     float(self.rng.uniform(*self.scores)), CAR), car_id))
         found.sort(key=lambda f: -f[0].score)

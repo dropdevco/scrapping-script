@@ -123,6 +123,16 @@ class LastModified(unittest.TestCase):
             self.assertEqual(reader._segment_wall(seg, resp, 4.5),
                              datetime(2026, 11, 1, 8, 29, 56, tzinfo=UTC), stamp)
 
+    def test_a_malformed_stamp_is_an_unknown_time_not_a_failed_read(self):
+        # parsedate_to_datetime raised ValueError in the pump, which ended the read. A segment
+        # with no time of its own is placed by the others, as one with no header is.
+        reader = HlsReader(lambda: "", "last-modified", (160, 120), 2.0, "chisme-test")
+        self.addCleanup(reader.http.close)
+        seg = Segment(0, "https://e.org/x.ts", 5.0, None)
+        for stamp in ("not a date", "Sun, 32 Nov 2026 08:30:00 GMT"):
+            resp = httpx.Response(200, headers={"Last-Modified": stamp})
+            self.assertIsNone(reader._segment_wall(seg, resp, 4.5), stamp)
+
 
 def _serve(directory: str, handler=SimpleHTTPRequestHandler) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(("127.0.0.1", 0), partial(handler, directory=directory))

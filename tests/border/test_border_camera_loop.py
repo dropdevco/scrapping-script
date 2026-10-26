@@ -45,7 +45,7 @@ from scraper.border.camera import transit
 from scraper.border.camera.calibration import camera_from_dict
 from scraper.border.camera.crossing import Zone
 from scraper.border.camera.hls import Gap, Stamped
-from scraper.border.camera.loop import WIDTH_SCALE_M, LoopCounter, _Look
+from scraper.border.camera.loop import ASSUMED_LANE_M, WIDTH_SCALE_M, LoopCounter, _Look
 
 DT = 0.5
 T0 = datetime(2026, 10, 24, 18, 0, tzinfo=UTC)
@@ -536,31 +536,6 @@ class Gaps(unittest.TestCase):
             gap = run.loop.gaps()[0]
             self.assertEqual((gap.after, gap.seconds), (last, 0.0), back)
 
-    def test_a_car_in_the_zone_when_counting_resumes_is_covered_by_a_gap(self):
-        # It came in unseen, so it is not counted (nor by the detector); it stood 40 s and
-        # crossed 42 s after the gap, long after transit's GAP_PAD_S. The time until it has
-        # left is a gap too, or the line would read as fully seen one car short.
-        run = Run().warm()
-        rear = 2.0
-        while rear < (NEAR + FAR) / 2:                    # drives in at 1 m/s
-            run.add([(rear + CAR_M, WHITE)])
-            rear += 1.0 * DT
-        run.loop.gap(Gap(run.at - timedelta(seconds=DT), 20.0, "segment expired"))
-        run.at += timedelta(seconds=20)
-        resumed = run.at
-        for _ in range(int(40 / DT)):
-            run.add([(rear + CAR_M, WHITE)])
-        crossed = None
-        while rear < 25:
-            rear += 1.0 * DT
-            run.add([(rear + CAR_M, WHITE)])
-            if crossed is None and rear > FAR:
-                crossed = run.at - timedelta(seconds=DT)
-        self.assertEqual(run.crossings, [])
-        (gap,) = run.loop.gaps()
-        self.assertEqual(gap.after, resumed)
-        self.assertGreaterEqual(gap.after + timedelta(seconds=gap.seconds), crossed)
-
     def test_a_car_in_flight_across_a_gap_is_not_counted(self):
         run = Run().warm()
         rest = self.half_way(run)
@@ -578,11 +553,11 @@ class Gaps(unittest.TestCase):
         for cars in rest:
             run.add(cars)
         self.assertEqual(run.crossings, [])
-        # ...and reported, so transit cuts its epoch there as at the reader's own gaps; then
-        # the time until the car that was in the zone at the resume has left it.
-        stamp, inside = run.loop.gaps()
-        self.assertEqual(stamp, Gap(last, 30.5, "frames +30.5 s apart"))
-        self.assertEqual(inside.after, last + timedelta(seconds=30.5))
+        # ...and reported, so transit cuts its epoch there as at the reader's own gaps. The car
+        # that was in the zone at the resume is not a gap of its own: transit sets the new
+        # epoch's offset afresh, and in simulation a car missed at its start changed no
+        # unflagged number (loop.py).
+        self.assertEqual(run.loop.gaps(), [Gap(last, 30.5, "frames +30.5 s apart")])
         self.assertEqual(run.loop.gaps(), [])
 
     def test_a_stamp_that_goes_well_back_is_a_gap(self):
@@ -620,8 +595,8 @@ class Signature(unittest.TestCase):
         self.assertEqual((red.method, red.line, red.lane), ("loop", "A", "car"))
 
     def test_signatures_are_on_the_scale_transit_compares(self):
-        # transit.measure's default distance refuses a component beyond +-SIGNATURE_LIMIT
-        # (hue in degrees, 0-255 channels): loop crossings at A and B must go straight in.
+        # transit.measure refuses a signature with a component beyond +-SIGNATURE_LIMIT (hue in
+        # degrees, 0-255 channels): loop crossings at A and B must go straight in.
         run = Run().warm()
         for cars in steady(60, 3.0, headway=9.0):
             run.add(cars)
@@ -632,6 +607,27 @@ class Signature(unittest.TestCase):
             self.assertTrue(all(-1.0 <= v <= 1.0 for v in c.signature), c.signature)
         b = [replace(c, camera="city", line="B", at=c.at + timedelta(minutes=40)) for c in a]
         transit.measure(a, b, 30.0, 50.0)                 # raised ValueError before
+
+    def test_one_car_reads_alike_at_a_line_whose_width_is_assumed(self):
+        # Line B's camera has no ground rectangle, so its zones are read ASSUMED_LANE_M wide
+        # whatever they really are, and a car's width share there is not the one at A. Rendered,
+        # in a calibrated 3.5 m zone at A and a 4.5 m one read as 3.5 m at B, a red car is
+        # 0.129 apart on all four parts at 1.8 m wide and 0.164 at 2.0 m, against MATCH_DISTANCE
+        # 0.15. transit compares colour and value only (colour_distance): 0.005 and 0.020.
+        def read(road_w: float, car_w: float, metres=None):
+            cam = camera(width_m=road_w)
+            zone = Zone(cam.id, "A", "car", zone_quad(NEAR, FAR, road_w=road_w))
+            loop = LoopCounter(cam, (zone,), metres=metres, sample_every_s=0.5, bank_min=8)
+            run = Run(loop, Frames(scene=WideScene(road_w=road_w, car_w=car_w))).warm()
+            for cars in one_car(RED):
+                run.add(cars)
+            (crossing,) = run.crossings
+            return crossing.signature
+
+        assumed = {("A", "car"): (ASSUMED_LANE_M, (FAR - NEAR) * ASSUMED_LANE_M / 4.5)}
+        for car_w in (1.8, 2.0):
+            a, b = read(3.5, car_w), read(4.5, car_w, assumed)
+            self.assertLessEqual(transit.colour_distance(a, b), transit.MATCH_DISTANCE, car_w)
 
     def test_a_red_car_reads_alike_on_both_sides_of_the_hue_wrap(self):
         # Raw hue put a red car at 359.9 degrees and another at 0.0, as far apart as two cars

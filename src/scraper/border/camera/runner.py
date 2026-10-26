@@ -10,8 +10,9 @@ from the stream's own clock. Each frame goes to every counter of its camera:
 Their crossings and gaps are kept in memory. Every `every` seconds each method is measured on
 its own (transit.measure), and one record per method is appended to
 CAMERA_STATE_DIR/transit-YYYY-MM-DD.jsonl. A record holds derived numbers only: counts, rates,
-transit statistics per window, epochs. No frame, signature, single crossing or single transit is
-ever written. Crossings, and the signatures in them, are dropped after SIGNATURE_TTL_S (of stream
+transit statistics per window, epochs. No frame, signature or crossing is written, and no transit
+as a record of its own (window statistics over few transits can give their times back, not which
+car had which). Crossings, and the signatures in them, are dropped after SIGNATURE_TTL_S (of stream
 time, plus the wall time since the newest frame arrived). Each measurement covers at most that
 long, chained to the one before by the cars-between count (transit.prior_at) when its start
 moves and that count can be checked.
@@ -22,12 +23,16 @@ A line is not seen while:
 - for the loop method, any of its zones is still learning the empty road.
 
 Those times are gaps at that line, never "no cars". Gaps cut the transit measurement into
-epochs, and each epoch needs anchors or a carried count before its transits are trusted.
+epochs. Each epoch needs its own anchors, or a sure count continued from the measurement before
+with no gap, before its transits are trusted; a count carried across a gap is flagged until
+anchors confirm it.
 
 The loop counters' learnt roads are saved to CAMERA_STATE_DIR/<camera>.loop.npz and seeded on
 start, so a restart in a queue does not wait for the lane to clear. Each road is a median of
 near-empty moments, the same kind of record as the queue reader's strip references; no frame is
-saved.
+saved. Each is saved with its zone's quad and the camera's frame size, ground rectangle and
+masks, and a road whose zone or any of those has changed since is dropped on start and learnt
+afresh.
 
 The City camera at line B is read at the owner's risk and never displayed (ADR-0014): nothing
 here serves or shows a picture.
@@ -53,12 +58,17 @@ from .reader import live_reader, state_dir
 from .stream import FROZEN_SECONDS, StreamError, StreamFrozen
 
 LO_MIN = 0.5             # the fastest believable trip from line A to line B, minutes
-# The slowest trip an anchor may have, minutes. An anchor is only trusted when both its ends lie
-# inside the measured span with hi_min to spare (transit's "enclosed"), so a trip of T min needs
-# an epoch longer than 2 x hi_min - T, and no epoch is longer than the 3 h a signature may be
-# kept (ADR-0014). Half of that, 90, is the largest hi_min at which a trip of any length can
-# anchor (at FHWA's 120, no trip under 60 min could). ASSUMPTION that A->B (the middle of the
-# bridge, not the whole wait) stays under 90 min, until a hand-timed or GPS-timed A->B says.
+# The slowest trip an anchor may have, minutes. Anchors set an offset on their own only when both
+# their ends lie inside the measured span with hi_min to spare (transit's "enclosed"), so a trip
+# of T min needs an epoch longer than 2 x hi_min - T, and no epoch is longer than the 3 h a
+# signature may be kept (ADR-0014). Half of that, 90, is the largest hi_min at which every trip
+# up to hi_min can be enclosed (at FHWA's 120, no trip under 60 min could). A trip longer than
+# hi_min cannot anchor: its true partner is outside the search. Its epoch's anchors are then
+# look-alikes that disagree, so the epoch comes out flagged ("few-anchors" or "carried"), not
+# anchored wrong. ASSUMPTION backed by simulation only: with trips of 110 and 150 min, 0 of 160
+# epochs sure and wrong (40 seeds each at 3 % and 10 % distinctive cars), against 60 before the
+# 2026-10-26 audit. ASSUMPTION that A->B (the middle of the bridge, not the whole wait) stays
+# under 90 min, until a hand-timed or GPS-timed A->B says.
 HI_MIN = SIGNATURE_TTL_S / 60 / 2
 RECONNECT_S = 10.0       # wait before opening a stream again after it failed
 SAVE_EVERY_S = 600       # how often the loop counters' learnt roads are saved
@@ -190,7 +200,7 @@ class TransitRunner:
         self.errors.pop(cam.id, None)
         for counter in self.counters[cam.id]:
             found = counter.add(frame)
-            own = counter.gaps() if hasattr(counter, "gaps") else []
+            own = counter.gaps()
             with self._lock:
                 self.crossings[(counter.method, line)].extend(c for c in found if c.line == line)
                 self.gaps[(counter.method, line)].extend(own)
@@ -293,10 +303,11 @@ class TransitRunner:
             for g0, g1 in spans:
                 if g0 - lead <= start < g1:
                     start, moved = g1, True
-        if prev is None or not prev.start <= start <= prev.end:
+        if prev is None:
             return start, None
         if start == prev.start:
             return start, opened
+        # Past prev.end prior_at gives None: nothing is carried from what did not see the start.
         prior = transit.prior_at(prev, start)
         return start, prior if prior is not None and prior.uncertainty is not None else None
 
@@ -335,8 +346,10 @@ class TransitRunner:
     def _lane_type(self) -> str:
         """The lane type every zone at both lines is confirmed as, else "mixed". transit pairs
         the k-th car at A with the (offset + k)-th at B, which holds within one lane type only:
-        pooled with general lanes, SENTRI and Ready cars reorder, and in simulation a window's
-        median then comes out near the flow-weighted mean of the types, the trip of none."""
+        pooled with general lanes, SENTRI and Ready cars reorder. In simulation, anchored as
+        here, a window's median followed one type's trip, the type with most enclosed anchors:
+        41-47 min in some runs and 7-11 in others, unflagged, against a flow-weighted mean of
+        35-39."""
         types = {z.lane_type for cam in self.cams for z in cam.count_zones}
         return types.pop() if len(types) == 1 and None not in types else "mixed"
 
@@ -420,6 +433,7 @@ def _save_refs(cam: Camera, refs: dict) -> None:
     for (line, lane), (grey, edges) in refs.items():
         arrays[f"{line}|{lane}|grey"] = grey
         arrays[f"{line}|{lane}|edges"] = edges
+        arrays[f"{line}|{lane}|geometry"] = _geometry(cam, line, lane)
     path = _refs_path(cam)
     tmp = path.with_suffix(".tmp")
     with open(tmp, "wb") as f:
@@ -434,12 +448,30 @@ def _load_refs(cam: Camera) -> dict:
     try:
         # Opened here, not by np.load: np.load leaves the file open when the zip is truncated.
         with open(path, "rb") as f, np.load(f) as saved:
-            keys = {k.rsplit("|", 1)[0] for k in saved.files}
-            return {tuple(k.split("|", 1)): (saved[f"{k}|grey"].copy(), saved[f"{k}|edges"].copy())
-                    for k in keys}
+            out = {}
+            for k in {k.rsplit("|", 1)[0] for k in saved.files}:
+                line, lane = k.split("|", 1)
+                kept = saved[f"{k}|geometry"] if f"{k}|geometry" in saved.files else None
+                if kept is None or not np.array_equal(kept, _geometry(cam, line, lane)):
+                    log.warning("%s: the loop road of zone %s/%s was learnt on another zone or "
+                                "camera geometry; learning it afresh", cam.id, line, lane)
+                    continue
+                out[(line, lane)] = (saved[f"{k}|grey"].copy(), saved[f"{k}|edges"].copy())
+            return out
     except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as exc:
         log.warning("%s: unreadable loop roads (%s); learning afresh", cam.id, exc)
         return {}
+
+
+def _geometry(cam: Camera, line: str, lane: str) -> np.ndarray:
+    """What a zone's road was learnt on: the zone's quad and the camera's frame size, ground
+    rectangle and masks. LoopCounter.seed() checks only the patch's shape, which a zone redrawn
+    elsewhere can share (pdn-north's lane-1 to lane-3 do), so a road is kept only with this
+    unchanged. A changed mask is stale too: the pixels it covered were learnt as 0
+    (loop.zone_features), and uncovered they read as a car."""
+    quads = [z.quad for z in cam.count_zones if (z.line, z.lane) == (line, lane)]
+    return np.float64([*np.ravel(quads), *cam.frame_size, *np.ravel(cam.ground), cam.width_m,
+                       cam.length_m, *np.ravel(cam.mask)])
 
 
 def cmd_transit(args, cameras) -> int:

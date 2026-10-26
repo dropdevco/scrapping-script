@@ -30,11 +30,12 @@ T0 = datetime(2026, 10, 24, 18, 0, tzinfo=UTC)
 QUAD = [[100, 300], [300, 300], [300, 200], [100, 200]]
 
 
-def cam(cid: str, line: str, lane_type: str | None = None):
+def cam(cid: str, line: str, lane_type: str | None = None, quad=QUAD, frame_size=(640, 360),
+        mask=()):
     return camera_from_dict(cid, {
-        "title": cid, "port_number": "240202", "direction": "north", "frame_size": [640, 360],
-        "lanes": [], "count_zones": [{"line": line, "lane": "l1", "quad": QUAD,
-                                      "lane_type": lane_type}]})
+        "title": cid, "port_number": "240202", "direction": "north",
+        "frame_size": list(frame_size), "lanes": [], "mask": [list(m) for m in mask],
+        "count_zones": [{"line": line, "lane": "l1", "quad": quad, "lane_type": lane_type}]})
 
 
 class FakeCounter:
@@ -138,6 +139,19 @@ class Runner(RunnerSetUp):
         loaded = runner_mod._load_refs(self.a)
         self.assertEqual(list(loaded), [("A", "l1")])
         np.testing.assert_array_equal(loaded[("A", "l1")][0], np.ones((4, 3), np.float32))
+
+    def test_a_road_saved_for_a_zone_since_redrawn_is_not_seeded(self):
+        # seed() checks only the patch's shape, and a zone moved along the road (or a camera now
+        # read at another size) keeps it: the old road would read the new place as a car. So
+        # does a changed mask: the pixels it covered were learnt as 0, and uncovered they would.
+        runner_mod._save_refs(self.a, self.ca.references())
+        moved = cam("cam-a", "A", quad=[[x, y - 40] for x, y in QUAD])
+        resized = cam("cam-a", "A", frame_size=(1280, 720))
+        masked = cam("cam-a", "A", mask=[(0, 240, 640, 10)])
+        for changed in (moved, resized, masked):
+            with self.assertLogs(runner_mod.log, "WARNING"):
+                self.assertEqual(runner_mod._load_refs(changed), {})
+        self.assertEqual(list(runner_mod._load_refs(self.a)), [("A", "l1")])
 
     def test_an_unreadable_saved_road_means_learning_afresh(self):
         runner_mod._refs_path(self.a).write_bytes(b"not an archive")
@@ -362,11 +376,13 @@ class Ticks(unittest.TestCase):
         with unittest.mock.patch.object(TransitRunner, "_counters", lambda self, c: []):
             self.run_ = TransitRunner(self.a, self.b, methods=("loop",))
 
-    def play(self, minutes, ticks, b_down=()):
+    def play(self, minutes, ticks, b_down=(), night=None, seed=1, miss_b=0.0):
         """Frames at both cameras every STEP_S for `minutes`, but none at B over each (from, to)
         minutes in `b_down`; the first frame after reports the reconnect gap. measure() at each
-        minute in `ticks`."""
-        sim = simulate(seed=1, minutes=minutes, steady=True)
+        minute in `ticks`. From minute `night` on no car has a colour, so none can anchor. B's
+        counter misses a share `miss_b` of the cars."""
+        sim = simulate(seed=seed, minutes=minutes, steady=True, colourless_after_min=night,
+                       miss_b=miss_b)
         ra, rb = Replay(sim.a), Replay(sim.b)
         self.run_.counters = {"cam-a": [ra], "cam-b": [rb]}
         due = {round(t * 60): t for t in ticks}
@@ -401,10 +417,53 @@ class Ticks(unittest.TestCase):
         self.assertIn("loop", out[380])
         self.assertNotIn(out[380]["loop"][0].epochs[0].source, transit._SURE)
 
+    def test_after_a_long_outage_at_night_nothing_comes_back_sure(self):
+        # B is down from minute 150 to 345, and from minute 300 no car has a colour. Before the
+        # audit's fixes (e2df7e2) no tick was measured from 340 to 520, and from 530 the count
+        # from before the outage came back "continued": unflagged, 1313-1330 cars between
+        # against a truth of 307-324.
+        _, out = self.play(560, ticks=range(140, 561, 10), b_down=[(150, 345)], night=300)
+        self.assertEqual(out[340], {})                  # B more than the TTL behind
+        for t in range(350, 561, 10):
+            self.assertIn("loop", out[t], t)
+            measured, now = out[t]["loop"]
+            self.assertEqual([e.source for e in measured.epochs if e.source in transit._SURE], [],
+                             t)
+            self.assertTrue(now is None or now.flagged, t)
+
     def test_an_unchanged_start_is_measured_afresh_not_from_its_own_last_guess(self):
         # In the first 3 h the start stays put: each tick must refit from all the anchors so far,
         # as one measurement over the same crossings does.
-        sim, out = self.play(130, ticks=range(20, 131, 10))
+        self.assert_measured_afresh(*self.play(130, ticks=range(20, 131, 10)))
+
+    def test_an_unchanged_start_is_not_disputed_by_its_own_last_measurement(self):
+        # With 3 % of cars missed at B the anchored count moves between ticks by more than its
+        # tolerance. Opened from its own last output, the tick at minute 145 called the anchors
+        # "disputed", flagged, where one measurement over the same crossings has them sure at
+        # 338 against a truth of 337.
+        self.assert_measured_afresh(*self.play(145, ticks=range(10, 146, 5), seed=3,
+                                               miss_b=0.03))
+
+    def test_a_tick_that_cannot_be_measured_leaves_nothing_for_the_next_to_carry(self):
+        # A ValueError (here a stand-in for a count carried to a start a padded gap covers) drops
+        # the last measurement: the next tick starts afresh, not from the one before it, which
+        # could raise the same error tick after tick.
+        real, priors = transit.measure, {}
+
+        def measure(*args, **kw):
+            priors[kw["end"]] = kw["prior"]
+            if kw["end"] == SIM_T0 + timedelta(minutes=195):
+                raise ValueError("a gap covers `start`, so a count given there cannot be continued")
+            return real(*args, **kw)
+
+        with unittest.mock.patch.object(transit, "measure", measure), \
+                self.assertLogs(runner_mod.log, "WARNING"):
+            _, out = self.play(200, ticks=[190, 195, 200])
+        self.assertEqual(out[195], {})
+        self.assertIn("loop", out[200])
+        self.assertIsNone(priors[SIM_T0 + timedelta(minutes=200)])
+
+    def assert_measured_afresh(self, sim, out):
         for t, measured in out.items():
             end = SIM_T0 + timedelta(minutes=t)
             alone = transit.measure([c for c in sim.a if c.at <= end],

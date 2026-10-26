@@ -5,15 +5,32 @@ crosses line B (City `bridgepdn1`, the US half). Draw each line's running count 
 horizontal gap between the two curves is the transit, and the vertical gap is the cars between
 the lines. Put as indices: the k-th car to cross A after the start is the (offset + k)-th to cross
 B, where `offset` is the cars already between the lines at the start. No car has to be recognised
-for this, which matters here. Cars are 52-69 px wide at line A, about 3 in 4 are white, grey,
-black or silver, and published re-identification across viewpoints manages 34-68 % even at full
-resolution (ADR-0014, Context).
+for this, which matters here. Cars are about 30-38 px wide at line A as it is read, at 854x480
+(detect.py; nominal scale, ASSUMPTION), about 3 in 4 are white, grey, black or silver, and
+published re-identification across viewpoints manages 34-68 % even at full resolution
+(ADR-0014, Context).
 
 ASSUMPTION: the stretch from A to B is first-in-first-out with no entries or exits. Nobody joins
-or leaves between the cameras, and nobody moves between lane types (pair one lane type at a time,
-`of_lane_type`). Overtaking breaks "the k-th car" but not the curves: the area between them is
-still the sum of every car's time between the lines, so the mean transit holds, and the median
-holds while the order only changes locally.
+or leaves between the cameras, and nobody moves between lane types. Overtaking breaks "the k-th
+car" but not the curves: the area between them is still the sum of every car's time between the
+lines, so the mean transit holds, and the median holds while the order only changes locally.
+Anchors tolerate less reordering than that (below).
+
+The pairing holds for one lane type at a time (`of_lane_type`), but no zone has a lane type yet:
+the runner pools every lane, and its records say lane_type "mixed" unless every zone at both
+lines has one type. Pooled lane types whose trips differ are paired across types, and p10-p90
+is not the spread of trips. Given the true count, a window's median is near the flow-weighted
+mean of their trips, the trip of none of them: half the cars at 7 min and half at 45 gave
+medians of 23.5-29.1 min, each within 2.5 min of its window's mean trip. An anchored offset
+follows the type that supplies most enclosed anchors, and enclosure favours long trips: over the
+runner's 2 x hi_min a trip must span the epoch's middle. A quarter at 12 min and the rest at 45
+gave medians of 41-45 min and `between` 11-42 cars high, unflagged, even where 20 of 28 anchors
+were 12-min cars, none of them enclosed (offset 247 against 204). Which type wins still varies:
+over 12 seeds with the 12-min cars 4 times as likely distinctive, the offset followed the 45-min
+type in 4 (42-56 cars high) and the 12-min type in 3 (140-160 low, window medians 7-11 min),
+unflagged each time; 5 came out few-anchors. With fewer than MIN_ANCHORS
+enclosed, the offset follows the type with the most anchors and is flagged "few-anchors"
+(simulations, 2026-10-26).
 
 Three things keep the counts honest.
 - Anchors. A few cars look rare enough (a yellow car among the greys) to be matched between the
@@ -27,14 +44,20 @@ Three things keep the counts honest.
   as evidence on its own only when its epoch encloses it: its A crossing more than hi_min before
   the epoch's end and its B crossing at least hi_min after its start. Whichever car each one
   really is, its partner then crossed inside the epoch, and the true pairing competed with the
-  look-alike for a place in the chain. True anchors agree with their own trend line to a car or
-  two. A chain of look-alikes does not: where the true partners cannot match at all (a trip
-  longer than hi_min, or a camera at B that renders colour its own way), it scattered by 100 cars
-  and more in review runs (2026-10-26), and was taken as sure. So the epoch's offset is set by at
-  least MIN_ANCHORS enclosed anchors within OUTLIER_CARS of the enclosed anchors' line, and only
-  when they are at least half of the enclosed ones; the other anchors near that line are kept
-  too. Without them, an epoch's anchors can only confirm an offset carried into it, never set
-  one unflagged.
+  look-alike for a place in the chain. ASSUMPTION: true anchors agree with their own trend line
+  to a car or two. That holds only while cars change places little between A and B, since each
+  anchor's offset is the true one plus the places its car gained or lost. Simulated at 8 cars/min
+  with 45-min trips and exits jittered per car or per lane (2026-10-26), a fresh measurement
+  anchored in 18 of 18 runs where the order changed by up to about 5 places (sd of B place minus
+  A place), in 4 of 15 at 5-9 (up to 6 cars out where it did), and in 0 of 12 at 10 or more. The
+  rest came out "few-anchors", flagged, 0-9 cars from the truth. How far cars reorder at PDN is
+  not measured. A chain of look-alikes does not agree: where the true partners cannot match at
+  all (a trip longer than hi_min, or a camera at B that renders colour its own way), it scattered
+  by 100 cars and more in review runs (2026-10-26), and was taken as sure. So the epoch's offset
+  is set by at least MIN_ANCHORS enclosed anchors within OUTLIER_CARS of the enclosed anchors'
+  line, and only when they are at least half of the enclosed ones; the other anchors near that
+  line are kept too. Without them, an epoch's anchors can only confirm an offset carried into it,
+  never set one unflagged.
 - Drift. A counter that misses or double counts drifts. If A counts a share bias_A too many and B
   a share bias_B, a transit read with a fixed offset is off by about
   bias_A x (minutes since the start, at A) - bias_B x (minutes since the start, at B). Once the
@@ -58,18 +81,21 @@ them their transits (review, 2026-10-24: 162 transits and 13 windows changed at 
 caller measures over a horizon no longer than the TTL and starts each horizon from the last:
 `prior_at(previous, at)` gives the cars between the lines at `at` (none past the end of what was
 measured), a count with no per-vehicle data, and `measure(..., prior=...)` continues from it,
-its own anchors checking it. A sure count its anchors cannot check (at night, with no colour)
-stays sure for CHECK_MAX_MIN after anchors or a given count last set it, and is then flagged
-("carried"): a count's error grows with every car counted (Drift above), and nothing else would
-flag it. A window's by-exit numbers are complete in a horizon once every car that left in it
-entered after the horizon's start and the window is over (window start - hi_min >= start,
-window end <= end), its by-entry numbers once the window lies in the horizon and every car that
-entered in it has left (window start >= start, window end + hi_min <= end). Each Window, and
-each window of the record, says which of the two it is; over a horizon of 2 x hi_min no window
-is both, so a reader takes each half from a record that marks it complete. Right after a gap
-they rest on the carried offset, flagged, until enough of the new epoch is seen for its anchors
-to confirm it (about one transit plus hi_min): a caller that writes a window once must either
-wait that long after a gap or accept a flag a later horizon would clear. LiveTest runs this.
+its own anchors checking it. A sure count stays sure for CHECK_MAX_MIN after anchors (as the
+last of them crossed B) or a given count last set it, and no longer: a count's error grows with
+every car counted (Drift above), and nothing else would flag it. A prior older than that which
+the next measurement's anchors cannot check (at night, with no colour) is "carried" there.
+Inside a measurement, a car that crossed A, or a count read, past that time is flagged, even
+while the old anchors are still measured and keep their epoch "anchors". A window's by-exit
+numbers are complete in a horizon once every car that left in it entered after the horizon's
+start and the window is over (window start - hi_min >= start, window end <= end), its by-entry
+numbers once the window lies in the horizon and every car that entered in it has left (window
+start >= start, window end + hi_min <= end). Each Window, and each window of the record, says
+which of the two it is; over a horizon of 2 x hi_min no window is both, so a reader takes each
+half from a record that marks it complete. Right after a gap they rest on the carried offset,
+flagged, until enough of the new epoch is seen for its anchors to confirm it (about one transit
+plus hi_min): a caller that writes a window once must either wait that long after a gap or
+accept a flag a later horizon would clear. LiveTest runs this.
 
 Signatures are crossing.look()'s form, (saturation x cos hue, saturation x sin hue, value, width
 share), which both counters emit. Two are compared by `colour_distance` against MATCH_DISTANCE,
@@ -81,9 +107,10 @@ silent look-alike anchors. A crossing's `vehicle` class, where the counter knows
 too (`_same_class`).
 
 Everything here is a fixed computation: the same crossings give the same output, whatever order
-they come in, with deterministic tie-breaks and no randomness. Per-vehicle data (signatures,
-anchors, single transits) stays in memory; `record` writes window and epoch numbers only
-(ADR-0014 decision 4).
+they come in, with deterministic tie-breaks and no randomness. Signatures, anchors and single
+transits stay in memory; `record` writes window and epoch numbers only (ADR-0014 decision 4).
+Window and epoch statistics over few cars can give those cars' times or offsets back, though
+never which car had which.
 """
 from __future__ import annotations
 
@@ -119,7 +146,10 @@ RARE_SHARE = 0.05            # distinctive: at most 1 in 20 neighbours look alik
 REANCHOR_HALF_MIN = 30       # a car's offset is the median of the kept anchors within 30 min
 REANCHOR_MIN_ANCHORS = 5     # with fewer kept anchors near it, the trend line gives the offset;
                              # with fewer in the epoch, the line is flat at their median
-OUTLIER_CARS = 3             # an anchor further than this from the median offset disagrees
+OUTLIER_CARS = 3             # an anchor further than this from the median offset disagrees.
+                             # It is also the band in which enclosed anchors must agree with
+                             # their own line (`_epoch`), which assumes cars reorder by a few
+                             # places at most (ASSUMPTION, module docstring)
 MIN_ANCHORS = 3              # fewer enclosed anchors than this do not set an offset, and fewer
                              # anchors than this do not confirm one: a single look-alike would
 INLIER_MIN_CARS = 3          # an anchor this close to the anchors' trend line is always kept,
@@ -133,13 +163,19 @@ ANCHORED_SD = 2.0            # ASSUMPTION: an anchored offset is good to about 2
 AGREE_SDS = 3.0              # anchors agree with a carried offset within OUTLIER_CARS + 3 of its
                              # standard deviations
 CHECK_MAX_MIN = 60           # ASSUMPTION: a sure count stays sure this long after anchors (or a
-                             # given count) last set it. If |bias_A - bias_B| is at most 1 %, its
-                             # transits are then off by up to about 0.6 min (ADR-0014, Drift)
+                             # given count) last set it. A flat offset is then off by about
+                             # bias_A x (60, or 60 + trip after anchors) - bias_B x (60 + trip)
+                             # min (Drift above): with a 55-min trip, 1.2 min for 1 % at B alone
+                             # and 2.7-3.0 for 5 % at both. An anchor line with a slope can carry
+                             # the drift on (0.3 min out at a 4 % difference after 4 h of
+                             # anchors), but after 2.5 h of them the last sure transits' medians
+                             # were up to 2.5 min out at 1 % (simulations, 2026-10-26)
 DRIFT_MIN_DT_MIN = 10        # Theil-Sen pairs closer in time than this say nothing about drift
 DRIFT_MIN_ENDS = 5           # and a slope needs this many anchors at each end of those pairs
 DRIFT_MAX_ANCHORS = 400      # Theil-Sen looks at every pair: thin evenly to this many anchors
 _TICK = timedelta(microseconds=1)
-_SURE = ("given", "anchors", "continued")   # offset sources whose transits are not flagged
+_SURE = ("given", "anchors", "continued")   # offset sources whose transits are not flagged,
+                                            # for CHECK_MAX_MIN after the offset's last check
 
 
 @dataclass(frozen=True)
@@ -147,8 +183,9 @@ class Transit:
     entered_at: datetime         # capture time of the crossing at A
     exited_at: datetime          # capture time of the crossing at B it pairs with
     minutes: float
-    flagged: bool = False        # its epoch's offset is not sure: not given, not anchored, and
-                                 # not continued from either within CHECK_MAX_MIN
+    flagged: bool = False        # its epoch's offset is not sure (not given, anchored or
+                                 # continued), or was last checked more than CHECK_MAX_MIN
+                                 # before the car crossed A
 
 
 @dataclass(frozen=True)
@@ -226,7 +263,8 @@ class Epoch:
     enclosed: int = 0            # enclosed anchors that agree with their line (module docstring)
     incoming: int | None = None  # the offset carried into it (across a gap, or a prior)
     uncertainty: float | None = None   # of `offset`, cars, about one sd; None when not known
-    checked_at: datetime | None = None # when anchors or a given count last set the offset
+    checked_at: datetime | None = None # when anchors or a given count last set the offset;
+                                       # None when it is not sure
 
 
 @dataclass(frozen=True)
@@ -267,7 +305,8 @@ class Window:
     exit_rate: float | None      # cars/min at B over the window's seen time
     between: int | None          # cars between the lines at the window's end
     gap: bool                    # a reading gap at either line overlaps the window
-    flagged: bool                # a gap, or an offset not anchored after the last gap
+    flagged: bool                # a gap, a flagged transit, or an offset not anchored after the
+                                 # last gap or last checked over CHECK_MAX_MIN before its end
     anchors: int                 # kept anchors that crossed A in the window
     anchor_residual: float | None    # their median offset minus the epoch's offset at its start:
                                      # drift shows as a trend
@@ -323,7 +362,7 @@ def transits(a: Sequence[Crossing], b: Sequence[Crossing], offset: int,
     Both lists must cover the same time from `start` (None: the lists are already cut to it).
     A transit that comes out negative is kept: it says the offset is wrong."""
     ta, tb = cumulative(a, start), cumulative(b, start)
-    return _pair(ta, tb, [offset] * len(ta), flagged=False)
+    return _pair(ta, tb, [offset] * len(ta), [False] * len(ta))
 
 
 def now(a: Sequence[Crossing], b: Sequence[Crossing], offset: int, at: datetime,
@@ -334,9 +373,9 @@ def now(a: Sequence[Crossing], b: Sequence[Crossing], offset: int, at: datetime,
 
 
 def _pair(ta: Sequence[datetime], tb: Sequence[datetime], offsets: Sequence[int],
-          flagged: bool) -> list[Transit]:
+          flags: Sequence[bool]) -> list[Transit]:
     out = []
-    for k, (entered, off) in enumerate(zip(ta, offsets), start=1):
+    for k, (entered, off, flagged) in enumerate(zip(ta, offsets, flags), start=1):
         j = off + k
         if 1 <= j <= len(tb):
             exited = tb[j - 1]
@@ -487,10 +526,9 @@ def _check_scale(crossings: Sequence[Crossing]) -> None:
 
 def _same_class(p: Crossing, q: Crossing) -> bool:
     """Whether two crossings may be one vehicle by class: an unknown class matches anything.
-    crossing.same_vehicle's rule, repeated so that the maths imports no image library.
-    ASSUMPTION: YOLOX gives a vehicle the same class at A, where it sees the back, and at B,
-    where it sees the front. A pickup read as a car at one and a truck at the other loses its
-    anchor."""
+    ASSUMPTION: YOLOX gives a vehicle the same class at A and at B, which both see it from
+    behind but at very different sizes (about 30-38 px wide at A, 150-400 px at B). A pickup
+    read as a car at one and a truck at the other loses its anchor."""
     return p.vehicle is None or q.vehicle is None or p.vehicle == q.vehicle
 
 
@@ -680,6 +718,10 @@ def measure(a: Sequence[Crossing], b: Sequence[Crossing], lo_min: float, hi_min:
       used, flagged.
     - "unknown": no offset and no transits.
 
+    Whatever the source, a car that crossed A more than CHECK_MAX_MIN after the epoch's offset
+    was last checked (Epoch.checked_at) has its transit flagged, and `now_from` at such a time is
+    flagged too.
+
     A Gap with no `after` came before the first frame: counting starts after it, so it cuts
     nothing."""
     if offset is not None and prior is not None:
@@ -729,7 +771,7 @@ def measure(a: Sequence[Crossing], b: Sequence[Crossing], lo_min: float, hi_min:
         epochs.append(epoch)
         if epoch.offset is not None:
             eta, etb = [c.at for c in ea], [c.at for c in eb]
-            out += _pair(eta, etb, _offsets(epoch, eta), flagged=epoch.source not in _SURE)
+            out += _pair(eta, etb, _offsets(epoch, eta), [_unsure(epoch, t) for t in eta])
     return Measurement(method, start, end, tuple(epochs), tuple(out), tuple(ta), tuple(tb),
                        tuple(ga), tuple(gb), hi_min)
 
@@ -740,8 +782,9 @@ def _epoch(ea: Sequence[Crossing], eb: Sequence[Crossing], s: datetime, e: datet
     """One epoch's offset and where it came from (see `measure`)."""
     found = _chain(_scored(ea, eb, lo_min, hi_min), ea, eb)
     enclosed = _enclosed(found, s, e, hi_min)
-    # True anchors agree with their own line to a car or two. A chain of look-alikes scatters
-    # by tens of cars, and INLIER_MADS of its own deviations would still take it all in.
+    # Without much reordering between A and B (ASSUMPTION, module docstring), true anchors
+    # agree with their own line to a car or two. A chain of look-alikes scatters by tens of
+    # cars, and INLIER_MADS of its own deviations would still take it all in.
     own, own_near = _fit(enclosed, s, extra=found) if enclosed else (None, ())
     agree = [x for x in enclosed if abs(x.offset - _on(own, s, x.entered_at)) <= OUTLIER_CARS]
     if 2 * len(agree) < len(enclosed):
@@ -799,6 +842,15 @@ def _tolerance(uncertainty: float) -> float:
     return OUTLIER_CARS + AGREE_SDS * uncertainty
 
 
+def _unsure(epoch: Epoch, at: datetime) -> bool:
+    """Whether what `epoch` gives at `at` (a car crossing A then, or the count then) is not sure:
+    its offset is not, or anchors or a given count last set it more than CHECK_MAX_MIN before.
+    Anchors are found afresh while they stay in a measurement (up to the signatures' TTL), so
+    without this they kept every car after them sure: 16 cars out at night in LiveTest."""
+    return (epoch.checked_at is None             # set just when the offset is sure
+            or at - epoch.checked_at > timedelta(minutes=CHECK_MAX_MIN))
+
+
 def offset_at(epoch: Epoch, at: datetime) -> int | None:
     """The offset a car crossing A at `at` takes. Where the epoch's offsets come from its
     anchors: the median of the kept anchors within REANCHOR_HALF_MIN of it, or the anchors'
@@ -833,8 +885,7 @@ def now_from(m: Measurement, at: datetime) -> Now:
         return Now(at, None, None, None, flagged=True)
     ta = m.a_times[bisect_left(m.a_times, epoch.start):]
     tb = m.b_times[bisect_left(m.b_times, epoch.start):]
-    return _now(ta, tb, offset_at(epoch, at), at, epoch.start,
-                flagged=epoch.source not in _SURE)
+    return _now(ta, tb, offset_at(epoch, at), at, epoch.start, flagged=_unsure(epoch, at))
 
 
 def prior_at(m: Measurement, at: datetime) -> Prior | None:
@@ -884,7 +935,7 @@ def windows(m: Measurement, width_min: float = WINDOW_MIN) -> list[Window]:
         seen_b = _minutes(seen1 - seen0) - _overlap_s(m.gaps_b, seen0, seen1) / 60
         exited = _count(m.b_times, w0, w1)
         gap = _overlap_s(m.gaps_a, w0, w1) > 0 or _overlap_s(m.gaps_b, w0, w1) > 0
-        uncertain = any(e.start < w1 and e.end > w0 and e.source not in _SURE
+        uncertain = any(e.start < w1 and e.end > w0 and _unsure(e, min(w1, e.end))
                         for e in m.epochs)
         sx, sn = _stats(by_exit[k]), _stats(by_entry[k])
         res = sorted(residuals[k])
@@ -902,8 +953,9 @@ def windows(m: Measurement, width_min: float = WINDOW_MIN) -> list[Window]:
 
 def record(m: Measurement, wins: Sequence[Window], current: Now | None = None, *,
            lane_type: str | None = None) -> dict:
-    """The derived numbers for the JSONL log. No per-vehicle field: no signature, no single
-    crossing, anchor or transit, only counts and statistics per window and per epoch."""
+    """The derived numbers for the JSONL log, counts and statistics per window and per epoch.
+    No field names a vehicle: no signature, index or crossing time. Statistics over few transits
+    or anchors can give their values back, never which car had which."""
     return {
         "kind": "transit",
         "method": m.method,
@@ -914,8 +966,8 @@ def record(m: Measurement, wins: Sequence[Window], current: Now | None = None, *
         "transits_flagged": sum(1 for t in m.transits if t.flagged),
         "epochs": [_epoch_record(e) for e in m.epochs],
         "windows": [_window_record(w) for w in wins],
-        "now": None if current is None else {
-            "at": _iso(current.at), "between": current.between,
+        "now": None if current is None else {   # to the minute: `at` may be a crossing's time
+            "at": _iso(_floor(current.at, timedelta(minutes=1))), "between": current.between,
             "exit_rate": _r(current.exit_rate, 3), "minutes": _r(current.minutes),
             "flagged": current.flagged},
     }
@@ -941,8 +993,11 @@ def _epoch_record(e: Epoch) -> dict:
     }
 
 
-MIN_STATS_N = 3              # fewer transits than this in a window: no statistics are written,
-                             # so a record never carries what is in effect one car's trip
+MIN_STATS_N = 3              # fewer transits than this in a window: no median or percentiles.
+                             # This is not anonymity: at 3 they give all three times back, and a
+                             # window rewritten each minute as it fills can be differenced. No
+                             # written time is tied to a car (no signature, index or crossing
+                             # time of its own)
 
 
 def _window_record(w: Window) -> dict:

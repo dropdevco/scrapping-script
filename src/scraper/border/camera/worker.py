@@ -105,7 +105,8 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
     - queued: the 15-minute rolling wait and its range ("≈" whenever the booth is out of view:
       the road to it is timed at the visible speed, and its distance or the camera's scale may
       be unverified too). A line running out of view has no high end; it is a floor, stated at
-      its range's low end ("≥"), only when the booth is in view;
+      its range's low end ("≥"), only when the booth is in view, and otherwise an estimate that
+      says the line past the view is not counted;
     - a minute with a line but too little movement to time it: this minute's line, timed at
       the last 15 minutes' speed. Never an older line's wait: a short line at the booth is
       always too short to time, and showing the wait of a long line from ten minutes ago
@@ -166,6 +167,10 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
         why = "not enough movement to measure"
     if est.beyond_view:
         high = None                     # the line runs on past the view: no high end
+        if kind == "estimate":
+            # The minutes stop at the edge of the view. A floor says so in its "at least"; an
+            # estimate has to name it, or "≈ 47" reads as the whole line's wait.
+            reasons.append("the line past the view not counted")
     approx = bool(reasons) and kind in ("estimate", "floor", "upper")
     value, range_text = _display(kind, minutes, low, high, approx)
     bits = []

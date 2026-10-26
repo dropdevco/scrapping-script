@@ -42,7 +42,7 @@ never counted there. Frames must come in capture order (hls and the runner drop 
 stamp that does not move forward, or frames more than MAX_STEP_S apart, drop the cars in
 flight and are reported by gaps(), to be passed to transit with the reader's own gaps. A car
 already in a zone when counting starts or resumes after any gap came in unseen and is never
-counted, so the time until it has left is reported by gaps() as well (_track).
+counted, as with the detector.
 
 Each crossing carries a signature of how the car looked while it was in the zone: its body's
 mean colour as a point on the colour wheel (saturation x cos and x sin of hue), its median
@@ -119,15 +119,23 @@ Where it fails, plainly:
   rendered with the other zone empty, it is counted once; with cars in the other zone it may
   be counted in neither (not rendered). A car straddling two zones carries only its own
   zone's part of itself into its signature (a narrower width, part of its colour).
-- After any gap, a car already in a zone is not counted (above). The gap reported for it runs
-  to the first car counted that came in after it, or to the zone seen clear, so it also covers
-  a car at the near edge that is counted: rendered, a car standing 40 s after a gap got a gap of
-  40-43 s whether or not it was counted.
-- Not rendered, so not measured: a car seen from behind hides about h_car x d / (h_cam - h_car)
-  of road ahead of it, so gaps shrink with distance from the camera; cars with no visible
-  outline or shadow against the road; motorbikes (narrower than ROW_SPAN_M), and two side by
-  side (one car); night (headlight pools, no colour for the signature); compression noise;
-  zones of one line drawn with unequal lengths (no lane-line rule between them).
+- After any gap, a car already in a zone is not counted (above), and no gap is reported for
+  it, as detect.py reports none. transit starts a new epoch at every gap, whose offset is set
+  afresh there, so such a car shifts only that offset. Simulated (the runner on a steady 55-min
+  queue, the cars missed in the 45 s after a 30 s outage, 2026-10-26 review): a gap for them
+  made no unflagged number closer to the truth at either line, and at B it dropped, flagged or
+  thinned 25-61 outputs that were right without it. ASSUMPTION: synthetic crossings, not
+  rendered.
+- A car seen from behind hides about h_car x d / (h_cam - h_car) of road ahead of it, so gaps
+  shrink with distance from the camera. The rendered cars are flat; with the road ahead of each
+  bumper painted as part of the car (2026-10-26 audit, stop-and-go), cars were counted with
+  1.1 m of road showing between them and missed with 0.5 m. At line A a stopped car hides
+  roughly 1.5-2.5 m (ASSUMPTION: pdn-north's pose from its unverified 10.5 x 30 m rectangle,
+  typical car shapes), so stopped gaps under about 2.5-3.5 m may read as one car there.
+- Not rendered, so not measured: cars with no visible outline or shadow against the road;
+  motorbikes (narrower than ROW_SPAN_M), and two side by side (one car); night (headlight
+  pools, no colour for the signature); compression noise; zones of one line drawn with unequal
+  lengths (no lane-line rule between them).
 - A camera with no ground rectangle (the City's bridgepdn1) is read with an assumed lane width
   and square pixels (_zone_metres): a foreshortened zone reads short and is refused.
 """
@@ -233,7 +241,8 @@ class _Look:
 
     def signature(self) -> tuple[float, ...] | None:
         """(saturation x cos hue, saturation x sin hue, value, width share), each on a 0-1 scale
-        (the first two -1 to 1), the form transit's default distance compares.
+        (the first two -1 to 1), the form crossing.look() gives; transit.colour_distance compares
+        its first three parts.
 
         The first two are the body's mean colour on the colour wheel: hue as an angle, how
         coloured as the distance from the centre. Grey, white and black cars, whose hue is noise,
@@ -268,8 +277,6 @@ class _Loop:
     last_sample: datetime | None = None
     new_samples: int = 0
     agreeing: int = 0                        # refreshes running whose whole bank agreed: _sample()
-    blind: datetime | None = None            # since the frame counting resumed with a car in the
-                                             # zone that may never be counted: see _track()
     rears: list[_Rear] = field(default_factory=list)
     last_profile: np.ndarray | None = None   # last frame's structure along the patch
     last_rows: np.ndarray | None = None      # last frame's occupied patch rows, near end first
@@ -555,9 +562,8 @@ class LoopCounter:
     def gaps(self) -> list[Gap]:
         """The gaps this counter found since the last call, and cleared: frames more than
         MAX_STEP_S apart, or a stamp that did not move forward, where every car in flight was
-        forgotten as at a gap the reader reports; and, after any gap, the time until a car that
-        was already in a zone when counting resumed has left it (_track). They belong with the
-        reader's gaps for this line (transit.measure's gaps_a / gaps_b)."""
+        forgotten as at a gap the reader reports. They belong with the reader's gaps for this
+        line (transit.measure's gaps_a / gaps_b)."""
         out, self._gaps = self._gaps, []
         return out
 
@@ -735,29 +741,11 @@ class LoopCounter:
                 out.append(Crossing(self.camera.id, lp.zone.line, lp.zone.lane, at, self.method,
                                     r.look.signature()))
         lp.rears = sorted((r for r, _ in live), key=lambda r: r.pos)
-        # A car in the zone when counting starts or resumes came in unseen and is not counted,
-        # whether its rear shows then or later. Until each has left, the line's count may be
-        # short: a gap, to the first car counted that came in after them, which is behind them
-        # all, or to the zone seen clear. Rendered: a car standing 40 s after a gap crossed
-        # 42 s after it, long after transit's GAP_PAD_S.
-        if lp.last_rows is None:
-            lp.blind = at if occ[zone].any() else None
-        elif lp.blind is not None and (out or not occ[zone].any()):
-            self._unblind(lp, at)
         return out
 
-    def _unblind(self, lp: _Loop, until: datetime | None) -> None:
-        if lp.blind is not None and until is not None and until > lp.blind:
-            self._gaps.append(Gap(lp.blind, (until - lp.blind).total_seconds(),
-                                  f"zone {lp.zone.line}/{lp.zone.lane}: a car in it when "
-                                  f"counting resumed"))
-        lp.blind = None
-
     def _forget(self) -> None:
-        """Forget every car in flight, and close any gap still open since a resume at the last
-        frame seen."""
+        """Forget every car in flight."""
         for lp in self._loops:
-            self._unblind(lp, self._last_at)
             lp.rears, lp.last_profile, lp.last_rows = [], None, None
             lp.moves.clear()
 

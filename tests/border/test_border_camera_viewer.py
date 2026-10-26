@@ -22,6 +22,7 @@ from scraper.border.camera.worker import lane_summary
 
 NOW = datetime(2026, 10, 19, 23, 0, tzinfo=UTC)
 HIDDEN = "road out of view assumed to move like the line in view"
+TAIL = "the line past the view not counted"
 
 
 def est(state, queue=40.0, speed=0.5, beyond=False):
@@ -116,6 +117,7 @@ class LaneSummary(unittest.TestCase):
         self.assertEqual(out["display_value"], "≥ 13")
         self.assertIsNone(out["high_min"])
         self.assertIn("at least", out["display_detail"])
+        self.assertNotIn(TAIL, out["display_detail"])   # the "at least" already says it
 
     def test_a_queue_running_out_of_view_with_the_booth_out_of_view_is_no_floor(self):
         # 365 m out of view timed at the visible line's speed: if that stretch moves faster
@@ -130,6 +132,8 @@ class LaneSummary(unittest.TestCase):
         self.assertNotIn("≥", out["display_value"])
         self.assertNotIn("at least", out["display_detail"])
         self.assertIn(HIDDEN, out["display_detail"])
+        # With no "at least", the page must say the minutes stop at the edge of the view.
+        self.assertIn(TAIL, out["approx_reasons"])
 
     def test_a_minute_too_short_to_time_uses_this_minutes_line_not_an_older_wait(self):
         # 15 minutes ago a long line gave 12 min; now a 30 m line sits at the booth, too short
@@ -154,6 +158,7 @@ class LaneSummary(unittest.TestCase):
         self.assertEqual(out["display_value"], f"≈ {round((400 + 60) / 0.5 / 60)}")
         self.assertIsNone(out["high_min"])
         self.assertNotIn("range", out["display_detail"])
+        self.assertIn(TAIL, out["display_detail"])
 
     def test_a_minute_with_no_line_and_too_few_frames_says_so(self):
         out = lane_summary(est("insufficient", queue=0, speed=None), lane(0), {"speed_m_s": 0.5},

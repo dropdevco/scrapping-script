@@ -262,7 +262,11 @@ class ExactRecoveryTest(unittest.TestCase):
         sim = simulate()
         m = measure(sim.a, sim.b, LO_MIN, HI_MIN, start=T0, offset=sim.offset)
         self.assertEqual([e.source for e in m.epochs], ["given"])
-        self.assertEqual(m.transits, tuple(transits(sim.a, sim.b, sim.offset, start=T0)))
+        # The same transits. A given count is sure for CHECK_MAX_MIN, as one anchors set is: a
+        # counter that drifts takes a fixed offset further out with every car (DriftLawTest).
+        checked = T0 + timedelta(minutes=CHECK_MAX_MIN)
+        self.assertEqual(m.transits, tuple(replace(t, flagged=t.entered_at > checked)
+                                           for t in transits(sim.a, sim.b, sim.offset, start=T0)))
 
     def test_now_counts_the_cars_between(self):
         sim = simulate()
@@ -548,7 +552,9 @@ class RecordTest(unittest.TestCase):
         sim = simulate(gap_b=GapTest.GAP)
         m = measure(sim.a, sim.b, LO_MIN, HI_MIN, gaps_b=sim.gaps_b, start=T0)
         wins = windows(m)
-        rec = record(m, wins, now_from(m, T0 + timedelta(minutes=359)), lane_type="general")
+        # The runner reads now at its newest frame, which can be a crossing's own time.
+        last = max(c.at for c in sim.a + sim.b if c.at.second)
+        rec = record(m, wins, now_from(m, last), lane_type="general")
         text = json.dumps(rec)                           # serialisable as it is
         self._walk(rec, "")
         self.assertEqual({k for w in rec["windows"] for k in w}, self.ALLOWED["windows"])
@@ -811,6 +817,32 @@ class LiveTest(unittest.TestCase):
         for end_min, sources, flagged, _ in late:
             self.assertTrue(flagged, end_min)
             self.assertFalse(any(s in SURE for s in sources), (end_min, sources))
+        # While they are still inside, they keep the epoch "anchors", but not its count sure:
+        # the horizon ending at 240 read 16 cars too many, unflagged, before that was fixed.
+        for end_min, _, flagged, _ in seen:
+            if end_min > last_b + CHECK_MAX_MIN:
+                self.assertTrue(flagged, end_min)
+
+    def test_anchors_still_measured_do_not_keep_a_count_sure(self):
+        # The same night in one measurement. Its last anchors crossed B before 150 min, and
+        # they kept every car's transit and every count after them sure, to the end of the run.
+        # A car that crossed A, and a count read, more than CHECK_MAX_MIN after the last of them
+        # crossed B is flagged. The epoch itself stays "anchors".
+        sim = simulate(steady=True, colourless_after_min=150.0, miss_a=0.03)
+        m = measure(sim.a, sim.b, LO_MIN, HI_MIN, start=T0)
+        self.assertEqual([e.source for e in m.epochs], ["anchors"])
+        limit = m.epochs[0].checked_at + timedelta(minutes=CHECK_MAX_MIN)
+        truth = {c.at: sim.true_minutes(c) for c in sim.a}
+        late = [t for t in m.transits if t.entered_at > limit]
+        print(f"\nnight in one measurement: {len(late)} transits past {limit:%H:%M}, median "
+              f"error {_median(sorted(t.minutes - truth[t.entered_at] for t in late)):+.2f} min")
+        self.assertGreater(len(late), 100)
+        self.assertTrue(all(t.flagged for t in late))
+        self.assertFalse(any(t.flagged for t in m.transits if t.entered_at <= limit))
+        self.assertFalse(now_from(m, limit).flagged)
+        self.assertTrue(now_from(m, limit + TICK).flagged)
+        wins = windows(m)
+        self.assertEqual([w.flagged for w in wins], [w.end > limit for w in wins])
 
 
 class SignatureScaleTest(unittest.TestCase):
@@ -843,7 +875,9 @@ class LookAlikeTest(unittest.TestCase):
     an epoch must come out flagged, never sure and wrong. Before the fix, most seeds gave
     "anchors" 33-588 cars out, unflagged. Signatures are in crossing.look()'s form here."""
 
-    SEEDS = range(1, 9)
+    SEEDS = (*range(1, 9), 14)              # 14: at 110 min 3 of 7 enclosed look-alikes agree
+                                            # with their own line, and only "at least half"
+                                            # keeps it flagged (the only such seed in 1-60)
     LO, HI = 0.5, 90.0                      # the runner's bounds
 
     def outcomes(self, **kw) -> list[tuple[int, str, int | None]]:
@@ -888,10 +922,13 @@ class WindowTest(unittest.TestCase):
         exits = [w for w in wins if w.by_exit_complete]
         entries = [w for w in wins if w.by_entry_complete]
         self.assertTrue(exits and entries)
+
+        def numbers(s):         # not the flags: each count was given at its own start
+            return s.n, s.median, s.p10, s.p90
         for w in exits:
-            self.assertEqual(w.by_exit, batch[w.start].by_exit, w.start)
+            self.assertEqual(numbers(w.by_exit), numbers(batch[w.start].by_exit), w.start)
         for w in entries:
-            self.assertEqual(w.by_entry, batch[w.start].by_entry, w.start)
+            self.assertEqual(numbers(w.by_entry), numbers(batch[w.start].by_entry), w.start)
         short = [w for w in wins if not w.by_exit_complete
                  and w.by_exit.n < batch[w.start].by_exit.n]
         self.assertTrue(short)                 # the marks are not idle: those windows lack cars

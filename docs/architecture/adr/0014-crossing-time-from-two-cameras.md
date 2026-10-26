@@ -40,10 +40,11 @@ measured:
   drop out if every frame is stamped with its capture time, never its arrival time. Today's reader does
   the opposite: it times frames by counting them and stamps a reading when the read ends.
 - **Matching each car by its looks is weak here.** Across viewpoints, published re-identification falls
-  from 92 % to 34-68 % at full resolution. Our cars are 50-70 px wide at line A, about 3 in 4 are a
-  neutral colour, colour is lost at night, and lane types mix. **Counting** cars at two lines and reading
-  the transit from the gap between the two running totals is far easier. A few distinctive cars matched
-  for certain keep the totals honest.
+  from 92 % to 34-68 % at full resolution. Our cars are about 30-38 px wide at line A as it is read, at
+  854x480 (45-57 px at 1280x720; nominal scale, ASSUMPTION), about 3 in 4 are a neutral colour, colour is
+  lost at night, and lane types mix. **Counting** cars at two lines and reading the transit from the gap
+  between the two running totals is far easier. A few distinctive cars matched for certain keep the
+  totals honest.
 
 ## Decision
 
@@ -102,17 +103,44 @@ measured:
   back, and Stanton needs the City's.
 - **Drift.** Counts drift. Transit error grows with (count bias at A − count bias at B) × hours since the
   last anchor. Both methods must be checked against hand counts, and later GPS crossings, before any
-  number is published.
+  number is published. So a count stays sure for `CHECK_MAX_MIN`, 60 min (ASSUMPTION), after anchors (as
+  the last of them crossed B) or a given hand count last checked it, and is flagged after that. This holds
+  inside one measurement, not only for a count carried from one horizon to the next: each transit is
+  judged by when its car crossed A, and a cars-between reading or a window by its time. A given count ages
+  the same way. Found on 2026-10-26: in simulation, anchors from before dark kept a night's count sure while
+  it was 16 cars out.
 - **Grading compares like with like.** A transit grades the queue reader only on the stretch both
   measure: the reader's A→B is distance(A, B) ÷ its queue speed, which needs a measured A–B distance
   (none is measured yet). Full waits are graded only against GPS-timed crossings. A full wait built
   from a transit plus the reader's own tail before A and stretch after B shares those parts with the
   reader, so the reader's errors there would cancel and go unseen. Found by the audit on 2026-10-26.
-- **A 90-minute ceiling.** Signatures are kept at most 3 h. An anchor is only trusted when both ends of the
-  trip lie inside the measured span with the ceiling to spare, so the slowest trip from A to B that can be
-  anchored is 90 min, not FHWA's 120. A→B is the middle of the bridge, not the whole wait (ASSUMPTION that
-  it stays under that). Found by the integration review on 2026-10-25: at 120, no trip under 60 min, PDN's
-  ~47 among them, could ever anchor.
+- **A 90-minute ceiling.** Signatures are kept at most 3 h. An anchor sets an offset on its own only when
+  both ends of its trip lie inside the measured span with the ceiling to spare, so a trip of T min needs an
+  epoch longer than 2 × ceiling − T, and no epoch is longer than 3 h. Half of that, 90 min, is the largest
+  ceiling at which a trip up to it can set an offset at all (found by the integration review on
+  2026-10-25: at FHWA's 120, no trip under 60 min could ever anchor). That is necessary, not enough: such
+  an anchor must cross A within a stretch epoch − 2 × ceiling + T wide, so at most T min, and a short trip
+  has few anchors there. In simulation (one 3 h measurement, 1 in 10 cars distinctive, ASSUMPTION), 2-min
+  trips set an offset in 0 of 10 runs, 3-min in 2 of 10 and 5-min in 7 of 10. Their anchors can still
+  confirm a count carried in, and the runner chains each horizon to the last: carried in sure, 2-, 3- and
+  5-min trips stayed anchored in 10 of 10 runs. So short trips stay flagged only where the count starts
+  afresh: after a restart, or where none can be carried in. A trip longer than the ceiling cannot anchor,
+  since its true partner is outside the search; its epoch comes out flagged, not anchored wrong
+  (ASSUMPTION, from simulation only: with 110- and 150-min trips, 0 of 160 epochs sure and wrong, against
+  60 before the 2026-10-26 audit). That A→B, the middle of the bridge and not the whole wait, stays under
+  90 min is an ASSUMPTION until a hand-timed or GPS-timed A→B exists.
+- **One lane type per pair.** Counting needs no identity, but it does need first-in-first-out within what is
+  counted: the k-th car at A is the (offset + k)-th at B only among cars of one lane type. No zone has a
+  confirmed lane type, so every lane is pooled and the records say `lane_type` "mixed". Pooled, with the
+  true count given, a window's median comes out near the flow-weighted mean of the types' trips. The
+  runner gives no count, and anchored, the offset follows one type's trip: the type with most enclosed
+  anchors, not the type with most anchors. Enclosure favours longer trips (an enclosed anchor crosses A
+  within a stretch at most one trip wide), but which type wins varies by run. With a quarter of the cars at
+  12 min and the rest at 45, and the 12-min cars 4 times as likely distinctive (they supplied most anchors
+  in 12 of 12 runs), the offset followed the 45-min type in 4 runs (the cars between 42-56 too high), the
+  12-min type in 3 (140-160 too low), and came out flagged in 5. Every anchored run was unflagged
+  (simulation, 2026-10-26). Measuring per lane type needs each lane at A and each column at B mapped to
+  general, Ready or SENTRI, and to know whether the lanes split before A or after B (an owner task).
 - **Stream failures are gaps.** These are all gaps at that line, never zero cars:
   - an encoder restart (a timeline cut);
   - a frozen picture;

@@ -6,6 +6,7 @@ aggregate a window. Tolerances are what a crosser would notice, not what flatter
 """
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 import unittest
@@ -358,9 +359,9 @@ class SavedReferences(unittest.TestCase):
         patcher = unittest.mock.patch.dict(os.environ, {"CAMERA_STATE_DIR": d.name})
         patcher.start()
         self.addCleanup(patcher.stop)
-        raw = raw_camera()
-        raw["lanes"].append({**raw["lanes"][0], "lane": "car-2"})
-        self.cam = camera_from_dict("two", raw)
+        self.raw = raw_camera()
+        self.raw["lanes"].append({**self.raw["lanes"][0], "lane": "car-2"})
+        self.cam = camera_from_dict("two", self.raw)
 
     def learnt(self):
         reader = CameraReader(self.cam)
@@ -379,6 +380,21 @@ class SavedReferences(unittest.TestCase):
         self.assertEqual(reader.prepare(), ["car"])
         self.assertFalse(stale.exists())
         self.assertIn("car-2", reader.references)
+
+    def test_a_road_redrawn_to_a_strip_of_the_same_size_is_relearnt(self):
+        # Only the strip's pixel size was compared, so a road learnt for one stretch was reused
+        # for another of the same size. A changed mask is the same: pixels it used to cover were
+        # learnt black, and uncovered they read as a car.
+        moved, masked = copy.deepcopy(self.raw), copy.deepcopy(self.raw)
+        moved["lanes"][0]["along"] = [0.1, 1.1]                # car, 6 m further along the road
+        masked["mask"] = [[0, 300, 640, 40]]
+        for raw, relearnt in ((moved, ["car"]), (masked, ["car", "car-2"])):
+            with self.subTest(relearnt=relearnt):
+                self.learnt().save()
+                cam = camera_from_dict("two", raw)
+                self.assertEqual(Strip(cam, cam.lanes[0], FRAME).size,
+                                 Strip(self.cam, self.cam.lanes[0], FRAME).size)
+                self.assertEqual(CameraReader(cam).prepare(), relearnt)
 
     def test_one_missing_lane_leaves_the_others_learnt(self):
         self.learnt().save()

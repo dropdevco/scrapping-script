@@ -38,8 +38,10 @@ order to numpy's sort.
 
 Small cars get more pixels: the model sees only the region around the camera's count zones,
 not the whole frame. That region is cut into overlapping tiles when it is much wider than tall
-and its cars would otherwise be small in the 640x640 input. At pdn-north the cars are 52-69 px
-wide at 854x480 where they enter, so tiles magnify them. Its drawn line A gives a region of
+and its cars would otherwise be small in the 640x640 input. At pdn-north a car 1.6-2.0 m wide is
+52-66 px wide at 1280x720 where it comes into the picture and 45-57 px at line A, two thirds of
+that at 854x480 (through its ground rectangle, whose scale is unverified: ASSUMPTION), so tiles
+magnify them. Its drawn line A gives a region of
 852 x 293 px at 1280x720 and 568 x 195 px at 854x480, each cut into two tiles, scaled 1.28x
 and 1.92x respectively, so a lane is about 127 px wide in the model's input at either size
 (cameras.json through `plan_tiles`, 2026-10-26). At bridgepdn1 the cars are 150-400 px wide
@@ -65,12 +67,17 @@ below, it missed at most 2 cars in any case from a crawl to 8 m/s (66-435 cars e
 at 12 m/s, and counted 1 car twice in 6810. The first version missed 3-22 % at 8 m/s and
 28-50 % at 12 m/s. With 1 box in 4 missed it misses 7-12 % at 8 m/s and 22-28 % at 12 m/s. So
 the yolox count is not to be trusted above 8 m/s (29 km/h), nor at a zone that breaks the rule.
-In a creeping queue it still counts some cars twice. With 1 box in 4 missed: 3 in 66 at each
-pinhole camera and 14 in 66 on the flat rendered lane (the first version: 1 at bridgepdn1, 12 at
-pdn-north, 21). Where boxes jitter by 1.5 px whatever their size: 12 in 66 on pdn-north's
-30-40 px boxes and 26 in 66 on the rendered lane's 8 px tall ones (the first version: 14 and
-22). There the car ahead is a third of a box further on and the jitter a tenth of a box. Hand
-counts have to settle both before a transit is built on this count.
+In a creeping queue it can count cars twice, and lose others. Rebuilt on 2026-10-26 with the
+test suite's `drive` (0.5 m/s for 5 minutes, seeds 11-13, 66 cars that must be counted; zones
+25-29 m out at pdn-north's pinhole, boxes 37-43 px at 854x480, and 30-34 m out at bridgepdn1's,
+49-55 px). Among those 66, with 1 box in 4 missed, 2 % jitter and scores 0.15-0.9: 0 twice
+and 2 lost at pdn-north, 1 twice and 2 lost at bridgepdn1. Where boxes jitter by 1.5 px
+whatever their size (the suite's Road with jitter_px), with 1 box in 10 missed and scores
+0.2-0.9: 9 twice and 18 lost at pdn-north (14 % short), 5 twice and 11 lost at bridgepdn1 (9 %
+short). Cars the run allows but does not require added 0-3 counts on top. In that queue the
+car ahead is about 0.4 of a box further on, and 1.5 px of jitter is about twice a frame's
+creep (0.8 px). How much real YOLOX boxes jitter has not been measured. Hand counts have to
+settle both before a transit is built on this count.
 
 The rule for drawing zones: at the highest speed expected, a car must be seen whole, inside the
 model's region, in at least 3 frames before it reaches a zone's near edge. When 1 frame in 3
@@ -79,6 +86,15 @@ road. At bridgepdn1 a zone 12-15 m out leaves about one frame, since the picture
 metres from the pole: exact boxes were all counted there, but the mildly noisy detector lost
 5 % of cars at 5 m/s, 18 % at 8 m/s and 32 % at 12 m/s. A zone 30-34 m out lost 1 in 435 at
 8 m/s and 5 % at 12 m/s.
+
+pdn-north's line A as drawn breaks the rule above about 6 m/s: it has about 9.3 m of road in
+view below its near edge (nominal metres through the unverified ground rectangle). The same
+detector, seed 11 for 3 minutes (`drive`'s defaults), a 1.5 m zone 9.1 m past where the frame's
+bottom meets a car's rear (about 16.5-18.0 m from the pole), lost 1 of 68 cars at 4 m/s, 2 of 80
+at 6, 8 of 87 at 8 and 19 of 95 at 12; with 18 m in view, 0, 0, 0 and 2 of 96. Over 3 seeds x
+5 minutes the 9.1 m zone lost 30 of 435 at 8 m/s and 105 of 477 at 12 (2026-10-26). So the yolox
+count at line A is short in free flow, and a transit reads that as drift, until line A is
+redrawn (cameras.json's notes; free-flow speeds there are unmeasured: ASSUMPTION).
 
 Privacy (ADR-0014 decision 4): frames are analysed in memory and never written. A crossing's
 colour comes from the upper middle of the box, downsampled to 4 x 4 pixels before any statistic

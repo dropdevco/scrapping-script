@@ -104,6 +104,17 @@ class StaleReference(ValueError):
     """A saved reference learnt for a different calibration of the same lane."""
 
 
+def _geometry(strip: Strip) -> np.ndarray:
+    """The calibration a lane's road is learnt for, saved next to it. The strip's pixel size
+    alone does not tell: a lane moved along the road, or a ground rectangle redrawn, keeps its
+    size and puts other road under every pixel. A changed mask is stale too: the pixels it
+    covered were learnt black (strip_features), and uncovered they read as a car."""
+    cam, lane = strip.camera, strip.lane
+    return np.array([*cam.frame_size, *np.ravel(cam.ground), cam.width_m, cam.length_m,
+                     *lane.across, *lane.along, lane.booth == "far", *np.ravel(cam.mask)],
+                    np.float64)
+
+
 class CameraReader:
     """One camera: its lane strips and their empty-road references.
 
@@ -161,7 +172,8 @@ class CameraReader:
             tmp = path.with_suffix(".tmp")
             with open(tmp, "wb") as f:
                 np.savez_compressed(f, grey=ref.image, edges=ref.edges,
-                                    size=np.array(self._strips[lane].size), saved_at=stamp)
+                                    size=np.array(self._strips[lane].size),
+                                    geometry=_geometry(self._strips[lane]), saved_at=stamp)
             os.replace(tmp, path)
 
     def _load_lane(self, lane: str, strip: Strip) -> Reference | None:
@@ -174,7 +186,10 @@ class CameraReader:
         with np.load(path) as saved:
             size = tuple(int(v) for v in saved["size"])
             grey, edges = saved["grey"].copy(), saved["edges"].copy()
-        if size != strip.size:
+            # One saved before its geometry was recorded cannot be checked: it is relearnt once.
+            geometry = saved["geometry"].copy() if "geometry" in saved.files else None
+        if (size != strip.size or geometry is None
+                or not np.array_equal(geometry, _geometry(strip))):
             raise StaleReference(f"{self.camera.id}/{lane} was learnt for a different "
                                  "calibration; relearn it")
         return Reference(grey, edges)

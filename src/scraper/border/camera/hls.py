@@ -378,7 +378,10 @@ class HlsReader:
         modified = resp.headers.get("last-modified")
         if not modified:
             return None
-        written = parsedate_to_datetime(modified)
+        try:
+            written = parsedate_to_datetime(modified)
+        except ValueError:                      # a malformed stamp is no time, not a failed read:
+            return None                         # the Clock places the segment by the others
         if written.tzinfo is None:              # RFC 5322's "-0000": UTC, but parsed as naive,
             written = written.replace(tzinfo=UTC)   # which .timestamp() reads as local time
         written += timedelta(seconds=LM_ROUNDING_S)

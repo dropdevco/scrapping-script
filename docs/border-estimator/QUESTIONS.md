@@ -90,6 +90,38 @@ Should replies invite people heading into Juárez to time their crossing too ("v
 Per-vehicle data (boxes, colour signatures) stays in memory for at most 3 h. Only counts and transits
 per window are written.
 
+### Q-22. Which bridges have SENTRI lanes northbound, and which lanes in each camera are they?
+
+**Partly answered 2026-10-26 by the product owner ("for now"):**
+
+| Bridge (northbound, Juárez → El Paso) | Car lanes |
+|---|---|
+| Paso del Norte (Santa Fe) | SENTRI **and** normal |
+| Zaragoza (Ysleta) | SENTRI **and** normal |
+| Lerdo (Stanton) | **SENTRI only** |
+| Córdova de las Américas (BOTA) | **normal only** |
+
+CBP's live feed agreed on 2026-10-26 at about 22:55 UTC. PDN: standard 1 open, SENTRI 1, Ready 4. Ysleta:
+standard closed, SENTRI 3, Ready 3. Stanton DCL: SENTRI 2, standard closed, Ready N/A. BOTA: standard 2,
+Ready 7, SENTRI N/A.
+
+- **ASSUMPTION:** "normal" covers both of CBP's non-SENTRI car lanes, standard and Ready. CBP publishes them
+  separately.
+- Tornillo and Santa Teresa were not part of the answer.
+**Which lanes in each camera view are SENTRI** (owner, 2026-10-26, from labelled frames of that afternoon):
+
+| View | SENTRI | Normal |
+|---|---|---|
+| PDN, Mexican half (`pdn-north`, line A) | lane 5, the roadway past the orange barrels | lanes 1–4 |
+| PDN, US half (`city-pdn-north`, line B) | column E, to the right of the white posts along the right railing | the columns left of the posts |
+| Zaragoza bridge, Mexican side (FPFCH "Zaragoza (Vista Norte)") | column D, to the right of the white posts along the barrier | columns A–C |
+| Zaragoza, US booths (City `BridgeZaragoza3`) | not sure; "normally the far left", left of booth lane 1 | — |
+
+At both PDN lines the SENTRI lane is physically separated (barrels at A, posts at B), so SENTRI and normal
+cars can be counted and paired separately there. The Zaragoza booth answer is the owner's best recollection,
+not a confirmed one.
+
 ---
 
-*Answers recorded 2026-10-12 on branch `chisme-border`; Q-21 on 2026-10-24 on `chisme-border-waittime`.*
+*Answers recorded 2026-10-12 on branch `chisme-border`; Q-21 on 2026-10-24 and Q-22 on 2026-10-26 on
+`chisme-border-waittime`.*

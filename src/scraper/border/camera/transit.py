@@ -111,7 +111,8 @@ too (`_same_class`).
 
 Everything here is a fixed computation: the same crossings give the same output, whatever order
 they come in, with deterministic tie-breaks and no randomness. Signatures, anchors and single
-transits stay in memory; `record` writes window and epoch numbers only (ADR-0014 decision 4).
+transits stay in memory; `record` writes window and epoch numbers and each line's unseen
+stretches only (ADR-0014 decision 4).
 Window and epoch statistics over few cars can give those cars' times or offsets back, though
 never which car had which.
 """
@@ -282,6 +283,10 @@ class Measurement:
     gaps_a: tuple[tuple[datetime, datetime], ...]    # unseen stretches at A, padded
     gaps_b: tuple[tuple[datetime, datetime], ...]
     hi_min: float                                    # the longest trip it allowed for
+    # Why each stretch of gaps_a / gaps_b was unseen: the reasons of the gaps merged into it,
+    # each once, in the order the gaps began
+    why_a: tuple[tuple[str, ...], ...] = ()
+    why_b: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -778,7 +783,7 @@ def measure(a: Sequence[Crossing], b: Sequence[Crossing], lo_min: float, hi_min:
             eta, etb = [c.at for c in ea], [c.at for c in eb]
             out += _pair(eta, etb, _offsets(epoch, eta), [_unsure(epoch, t) for t in eta])
     return Measurement(method, start, end, tuple(epochs), tuple(out), tuple(ta), tuple(tb),
-                       tuple(ga), tuple(gb), hi_min)
+                       tuple(ga), tuple(gb), hi_min, _why(gaps_a, ga), _why(gaps_b, gb))
 
 
 def _epoch(ea: Sequence[Crossing], eb: Sequence[Crossing], s: datetime, e: datetime,
@@ -989,7 +994,14 @@ def record(m: Measurement, wins: Sequence[Window], current: Now | None = None, *
            lane_type: str | None = None) -> dict:
     """The derived numbers for the JSONL log, counts and statistics per window and per epoch.
     No field names a vehicle: no signature, index or crossing time. Statistics over few transits
-    or anchors can give their values back, never which car had which."""
+    or anchors can give their values back, never which car had which.
+
+    `gaps_a` and `gaps_b` are each line's unseen stretches inside the measured span, as the
+    epochs were cut at them (padded by GAP_PAD_S, merged, clipped to the span): the minute each
+    began, its length in seconds and why, so that a run's records name the line and the cause
+    of every cut. A stretch starts just after a frame, and a car can have been counted in that
+    frame, so its start is written to the minute as the other times are; its length alone gives
+    no time back."""
     return {
         "kind": "transit",
         "method": m.method,
@@ -999,6 +1011,8 @@ def record(m: Measurement, wins: Sequence[Window], current: Now | None = None, *
         "transits": len(m.transits),
         "transits_flagged": sum(1 for t in m.transits if t.flagged),
         "epochs": [_epoch_record(e) for e in m.epochs],
+        "gaps_a": _gap_records(m.gaps_a, m.why_a, m.start, m.end),
+        "gaps_b": _gap_records(m.gaps_b, m.why_b, m.start, m.end),
         "windows": [_window_record(w) for w in wins],
         "now": None if current is None else {   # to the minute: `at` may be a crossing's time
             "at": _iso(_floor(current.at, timedelta(minutes=1))), "between": current.between,
@@ -1063,6 +1077,33 @@ def _intervals(gaps: Sequence[Gap]) -> list[tuple[datetime, datetime]]:
     was seen: the stretch starts just after it, so a car counted in it keeps its transit."""
     return [(g.after + _TICK, g.after + timedelta(seconds=g.seconds + GAP_PAD_S))
             for g in gaps if g.after is not None]
+
+
+def _why(gaps: Sequence[Gap], merged: Sequence[tuple[datetime, datetime]]
+         ) -> tuple[tuple[str, ...], ...]:
+    """For each stretch of `merged` (_merge of _intervals(gaps)), the reasons of the gaps in it,
+    each once, in the order the gaps began (ties by reason, so the order gaps come in does not
+    matter)."""
+    out: list[list[str]] = [[] for _ in merged]
+    starts = [s for s, _ in merged]
+    for g in sorted((g for g in gaps if g.after is not None), key=lambda g: (g.after, g.reason)):
+        k = bisect_right(starts, g.after + _TICK) - 1
+        if g.reason not in out[k]:
+            out[k].append(g.reason)
+    return tuple(tuple(reasons) for reasons in out)
+
+
+def _gap_records(spans: Sequence[tuple[datetime, datetime]], why: Sequence[tuple[str, ...]],
+                 start: datetime, end: datetime) -> list[dict]:
+    """One line's unseen stretches inside [start, end), for `record`."""
+    minute = timedelta(minutes=1)
+    out = []
+    for i, (g0, g1) in enumerate(spans):
+        s, e = max(g0, start), min(g1, end)
+        if e > s:
+            out.append({"start": _iso(_floor(s, minute)), "seconds": _r((e - s).total_seconds(), 1),
+                        "reasons": list(why[i]) if i < len(why) else []})
+    return out
 
 
 def _merge(intervals: Sequence[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:

@@ -57,6 +57,41 @@ def number(frame: np.ndarray) -> int:
     return int(frame[:, :32].mean() // 16) * 16 + int(frame[:, 32:].mean() // 16)
 
 
+def picture(shade: int = 0) -> np.ndarray:
+    """One fixed grey scene, BGR, at the whole-scene probe's own size (320x180)."""
+    grey = np.random.default_rng(5).integers(40, 200, (180, 320), dtype=np.uint8) + shade
+    return np.repeat(grey[:, :, None], 3, axis=2)
+
+
+def quiet(n: int, shade: int = 0) -> list[np.ndarray]:
+    """A live road with nothing moving: each frame is the scene with a fresh 1 % of its pixels
+    one grey level up, so a pair differs by about 0.02 on average, never by 0.3 and never by
+    nothing (the night of 2026-10-27: 0 of 2362 pairs identical, the smallest 0.0095)."""
+    rng = np.random.default_rng(7)
+    out = []
+    for _ in range(n):
+        f = picture(shade)
+        f[rng.random((180, 320)) < 0.01] += 1
+        out.append(f)
+    return out
+
+
+def ticking(n: int, every: int) -> list[np.ndarray]:
+    """Quiet frames whose clock box (the top-left 80x18) changes shade on every `every`-th pair."""
+    out = []
+    for i, f in enumerate(quiet(n)):
+        f[:18, :80] = 60 if (i // every) % 2 else 160
+        out.append(f)
+    return out
+
+
+CLOCK = (0.0, 0.0, 0.25, 0.1)          # ticking()'s clock box, as fractions of the frame
+
+
+def feed(check, frames: list[np.ndarray]) -> list[bool]:
+    return [check(f) for f in frames]
+
+
 class Finding(unittest.TestCase):
     LISTING = (
         stream.Listed("a1", PREFIX + "Zaragoza (Av. Waterfill) - Vista Sur", True),
@@ -90,6 +125,63 @@ class Finding(unittest.TestCase):
         with (mock.patch.object(stream, "_ytdlp", return_value=refused),
               self.assertRaisesRegex(stream.StreamDown, "technical difficulties")):
             stream.resolve("ch", "Zaragoza (Sur)")
+
+
+class FakeChannel:
+    """yt-dlp for one channel with one camera, whose operator can restart its stream under a
+    new video id. Counts how often the channel is listed."""
+
+    def __init__(self):
+        self.live_id, self.listings = "old", 0
+
+    def __call__(self, *args, timeout=120):
+        if "--flat-playlist" in args:
+            self.listings += 1
+            return mock.Mock(returncode=0, stderr="",
+                             stdout=f"{self.live_id}\tis_live\t{PREFIX}Zaragoza (Sur)\n")
+        video = args[-1].rsplit("=", 1)[1]
+        if video != self.live_id:
+            return mock.Mock(returncode=1, stdout="",
+                             stderr=f"ERROR: [youtube] {video}: This live event has ended.")
+        return mock.Mock(returncode=0, stdout=f"https://hls.example/{video}.m3u8\n", stderr="")
+
+
+class ListingCache(unittest.TestCase):
+    """The channel listing is cached for LISTING_TTL, but a stream restarted under a new video
+    id must be found on the next try, not after up to 10 min of the old id."""
+
+    def setUp(self):
+        self.channel = FakeChannel()
+        for name, value in (("_listing", {}), ("_resolved", {}), ("_ytdlp", self.channel)):
+            patcher = mock.patch.object(stream, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_listed_stream_is_resolved_from_the_cached_listing(self):
+        stream.resolve("ch", "Zaragoza (Sur)")
+        stream.resolve("ch", "Zaragoza (Sur)")
+        self.assertEqual(self.channel.listings, 1)
+
+    def test_a_failed_resolve_lists_the_channel_afresh(self):
+        self.assertEqual(stream.resolve("ch", "Zaragoza (Sur)"), "https://hls.example/old.m3u8")
+        self.channel.live_id = "new"                          # the operator restarts it
+        with self.assertRaisesRegex(stream.StreamDown, "has ended"):
+            stream.resolve("ch", "Zaragoza (Sur)")            # the cached listing names "old"
+        self.assertEqual(stream.resolve("ch", "Zaragoza (Sur)"), "https://hls.example/new.m3u8")
+        self.assertEqual(self.channel.listings, 2)
+
+    def test_a_read_that_found_its_stream_gone_lists_the_channel_afresh(self):
+        old = stream.resolve("ch", "Zaragoza (Sur)")
+        self.channel.live_id = "new"
+        stream.forget(old)
+        self.assertEqual(stream.resolve("ch", "Zaragoza (Sur)"), "https://hls.example/new.m3u8")
+        self.assertEqual(self.channel.listings, 2)
+
+    def test_a_url_resolve_did_not_give_keeps_the_listing(self):
+        stream.resolve("ch", "Zaragoza (Sur)")
+        stream.forget("https://zoocams.example/x.m3u8")       # a City camera's own URL
+        stream.resolve("ch", "Zaragoza (Sur)")
+        self.assertEqual(self.channel.listings, 1)
 
 
 class Frames(unittest.TestCase):
@@ -130,6 +222,83 @@ class Frames(unittest.TestCase):
         path = clip(self.dir / "slow.mp4", varied(10), fps=1)
         with self.assertRaises(ValueError):
             next(stream.frames(path, fps=2, seconds=5))
+
+    def test_a_whole_scene_read_faster_than_2_fps_is_refused_before_it_is_opened(self):
+        # Refused, not lost: the rate is checked before the (missing) file is opened.
+        with self.assertRaises(ValueError):
+            next(stream.frames(str(self.dir / "missing.mp4"), fps=4, seconds=1))
+
+
+class FrozenWholeScene(unittest.TestCase):
+    """A City camera has no burned-in clock: frozen means its picture repeats exactly."""
+
+    def test_a_quiet_live_road_is_never_frozen(self):
+        # The first whole-scene rule called this frozen after 20 s, 50.4 times an hour on the
+        # night of 2026-10-27, and each time cut the line's count.
+        check = stream.frozen_check(2.0, None)
+        moved = feed(check, quiet(600))                       # 300 s at 2 fps
+        self.assertFalse(any(moved))
+
+    def test_a_third_of_20_s_of_pairs_repeating_exactly_is_frozen(self):
+        check = stream.frozen_check(2.0, None)
+        fresh = iter(quiet(41))
+        frames = [next(fresh)]
+        for pair in range(40):                                # 13 repeats among 40 pairs
+            frames.append(frames[-1] if pair % 3 == 1 else next(fresh))
+        feed(check, frames)                                   # 13 of 40 is not yet frozen
+        with self.assertRaises(stream.StreamFrozen) as caught:
+            check(frames[-1])                                 # 14 of 40 is
+        self.assertEqual(caught.exception.seconds, stream.FROZEN_SECONDS)
+        self.assertEqual(caught.exception.seconds, 20)
+        self.assertIn("has not changed", str(caught.exception))
+
+    def test_a_black_picture_still_says_it_is_black(self):
+        check = stream.frozen_check(2.0, None)
+        with self.assertRaises(stream.StreamFrozen) as caught:
+            feed(check, [np.zeros((180, 320, 3), np.uint8)] * 41)
+        self.assertIn("is black", str(caught.exception))
+        self.assertEqual(caught.exception.seconds, stream.FROZEN_SECONDS)
+
+    def test_each_frame_says_whether_it_moved(self):
+        check = stream.frozen_check(2.0, None)
+        still, nudged = quiet(2)
+        brighter = picture(shade=5)                           # 5 grey levels: a car going by
+        self.assertEqual(feed(check, [still, nudged, brighter, brighter, still]),
+                         [False, False, True, False, True])
+
+    def test_a_whole_scene_read_faster_than_2_fps_is_refused(self):
+        # Native frames changed at least every 0.42 s; pairs closer than that can repeat
+        # exactly on a live picture.
+        with self.assertRaises(ValueError):
+            stream.frozen_check(2.5, None)
+        stream.frozen_check(stream.SCENE_MAX_FPS, None)
+        stream.frozen_check(12.0, CLOCK)                      # a clock camera may go faster
+
+    def test_a_frozen_error_takes_back_20_s_unless_told_otherwise(self):
+        self.assertEqual(stream.StreamFrozen("has not changed").seconds, stream.FROZEN_SECONDS)
+        self.assertEqual(stream.StreamFrozen("nothing moved", 300).seconds, 300)
+
+
+class FrozenClock(unittest.TestCase):
+    """A camera with a burned-in clock keeps its rule: frozen when the clock stops changing."""
+
+    def test_a_clock_that_stops_is_frozen_though_no_two_frames_repeat(self):
+        # A frozen encoder re-encodes its last picture, so the frames still differ a little.
+        check = stream.frozen_check(2.0, CLOCK)
+        with self.assertRaises(stream.StreamFrozen) as caught:
+            feed(check, quiet(41))
+        self.assertIn("has not changed", str(caught.exception))
+        self.assertEqual(caught.exception.seconds, stream.FROZEN_SECONDS)
+
+    def test_a_tenth_of_the_pairs_changing_the_clock_is_still_frozen(self):
+        check = stream.frozen_check(2.0, CLOCK)
+        with self.assertRaises(stream.StreamFrozen):
+            feed(check, ticking(200, every=10))               # 4 of every 40 pairs
+
+    def test_more_than_a_tenth_is_alive_and_each_tick_is_a_move(self):
+        check = stream.frozen_check(2.0, CLOCK)
+        moved = feed(check, ticking(200, every=8))            # 5 of every 40 pairs
+        self.assertEqual(moved, [i > 0 and i % 8 == 0 for i in range(200)])
 
 
 class CalibrationFile(unittest.TestCase):

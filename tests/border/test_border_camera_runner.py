@@ -87,8 +87,8 @@ class FakeCounter:
         return {(self.line, "l1"): (np.ones((4, 3), np.float32), np.zeros((4, 3), np.float32))}
 
 
-def frame(at):
-    return Stamped(np.zeros((360, 640, 3), np.uint8), at, 0)
+def frame(at, moved=None):
+    return Stamped(np.zeros((360, 640, 3), np.uint8), at, 0, moved)
 
 
 class RunnerSetUp(unittest.TestCase):
@@ -258,22 +258,42 @@ class Runner(RunnerSetUp):
 
 
 class ScriptedReader:
-    """Stands in for hls.HlsReader: yields the given frame times, then raises `end`."""
+    """Stands in for hls.HlsReader: yields the given frame times, each `moved` as given (None,
+    no frozen check, unless said), then raises `end`."""
 
-    def __init__(self, times, end, gaps=()):
+    def __init__(self, times, end, gaps=(), moved=None):
         self.times, self.end, self.gaps = times, end, list(gaps)
+        self.moved = [None] * len(times) if moved is None else moved
         self.http = unittest.mock.Mock()
 
     def frames(self, seconds=None):
-        for at in self.times:
-            yield frame(at)
+        for at, moved in zip(self.times, self.moved, strict=True):
+            yield frame(at, moved)
         raise self.end
+
+
+class Waits:
+    """Stands in for the runner's stop event: records each wait instead of sleeping."""
+
+    def __init__(self):
+        self.waited: list[float] = []
+        self.stopped = False
+
+    def is_set(self):
+        return self.stopped
+
+    def set(self):
+        self.stopped = True
+
+    def wait(self, seconds):
+        self.waited.append(seconds)
+        return self.stopped
 
 
 class Feeding(RunnerSetUp):
     """What `_feed` does around reconnects, freezes and blocks."""
 
-    def feed_script(self, camera, readers):
+    def feed_script(self, camera, readers, reconnect_s=0.0):
         made = iter(readers)
 
         def next_reader(cam):
@@ -284,7 +304,7 @@ class Feeding(RunnerSetUp):
                 raise StreamLost("script over") from None
 
         with unittest.mock.patch.object(runner_mod, "live_reader", next_reader), \
-                unittest.mock.patch.object(runner_mod, "RECONNECT_S", 0.0):
+                unittest.mock.patch.object(runner_mod, "RECONNECT_S", reconnect_s):
             self.run_._feed(camera)
 
     def test_frames_replayed_after_a_reconnect_are_not_counted_twice(self):
@@ -305,6 +325,49 @@ class Feeding(RunnerSetUp):
         frozen = [g for g in self.run_.gaps[("loop", "A")] if "frozen" in g.reason]
         self.assertEqual(len(frozen), 1)
         self.assertEqual(frozen[0].seconds, FROZEN_SECONDS)
+
+    def test_a_freeze_is_taken_back_as_far_as_the_readers_rule_judged_it(self):
+        times = [T0 + timedelta(seconds=s) for s in range(60)]
+        self.feed_script(self.a, [ScriptedReader(times, StreamFrozen("has not changed", 7.0))])
+        frozen = [g for g in self.run_.gaps[("loop", "A")] if "frozen" in g.reason]
+        self.assertEqual([(g.after, g.seconds) for g in frozen],
+                         [(T0 + timedelta(seconds=52), 7.0)])
+
+    def test_freezes_in_a_row_double_the_wait_until_a_read_gives_a_minute_of_frames(self):
+        # A picture frozen for good is not opened again every 30 s. Any other end of a short read
+        # neither doubles the wait nor resets it: a StreamLost from the same stalled source would
+        # otherwise keep it at RECONNECT_S.
+        script = [(30, StreamFrozen("x")), (20, StreamFrozen("x")), (20, StreamFrozen("x")),
+                  (10, StreamLost("dropped")),
+                  *[(20, StreamFrozen("x"))] * 4,
+                  (70, StreamLost("dropped")),                  # 70 s of frames: a stream that works
+                  (70, StreamFrozen("x")), (20, StreamFrozen("x"))]
+        readers, t = [], 0
+        for seconds, end in script:
+            readers.append(ScriptedReader(
+                [T0 + timedelta(seconds=t + s) for s in range(seconds + 1)], end))
+            t += seconds + 5
+        self.run_._stop = waits = Waits()
+        self.feed_script(self.a, readers, reconnect_s=runner_mod.RECONNECT_S)
+        self.assertEqual(runner_mod.RECONNECT_S, 10.0)
+        self.assertEqual(waits.waited, [10, 20, 40, 40, 80, 160, 300, 300, 10, 10, 20])
+        self.assertEqual(self.run_.reconnects, {"cam-a": 11, "cam-b": 0})
+        self.assertIn("reopened 11x", self.run_.status({}).splitlines()[0])
+
+    def test_the_quiet_clock_runs_on_across_a_reconnect(self):
+        # Each read's first frame has nothing to compare with (moved False) and does not count
+        # as motion: the stretch since the last frame that moved is judged across the reconnect.
+        first = [T0 + timedelta(seconds=s) for s in range(200)]
+        again = [T0 + timedelta(seconds=s) for s in range(210, 360)]
+        self.feed_script(self.a, [
+            ScriptedReader(first, StreamLost("dropped"), moved=[0 < s <= 50 for s in range(200)]),
+            ScriptedReader(again, StreamLost("dropped"),
+                           moved=[s == 351 for s in range(210, 360)])])
+        self.assertEqual(
+            [(g.after, g.seconds, g.reason) for g in self.run_.gaps[("loop", "A")]],
+            [(T0 + timedelta(seconds=199), 11.0, "stream down or reconnecting"),
+             (T0 + timedelta(seconds=50), 301.0, "nothing moved for 301 s")])
+        self.assertEqual(self.run_.moved_at["cam-a"], T0 + timedelta(seconds=351))
 
     def test_a_city_camera_that_blocks_us_is_not_read_again(self):
         city = camera_from_dict("city", {
@@ -354,6 +417,72 @@ class Feeding(RunnerSetUp):
         start, prior = self.run_._start(LOOP, T0, [gap])
         self.assertEqual(start, T0 + timedelta(minutes=6))
         self.assertIsNone(prior)
+
+
+class NoMotion(RunnerSetUp):
+    """A line is seen up to its last frame that moved or counted a car, and a stretch with
+    neither for longer than QUIET_S becomes a gap: the reader no longer catches a picture frozen
+    with noise (stream.frozen_check), and such a freeze must not read as an empty road."""
+
+    def play(self, seconds, a_moved):
+        """Frames at both cameras every second for `seconds`, A's moved as `a_moved(s)` says
+        and B's None (a reader with no frozen check)."""
+        for s in range(seconds + 1):
+            at = T0 + timedelta(seconds=s)
+            self.run_._frame(self.a, "A", frame(at, a_moved(s)))
+            self.run_._frame(self.b, "B", frame(at))
+
+    def test_a_still_stretch_longer_than_quiet_s_is_a_gap_and_its_cars_are_cut(self):
+        self.assertEqual(runner_mod.QUIET_S, 300.0)
+        events = []
+        self.ca.add = lambda f, add=self.ca.add: events.append(("frame", f.at)) or add(f)
+        self.ca.gap = lambda g: events.append(("gap", g))
+        t1 = T0 + timedelta(seconds=1001)
+        self.ca.cars_on = {t1}                          # counted in the frame that moves
+        moving = {*range(701), 1001, *range(1301, 1401)}
+        self.play(1400, lambda s: s in moving)
+        # 1001 - 700 is more than QUIET_S: a gap, which reaches the counters before the frame
+        # does. 1301 - 1001 is QUIET_S exactly: no gap.
+        quiet = Gap(T0 + timedelta(seconds=700), 301.0, "nothing moved for 301 s")
+        self.assertEqual(self.run_.gaps[("loop", "A")], [quiet])
+        self.assertEqual(self.run_.gaps[("loop", "B")], [])
+        i = events.index(("gap", quiet))
+        self.assertEqual(events[i + 1], ("frame", t1))
+        # The car counted at t1 is cut out with the stretch, as at any gap.
+        measured, _ = self.run_.measure()[LOOP]
+        self.assertEqual([(e.start, e.end) for e in measured.epochs],
+                         [(T0, quiet.after + transit._TICK),
+                          (t1 + timedelta(seconds=transit.GAP_PAD_S),
+                           T0 + timedelta(seconds=1400))])
+        self.run_.reconnects["cam-b"] = 2
+        rec = self.run_.records({LOOP: (measured, None)})[0]
+        self.assertEqual(rec["gaps_a"], [{"start": "2026-10-24T18:11:00+00:00", "seconds": 306.0,
+                                          "reasons": ["nothing moved for 301 s"]}])
+        self.assertEqual(rec["gaps_b"], [])
+        self.assertEqual((rec["reconnects_a"], rec["reconnects_b"]), (0, 2))
+
+    def test_a_car_counted_is_motion_and_one_after_a_long_still_is_cut(self):
+        # The car at 200 s moves the line on, so the frame that moves at 450 s ends 250 s of
+        # stillness, not 450. The car at 800 s, in a frame that barely changed, ends 350 s: a gap
+        # added once its car is found, which holds it.
+        car = T0 + timedelta(seconds=800)
+        self.ca.cars_on = {T0 + timedelta(seconds=200), car}
+        self.play(900, lambda s: s == 450)
+        gaps = self.run_.gaps[("loop", "A")]
+        self.assertEqual(gaps, [Gap(T0 + timedelta(seconds=450), 350.0, "nothing moved for 350 s")])
+        self.assertTrue(transit._inside(car, transit._intervals(gaps)))
+        self.assertEqual(self.run_.moved_at["cam-a"], car)
+        self.assertEqual(self.run_.seen_until(), car)
+
+    def test_a_line_is_seen_up_to_its_last_frame_that_moved_then_catches_up(self):
+        self.play(60, lambda s: s <= 10)
+        self.assertEqual(self.run_.last_at["cam-a"], T0 + timedelta(seconds=60))
+        self.assertEqual(self.run_.seen_until(), T0 + timedelta(seconds=10))
+        self.assertEqual(self.run_.measure()[LOOP][0].end, T0 + timedelta(seconds=10))
+        self.assertIn("nothing moved for 50 s", self.run_.status({}).splitlines()[0])
+        self.run_._frame(self.a, "A", frame(T0 + timedelta(seconds=61), True))
+        self.assertEqual(self.run_.seen_until(), T0 + timedelta(seconds=60))   # now B's latest
+        self.assertEqual(self.run_.gaps[("loop", "A")], [])       # 51 s still: a quiet road
 
 
 class Replay:
@@ -636,6 +765,19 @@ class LaneTypeGroups(unittest.TestCase):
                              sentri)
             self.assertEqual(set(run.types[line].values()), {"normal", "sentri"})
 
+    def test_a_method_the_run_does_not_use_is_never_listed_not_measured(self):
+        # col-e is counted by yolox only, so only the loop leaves SENTRI unmeasured: a run of
+        # yolox alone measures both groups, warns of nothing, and lists no loop group.
+        cameras = load_cameras()
+        a, b = cameras["pdn-north"], cameras["city-pdn-north"]
+        with self.assertNoLogs(runner_mod.log, "WARNING"):
+            run = self.runner(a, b, methods=("yolox",))
+        self.assertEqual(run.groups, ("normal", "sentri"))
+        self.assertEqual(run.not_measured, {})
+        self.assertEqual(runner_mod.unmeasured(a, b, ["yolox"]), {})
+        self.assertEqual(runner_mod.unmeasured(a, b, ["loop"]),
+                         {("loop", "sentri"): "city-pdn-north col-e is counted by yolox only"})
+
     def test_pdn_norths_loop_leaves_column_e_out_and_judges_the_city_columns_together(self):
         # Line-B review, 2026-10-26: in both daylight City frames a col-4 car covers col-e, and
         # in a rendered pass the loop counted such cars there, so col-e is counted by yolox only
@@ -688,11 +830,12 @@ class LaneTypeGroups(unittest.TestCase):
         self.assertIn("B 1 (", lines[3])           # yolox counts col-e
 
     def test_each_counter_counts_only_the_zones_that_name_its_method(self):
-        # The loop counter leaves col-e out and YOLOX keeps it. lane-5 stays in A's loop
-        # although the loop does not measure SENTRI: a zone is left out by its own "methods".
+        # The loop counter leaves col-e out and YOLOX keeps it; YOLOX leaves col-2, the loop's
+        # only, out. lane-5 stays in A's loop although the loop does not measure SENTRI: a zone
+        # is left out by its own "methods".
         a = typed("cam-a", "A", {"lane-1": "normal", "lane-5": "sentri"})
-        b = typed("cam-b", "B", {"col-1": "normal", "col-e": "sentri"},
-                  methods={"col-e": ["yolox"]})
+        b = typed("cam-b", "B", {"col-1": "normal", "col-2": "normal", "col-e": "sentri"},
+                  methods={"col-2": ["loop"], "col-e": ["yolox"]})
         with unittest.mock.patch("scraper.border.camera.detect.Yolox.load",
                                  return_value=object()), \
                 self.assertLogs(runner_mod.log, "WARNING"):
@@ -700,7 +843,7 @@ class LaneTypeGroups(unittest.TestCase):
         self.assertEqual({cid: {c.method: zone_lanes(c) for c in counters}
                           for cid, counters in run.counters.items()},
                          {"cam-a": {"loop": ["lane-1", "lane-5"], "yolox": ["lane-1", "lane-5"]},
-                          "cam-b": {"loop": ["col-1"], "yolox": ["col-1", "col-e"]}})
+                          "cam-b": {"loop": ["col-1", "col-2"], "yolox": ["col-1", "col-e"]}})
 
     def test_a_camera_whose_zones_no_method_of_the_run_counts_gets_no_counter(self):
         # A LoopCounter with no zones refuses to start: the run goes on without one, and every
@@ -710,6 +853,43 @@ class LaneTypeGroups(unittest.TestCase):
             run = TransitRunner(typed("cam-a", "A", {"lane-1": "normal"}), b, methods=("loop",))
         self.assertEqual([c.method for c in run.counters["cam-b"]], [])
         self.assertEqual(list(run.not_measured), [("loop", "normal")])
+
+    def test_a_camera_whose_zones_are_all_loop_only_gets_no_detector(self):
+        # A DetectorCounter with no zones would still load a network: the run builds none.
+        b = typed("cam-b", "B", {"col-1": "normal"}, methods={"col-1": ["loop"]})
+        with unittest.mock.patch("scraper.border.camera.detect.Yolox.load",
+                                 return_value=object()) as load, \
+                self.assertLogs(runner_mod.log, "WARNING"):
+            run = TransitRunner(typed("cam-a", "A", {"lane-1": "normal"}), b, methods=("yolox",))
+        self.assertEqual([c.method for c in run.counters["cam-b"]], [])
+        self.assertEqual(load.call_count, 1)            # cam-a's network only
+        self.assertEqual(list(run.not_measured), [("yolox", "normal")])
+
+    def test_a_pair_with_no_lane_type_is_not_measured_by_a_method_one_of_its_zones_lacks(self):
+        # Pooled, every zone is in the one "mixed" group: with col-e counted by yolox only, a
+        # loop count at B would miss col-e's cars, so the loop does not measure the pair.
+        b = typed("cam-b", "B", {"c1": None, "col-e": None}, methods={"col-e": ["yolox"]})
+        with self.assertLogs(runner_mod.log, "WARNING"):
+            run = self.runner(typed("cam-a", "A", {"l0": None}), b, methods=("loop", "yolox"))
+        self.assertEqual(run.groups, ("mixed",))
+        self.assertEqual(run.not_measured,
+                         {("loop", "mixed"): "cam-b col-e is counted by yolox only"})
+        a_cars = [Crossing("cam-a", "A", "l0", SIM_T0 + timedelta(seconds=s), "loop")
+                  for s in (0, 30, 60)]
+        b_cars = [Crossing("cam-b", "B", lane, SIM_T0 + timedelta(seconds=s), "loop")
+                  for s, lane in ((120, "c1"), (150, "col-e"), (180, "c1"))]
+        out = self.play(run, {"cam-a": [replay(a_cars), replay(a_cars, "yolox")],
+                              "cam-b": [replay(b_cars), replay(b_cars, "yolox")]}, 5, [5])
+        self.assertEqual(list(out[5]), [("yolox", "mixed")])
+
+    def test_a_zone_at_line_a_its_method_does_not_count_is_named_with_its_camera(self):
+        a = typed("cam-a", "A", {"lane-1": "normal", "lane-5": "sentri"},
+                  methods={"lane-5": ["yolox"]})
+        with self.assertLogs(runner_mod.log, "WARNING"):
+            run = self.runner(a, typed("cam-b", "B", {"col-1": "normal", "col-e": "sentri"}),
+                              methods=("loop", "yolox"))
+        self.assertEqual(run.not_measured,
+                         {("loop", "sentri"): "cam-a lane-5 is counted by yolox only"})
 
     def test_the_status_has_one_line_per_method_and_lane_type_with_its_own_counts(self):
         run = self.two_types(methods=("loop", "yolox"))

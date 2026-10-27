@@ -535,7 +535,9 @@ class RecordTest(unittest.TestCase):
 
     ALLOWED: ClassVar[dict[str, set[str]]] = {
         "": {"kind", "method", "lane_type", "start", "end", "transits", "transits_flagged",
-             "epochs", "windows", "now"},
+             "epochs", "gaps_a", "gaps_b", "windows", "now"},
+        "gaps_a": {"start", "seconds", "reasons"},
+        "gaps_b": {"start", "seconds", "reasons"},
         "epochs": {"start", "end", "source", "offset", "offset_sd", "carried_offset",
                    "anchors", "anchors_kept", "anchors_enclosed", "anchor_offset",
                    "anchor_spread", "anchor_outliers", "anchor_p10", "anchor_p90",
@@ -595,6 +597,36 @@ class RecordTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             measure(sim.a, yolox, LO_MIN, HI_MIN, start=T0)
 
+    def test_each_lines_gaps_are_written_as_they_cut_with_why(self):
+        # So a run's records name the line and the cause of every cut. Each stretch is written
+        # as the epochs were cut at it (padded, merged, clipped to the measured span), its start
+        # to the minute, and the order the gaps come in does not matter.
+        sim = simulate(gap_b=GapTest.GAP)
+        frozen = T0 + timedelta(minutes=100, seconds=37.25)
+        end = T0 + timedelta(minutes=300)
+        gaps_a = [Gap(frozen + timedelta(seconds=10), 40.0, "stream down or reconnecting"),
+                  Gap(frozen, 20.0, "picture frozen or black"),            # merges with the first
+                  Gap(end - timedelta(seconds=10), 60.0, "segment expired"),   # runs past the end
+                  Gap(T0 - timedelta(minutes=2), 30.0, "before the start"),    # cuts nothing
+                  Gap(None, 30.0, "before the first frame")]                   # cuts nothing
+        records = []
+        for given in (gaps_a, gaps_a[::-1]):
+            m = measure(sim.a, sim.b, LO_MIN, HI_MIN, gaps_a=given, gaps_b=sim.gaps_b, start=T0,
+                        end=end)
+            records.append(record(m, windows(m)))
+        rec = records[0]
+        self.assertEqual(rec["gaps_a"], [
+            {"start": "2026-10-24T15:40:00+00:00", "seconds": 55.0,
+             "reasons": ["picture frozen or black", "stream down or reconnecting"]},
+            {"start": "2026-10-24T18:59:00+00:00", "seconds": 10.0,
+             "reasons": ["segment expired"]}])
+        self.assertEqual(rec["gaps_b"], [{"start": "2026-10-24T17:20:00+00:00",
+                                          "seconds": GapTest.GAP[1] + GAP_PAD_S,
+                                          "reasons": ["test"]}])
+        self.assertEqual(records[1], rec)
+        self.assertNotIn("15:40:37", json.dumps(rec))
+        self._walk(rec, "")
+
     def _walk(self, node, key):
         if isinstance(node, dict):
             self.assertLessEqual(set(node), self.ALLOWED[key], key)
@@ -603,6 +635,9 @@ class RecordTest(unittest.TestCase):
                     self._walk(v, k)
                 else:
                     self.assertIsInstance(v, (str, int, float, bool, type(None)), k)
+        elif key == "reasons":                  # a gap's reasons: words, no time or vehicle
+            for item in node:
+                self.assertIsInstance(item, str, key)
         else:
             for item in node:
                 self.assertIsInstance(item, dict, key)
@@ -1033,8 +1068,9 @@ class EdgeLookAlikeTest(unittest.TestCase):
 class DriftConfirmTest(unittest.TestCase):
     """(13) Anchors that confirm a carried count must follow the counters' drift through the
     epoch. The counters drift when A and B miss or double count at different rates, which
-    cameras.json expects (the loop misses about 30 % at line A in free flow, and may count a col-4
-    car again in col-e). Held at the count carried in, the band kept 8 of 45 true anchors at about
+    cameras.json expects (the loop misses about 30 % at line A in free flow, and at line B counts a
+    col-1 car again in col-2; col-e, where a col-4 car does the same, is counted by yolox only).
+    Held at the count carried in, the band kept 8 of 45 true anchors at about
     20 cars an hour of drift (A misses 3 % and doubles 1 %, B misses 1 % and doubles 4 %), their
     line came out flat, and sure transits were up to 6 min out (review, 2026-10-26). Measured as
     EdgeLookAlikeTest measures, A blind for 30 s, from a sure count 180 min before the end. Not

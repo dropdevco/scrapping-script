@@ -7,6 +7,7 @@ Paso does). They check that each frame's capture time comes from that clock, not
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
@@ -17,16 +18,19 @@ from email.utils import format_datetime
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from itertools import pairwise
+from unittest import mock
 
 import httpx
 import pytest
 
 pytest.importorskip("cv2")
 
+from scraper.border.camera import hls, stream
 from scraper.border.camera.hls import (
     WRAP,
     Clock,
     Decoder,
+    Gone,
     HlsReader,
     Segment,
     TimelineCut,
@@ -468,6 +472,19 @@ class Failures(unittest.TestCase):
                 next(reader.frames(5))
         decoder.assert_not_called()
 
+    def test_a_whole_scene_read_faster_than_2_fps_is_refused_before_anything_is_fetched(self):
+        # Its frozen check takes exact repeats for a stalled encoder: pairs closer than 0.42 s
+        # repeat exactly on a live City picture.
+        resolved = []
+        with mock.patch.object(hls, "Decoder") as decoder:
+            reader = HlsReader(lambda: resolved.append(1) or "https://example.org/x.m3u8",
+                               "last-modified", (160, 120), 4.0, "chisme-test")
+            self.addCleanup(reader.http.close)
+            with self.assertRaises(ValueError):
+                next(reader.frames(5))
+        self.assertEqual(resolved, [])
+        decoder.assert_not_called()
+
     def test_a_403_is_a_block_not_an_outage(self):
         from unittest import mock
 
@@ -504,6 +521,97 @@ class Watchdog(EndToEnd):
     test_without_program_time_last_modified_sets_the_clock = None
     test_the_segment_timestamps_are_read_from_the_transport_stream = None
     test_a_jump_in_the_sequence_is_reported_as_a_gap = None
+
+
+@unittest.skipUnless(FFMPEG, "needs the ffmpeg command-line tool")
+class Motion(EndToEnd):
+    """Each frame says whether the picture moved, for the runner's no-motion gap."""
+
+    def test_a_reads_first_frame_has_not_moved_and_the_rest_are_compared(self):
+        reader, got = self._read(self._with_pdt(), "pdt", 6)
+        # testsrc's counter and sweep change the picture between frames 0.5 s apart.
+        self.assertEqual([f.moved for f in got], [False] + [True] * (len(got) - 1))
+        again = list(reader.frames(2))                      # a fresh read has no pair yet
+        self.assertIs(again[0].moved, False)
+
+    test_frames_are_timed_by_the_program_date_time = None
+    test_without_program_time_last_modified_sets_the_clock = None
+    test_the_segment_timestamps_are_read_from_the_transport_stream = None
+    test_a_jump_in_the_sequence_is_reported_as_a_gap = None
+
+
+class EmptyDecoder:
+    """Stands in for ffmpeg: decodes nothing, and its frames end when its input is closed."""
+
+    def __init__(self, size, fps):
+        self.frames: queue.Queue = queue.Queue()
+        self.proc = mock.Mock()
+        self.proc.stdin.close.side_effect = lambda: self.frames.put(None)
+
+    def feed(self, data: bytes) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class RestartedStream(unittest.TestCase):
+    """A read whose playlist is gone (404/410) or ended drops the cached channel listing its URL
+    came from (stream.forget), so a YouTube stream restarted under a new video id is found on
+    the next resolve, not after up to LISTING_TTL of the old id."""
+
+    ENDED = "#EXTM3U\n#EXT-X-TARGETDURATION:5\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-ENDLIST\n"
+
+    def setUp(self):
+        self.live_id, self.listings = "old", 0
+
+        def ytdlp(*args, timeout=120):
+            if "--flat-playlist" in args:
+                self.listings += 1
+                return mock.Mock(returncode=0, stderr="",
+                                 stdout=f"{self.live_id}\tis_live\tPuente Zaragoza (Sur)\n")
+            video = args[-1].rsplit("=", 1)[1]
+            return mock.Mock(returncode=0, stderr="", stdout=f"https://hls.example/{video}.m3u8\n")
+
+        for target, name, value in ((stream, "_listing", {}), (stream, "_resolved", {}),
+                                    (stream, "_ytdlp", ytdlp), (hls, "Decoder", EmptyDecoder)):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.reader = HlsReader(lambda: stream.resolve("ch", "Zaragoza (Sur)"), "pdt",
+                                (160, 120), 2.0, "chisme-test")
+        self.addCleanup(self.reader.http.close)
+
+    def test_an_ended_stream_is_listed_afresh_on_the_next_resolve(self):
+        with mock.patch.object(self.reader, "_get", return_value=mock.Mock(text=self.ENDED)), \
+                self.assertRaisesRegex(StreamLost, "the stream ended"):
+            list(self.reader.frames(None))
+        self.live_id = "new"
+        self.assertEqual(stream.resolve("ch", "Zaragoza (Sur)"), "https://hls.example/new.m3u8")
+        self.assertEqual(self.listings, 2)
+
+    def test_a_gone_playlist_is_listed_afresh_within_the_read(self):
+        def gone(url):
+            self.live_id = "new"                            # restarted; the old URL 404s
+            raise Gone(f"HTTP 404 for {url}")
+
+        with mock.patch.object(self.reader, "_get", side_effect=gone) as get, \
+                self.assertRaises(Gone):
+            list(self.reader.frames(None))
+        self.assertEqual([c.args[0] for c in get.call_args_list],
+                         ["https://hls.example/old.m3u8", "https://hls.example/new.m3u8"])
+        self.assertEqual(self.listings, 2)
+        self.assertNotIn("ch", stream._listing)             # the new URL was gone too
+
+    def test_a_city_url_leaves_the_listing_alone(self):
+        stream.resolve("ch", "Zaragoza (Sur)")
+        reader = HlsReader(lambda: "https://zoocams.example/x.m3u8", "last-modified",
+                           (160, 120), 2.0, "chisme-test")
+        self.addCleanup(reader.http.close)
+        with mock.patch.object(reader, "_get", return_value=mock.Mock(text=self.ENDED)), \
+                self.assertRaises(StreamLost):
+            list(reader.frames(None))
+        self.assertIn("ch", stream._listing)
 
 
 class LiveFrames(unittest.TestCase):

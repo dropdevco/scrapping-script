@@ -10,8 +10,9 @@ from the stream's own clock. Each frame goes to every counter of its camera:
 Their crossings and gaps are kept in memory. Every `every` seconds each method and each lane-type
 group (below) is measured on its own (transit.measure), and one record per method and group is
 appended to CAMERA_STATE_DIR/transit-YYYY-MM-DD.jsonl, its lane_type the group's. A record holds
-derived numbers only: counts, rates, transit statistics per window, epochs. No frame, signature
-or crossing is written, and no transit
+derived numbers only: counts, rates, transit statistics per window, epochs, each line's unseen
+stretches with why (transit.record), and how many times each line's stream was opened again
+since the start. No frame, signature or crossing is written, and no transit
 as a record of its own (window statistics over few transits can give their times back, not which
 car had which). Crossings, and the signatures in them, are dropped after SIGNATURE_TTL_S (of stream
 time, plus the wall time since the newest frame arrived). Each measurement covers at most that
@@ -21,12 +22,33 @@ moves and that count can be checked.
 A line is not seen while:
 - its stream is down (between the last frame before and the first frame after), or a segment
   expired before it was read (hls.Gap);
+- its picture was frozen: the reader's StreamFrozen, taken back over the stretch its rule
+  judged (StreamFrozen.seconds) before the stream is opened again. After StreamFrozen after
+  StreamFrozen the wait before opening it again doubles, from RECONNECT_S up to
+  RECONNECT_MAX_S, until a read gives RESET_AFTER_S of frames;
+- nothing moved there for more than QUIET_S: no frame whose picture moved (hls.Stamped.moved:
+  the clock ticked, or the whole scene changed) and no car counted at the line;
 - for the loop method, any of its zones is still learning the empty road.
 
 Those times are gaps at that line, never "no cars". Gaps cut the transit measurement into
 epochs. Each epoch needs its own anchors, or a sure count continued from the measurement before
 with no gap, before its transits are trusted; a count carried across a gap is flagged until
 anchors confirm it.
+
+The reader catches a picture that repeats itself exactly, not one frozen with noise
+(stream.frozen_check). So a line counts as seen only up to its last frame that moved or counted a
+car (`moved_at`), not up to its latest frame (seen_until): measured to its latest frame, such a
+freeze would read as an empty road while it lasted, and a record once written is not corrected.
+When something moves again after more than QUIET_S, the stretch since `moved_at` becomes a gap,
+"nothing moved for N s", before that frame reaches the counters, so the cars in it are cut out as
+at any gap; a shorter stretch is seen again, as a quiet road. `moved_at` is the runner's own, not
+the reader's, so a freeze broken by reopened streams is still judged from its last moving frame.
+The hold is a lag. At line B (the City's whole scene) on 2026-10-27 03:32-03:52 UTC, at 21:30
+local traffic, the time from one moving 2-fps pair to the next was p50 0.52 s, p99 8.4 s and at
+most 16.5 s (930 intervals). With that night's motion bursts thinned to a half or a quarter
+(ASSUMPTION: bursts scale with traffic) p99 was 49 s and 112 s, the longest 216 s and 407 s.
+Where nothing at a line moves for minutes, as in a standing queue, the line stays that far
+behind: stale, never an empty road.
 
 Lane types (QUESTIONS.md Q-22). The k-th car at A is the (offset + k)-th at B only among cars of
 one lane type, so each lane type that zones at both lines carry is a group, measured from its
@@ -44,7 +66,11 @@ either line, that a method does not count is not measured by that method: its co
 miss that lane's cars or hold others'. `not_measured` says why, and so do a warning at start and
 the status line. At PDN that is the loop's SENTRI: in both daylight City frames a col-4 car
 covers column E, and in a rendered pass the loop counted such cars there (line-B review,
-2026-10-26).
+2026-10-26). The loop's normal is still measured, although col-1..col-3 cars cover the next
+column too and the loop counts them there again: that over-count stays within the group, so it
+is drift (the anchors' line takes up part of it), not another group's cars, and the loop's
+normal cannot vote until the normal hand count at line B checks it (QUESTIONS.md Q-24). By how
+much it over-counts is not measured (ASSUMPTION).
 
 The loop counters' learnt roads are saved to CAMERA_STATE_DIR/<camera>.loop.npz and seeded on
 start, so a restart in a queue does not wait for the lane to clear. Each road is a median of
@@ -74,7 +100,7 @@ from .calibration import Camera
 from .crossing import METHODS, SIGNATURE_TTL_S, Crossing, Zone
 from .hls import Blocked, Gap
 from .reader import live_reader, state_dir
-from .stream import FROZEN_SECONDS, StreamError, StreamFrozen
+from .stream import StreamError, StreamFrozen
 
 LO_MIN = 0.5             # the fastest believable trip from line A to line B, minutes
 # The slowest trip an anchor may have, minutes. Anchors set an offset on their own only when both
@@ -90,6 +116,22 @@ LO_MIN = 0.5             # the fastest believable trip from line A to line B, mi
 # under 90 min, until a hand-timed or GPS-timed A->B says.
 HI_MIN = SIGNATURE_TTL_S / 60 / 2
 RECONNECT_S = 10.0       # wait before opening a stream again after it failed
+# After StreamFrozen after StreamFrozen the wait doubles (10, 20, 40 ... s) up to RECONNECT_MAX_S,
+# and drops back only once a read has given RESET_AFTER_S of frames. A picture frozen for good
+# was otherwise opened again every 30 s or so (the wait plus the 20 s the check needs), and each
+# opening of the City stream fetches its playlist's segments again (about 2, 0.26 MB, on
+# 2026-10-27). Not reset by a read that ends any other way: a StreamLost from the same stalled
+# source would keep the wait at RECONNECT_S. ASSUMPTION: 60 s of frames is a stream that works,
+# three times what the frozen check needs to raise.
+RECONNECT_MAX_S = 300.0
+RESET_AFTER_S = 60.0
+# A line where nothing moved (hls.Stamped.moved) and no car was counted for longer than this is a
+# gap once something moves again (module docstring). ASSUMPTION, from one 20-min night at line B
+# (2026-10-27 03:32-03:52 UTC) with its motion bursts thinned (bursts assumed to scale with
+# traffic): at 300 s such gaps came 0 an hour at that night's traffic and at half of it, and 0.13
+# an hour at a quarter; at 120 s, 0, 0.8 and 5.8. The trade-off: a picture frozen with noise for
+# less than this reads as a quiet road.
+QUIET_S = 300.0
 SAVE_EVERY_S = 600       # how often the loop counters' learnt roads are saved
 MIXED = "mixed"          # the one group of a pair whose lines share no lane type: every lane
 
@@ -128,7 +170,11 @@ class TransitRunner:
         self.learning_since: dict[str, datetime | None] = {}   # camera -> when loop learning began
         self.first_at: dict[str, datetime] = {}
         self.last_at: dict[str, datetime] = {}
+        # camera -> its last frame that moved or counted a car (or its first frame): kept across
+        # reconnects, so a line is seen up to here and no further (seen_until)
+        self.moved_at: dict[str, datetime] = {}
         self.seen_mono: dict[str, float] = {}   # camera -> time.monotonic() of its latest frame
+        self.reconnects: dict[str, int] = {cam.id: 0 for cam in self.cams}   # reads retried
         # (method, group) -> the last measurement, and the prior it was opened with
         self.previous: dict[tuple[str, str],
                             tuple[transit.Measurement, transit.Prior | None]] = {}
@@ -172,10 +218,13 @@ class TransitRunner:
 
     def _feed(self, cam: Camera) -> None:
         line = self.lines[cam.id]
+        frozen = 0          # reads in a row that ended in StreamFrozen, since one that worked
         while not self._stop.is_set():
             reader = None
             seen_gaps = 0
             resumed = True
+            first_fed = last_fed = None     # the first and the latest frame this read gave
+            why, stalled = None, False
             try:
                 reader = live_reader(cam)
                 for frame in reader.frames(None):
@@ -198,6 +247,7 @@ class TransitRunner:
                         self._gap(cam, gap)
                         seen_gaps += 1
                     self._frame(cam, line, frame)
+                    first_fed, last_fed = first_fed or frame.at, frame.at
             except Blocked as exc:
                 self.errors[cam.id] = f"BLOCKED {exc}"
                 if cam.source == "hls":
@@ -206,27 +256,39 @@ class TransitRunner:
                     self.blocked.add(cam.id)
                     log.error("%s: blocked by the server (%s); no longer read", cam.id, exc)
                     return
-                log.warning("%s: %s; reconnecting in %.0f s", cam.id, exc, RECONNECT_S)
+                why = exc
             except StreamFrozen as exc:
-                # The frozen frames were already counted as road with no cars: take them back
-                # as a gap, so the line's count is not read as zero traffic.
+                # The frozen frames were already counted as road with no cars: take back the
+                # stretch the reader's rule judged as a gap, so the line's count is not read as
+                # zero traffic.
                 self.errors[cam.id] = f"StreamFrozen: {exc}"
                 last = self.last_at.get(cam.id)
                 if last is not None:
-                    since = max(last - timedelta(seconds=FROZEN_SECONDS), self.first_at[cam.id])
+                    since = max(last - timedelta(seconds=exc.seconds), self.first_at[cam.id])
                     self._gap(cam, Gap(since, (last - since).total_seconds(),
                                        "picture frozen or black"))
-                log.warning("%s: %s; reconnecting in %.0f s", cam.id, exc, RECONNECT_S)
+                why, stalled = exc, True
             except StreamError as exc:
                 self.errors[cam.id] = f"{type(exc).__name__}: {exc}"
-                log.warning("%s: %s; reconnecting in %.0f s", cam.id, exc, RECONNECT_S)
+                why = exc
             except Exception as exc:
                 self.errors[cam.id] = f"{type(exc).__name__}: {exc}"
                 log.exception("%s failed; reconnecting", cam.id)
             finally:
                 if reader is not None:
                     reader.http.close()
-            self._stop.wait(RECONNECT_S)
+            if first_fed is not None and (last_fed - first_fed).total_seconds() >= RESET_AFTER_S:
+                frozen = 0
+            if stalled:
+                frozen += 1
+            wait = min(RECONNECT_MAX_S, RECONNECT_S * 2 ** max(0, frozen - 1))
+            if why is not None:
+                log.warning("%s: %s; reconnecting in %.0f s", cam.id, why, wait)
+            if self._stop.is_set():
+                return
+            with self._lock:
+                self.reconnects[cam.id] = self.reconnects.get(cam.id, 0) + 1
+            self._stop.wait(wait)
 
     def _gap(self, cam: Camera, gap: Gap) -> None:
         line = self.lines[cam.id]
@@ -238,18 +300,40 @@ class TransitRunner:
 
     def _frame(self, cam: Camera, line: str, frame) -> None:
         self.errors.pop(cam.id, None)
+        # None is a reader with no frozen check (hls.Stamped.moved), which cannot say "still"
+        moved = getattr(frame, "moved", None) is not False
+        if moved:
+            self._quiet(cam, frame.at)
+        counted = False
         for counter in self.counters[cam.id]:
-            found = counter.add(frame)
+            found = [c for c in counter.add(frame) if c.line == line]
             own = counter.gaps()
+            counted = counted or bool(found)
             with self._lock:
-                self.crossings[(counter.method, line)].extend(c for c in found if c.line == line)
+                self.crossings[(counter.method, line)].extend(found)
                 self.gaps[(counter.method, line)].extend(own)
             if counter.method == "loop":
                 self._learning(cam, line, counter, frame.at)
+        if counted and not moved:
+            # A car crossed in a frame whose picture barely changed: the line was live, so the
+            # frame is judged as a moving one is, but only now that its cars are found. A gap
+            # then holds them, and they are cut out with it.
+            self._quiet(cam, frame.at)
         with self._lock:    # seen only once its crossings and gaps are kept
             self.first_at.setdefault(cam.id, frame.at)
+            if moved or counted or cam.id not in self.moved_at:
+                self.moved_at[cam.id] = frame.at
             self.last_at[cam.id] = frame.at
             self.seen_mono[cam.id] = time.monotonic()
+
+    def _quiet(self, cam: Camera, at: datetime) -> None:
+        """Something moved at `at`. If nothing had at the line for more than QUIET_S, that
+        stretch could have been a picture frozen with noise as well as a quiet road: it becomes
+        a gap, through to `at` (a frame's crossings carry its time, so this frame's are in it)."""
+        since = self.moved_at.get(cam.id)
+        if since is not None and (at - since).total_seconds() > QUIET_S:
+            seconds = (at - since).total_seconds()
+            self._gap(cam, Gap(since, seconds, f"nothing moved for {seconds:.0f} s"))
 
     def _learning(self, cam: Camera, line: str, counter, at: datetime) -> None:
         """While any loop zone of the line is learning, the line's loop count is short: that
@@ -269,11 +353,12 @@ class TransitRunner:
     # -- measuring ----------------------------------------------------------------------------
 
     def seen_until(self) -> datetime | None:
-        """Both lines are observed up to the older of their latest frames."""
+        """Both lines are observed up to the older of their latest frames, each held back to its
+        last frame that moved or counted a car (`moved_at`; module docstring)."""
         with self._lock:
             if len(self.last_at) < 2:
                 return None
-            return min(self.last_at.values())
+            return min(min(at, self.moved_at.get(cid, at)) for cid, at in self.last_at.items())
 
     def measure(self) -> dict[tuple[str, str], tuple[transit.Measurement, transit.Now | None]]:
         """(method, group) -> its measurement and the count now, for each one measurable."""
@@ -369,7 +454,8 @@ class TransitRunner:
         if method == "loop":
             for cam in self.cams:
                 since = self.learning_since.get(cam.id)
-                if self.lines[cam.id] == line and since is not None:
+                # `at` can be held back before it (seen_until): nothing is open there yet
+                if self.lines[cam.id] == line and since is not None and since < at:
                     gaps.append(Gap(since, (at - since).total_seconds(), "loop zones learning"))
         return gaps
 
@@ -392,7 +478,11 @@ class TransitRunner:
                         # to the minute: the latest frame's time can be a car's crossing time
                         "seen_until": m.end.replace(second=0, microsecond=0).isoformat(),
                         "line_a": f"{self.cams[0].id}:{self.line_a}",
-                        "line_b": f"{self.cams[1].id}:{self.line_b}"})
+                        "line_b": f"{self.cams[1].id}:{self.line_b}",
+                        # how often each line's stream was opened again since the start: with
+                        # gaps_a / gaps_b, what cut the epochs
+                        "reconnects_a": self.reconnects.get(self.cams[0].id, 0),
+                        "reconnects_b": self.reconnects.get(self.cams[1].id, 0)})
             out.append(rec)
         return out
 
@@ -413,6 +503,14 @@ class TransitRunner:
             err = self.errors.get(cam.id)
             parts.append(f"{cam.id}: " + (f"ERROR {err}" if err else
                                           "waiting" if lag is None else f"{lag:.0f} s behind"))
+            with self._lock:
+                last, moved = self.last_at.get(cam.id), self.moved_at.get(cam.id)
+                held = None if last is None or moved is None else (last - moved).total_seconds()
+                reconnects = self.reconnects.get(cam.id, 0)
+            if held is not None and held >= 10:     # 1 in 100 over 8.4 s on a live night
+                parts[-1] += f", nothing moved for {held:.0f} s"
+            if reconnects:
+                parts[-1] += f", reopened {reconnects}x"
             if cam.id in self.blocked:
                 parts[-1] += " (stopped: blocked)"
         lines = [" | ".join(parts)]
@@ -479,7 +577,9 @@ def _groups(types_a: dict[str, str | None], types_b: dict[str, str | None]) -> t
     flow-weighted mean of 35-39. With half the cars SENTRI at 8 min and the rest at 40, every
     pooled window read 7.8-11.2 min, anchored and unflagged, where each group measured on its
     own read 7.9-8.1 and 39.9-40.1 (the scenario of LaneTypeGroups in
-    tests/border/test_border_camera_runner.py, run through this runner as of 1221c9f)."""
+    tests/border/test_border_camera_runner.py: pooled through the runner as of 1221c9f, which
+    measured no groups and had no "normal" type, so read as "general"; by group through this
+    runner as of d2f3b29)."""
     shared = ({t for t in types_a.values()} & {t for t in types_b.values()}) - {None}
     return tuple(sorted(shared)) or (MIXED,)
 

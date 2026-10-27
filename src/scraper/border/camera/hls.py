@@ -44,7 +44,7 @@ from urllib.parse import urljoin
 import httpx
 import numpy as np
 
-from .stream import FROZEN_SECONDS, StreamFrozen, StreamLost, frozen_check
+from .stream import FROZEN_SECONDS, StreamFrozen, StreamLost, forget, frozen_check
 
 WRAP = 1 << 33                 # MPEG-TS timestamps are 33-bit, at 90 kHz: they wrap every 26.5 h
 CLOCK_HZ = 90_000
@@ -79,6 +79,10 @@ class Stamped:
     image: np.ndarray          # BGR, at the reader's size
     at: datetime               # capture time, UTC, from the stream's own clock
     pts: int                   # 90 kHz, as decoded (unwrapped by ffmpeg)
+    # Whether the picture moved since the reader's frame before, by stream.frozen_check: the
+    # clock ticked, or a whole scene changed by FROZEN_DIFF_SCENE. False for a read's first
+    # frame, which has nothing to compare with. None: this reader has no frozen check.
+    moved: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -335,7 +339,13 @@ class HlsReader:
 
     `playlist_url` is a callable so an expiring URL (YouTube's last about six hours) can be
     resolved again. `user_agent` is our normal, honest one: if a site blocks it, the read fails
-    and is reported; the client is never disguised to get past a block (ADR-0014)."""
+    and is reported; the client is never disguised to get past a block (ADR-0014).
+
+    Without a `live_region` (a whole scene, the City cameras) `fps` must be
+    stream.SCENE_MAX_FPS (2) or less: the frozen check there takes frames that repeat exactly
+    for a stalled encoder, and on a live City picture the native frames changed at least every
+    0.42 s, against these frames picked at least 0.48 s apart. A faster read is refused before
+    anything is fetched."""
 
     def __init__(self, playlist_url: Callable[[], str], clock: str, size: tuple[int, int],
                  fps: float, user_agent: str,
@@ -395,9 +405,14 @@ class HlsReader:
         Gaps found on the way are appended to `self.gaps`, placed where they are in stream time
         (where the pump's fed content ended), not where the consumer happens to be, and sized
         by the jump in PTS across them. A timeline cut ends the read with TimelineCut after the
-        frames before it."""
+        frames before it.
+
+        Each frame says whether it `moved` (stream.frozen_check); the first frame of a read has
+        no pair and says False. A playlist that is gone (404/410) or ended drops the cached
+        channel listing its URL came from (stream.forget), so a YouTube stream restarted under
+        a new video id is found on the next read."""
+        check = frozen_check(self.fps, self.live_region)   # refuses a whole scene read too fast
         url = self._url_fn()                     # before ffmpeg starts: a failure leaks nothing
-        check = frozen_check(self.fps, self.live_region)
         self.last_seq = self.last_at = None      # each read starts afresh; gaps are within a read
         self.clock = Clock()
         first: datetime | None = None
@@ -426,7 +441,9 @@ class HlsReader:
                 while not stop.is_set():
                     try:
                         text = self._get(url).text
-                    except StreamLost:
+                    except StreamLost as exc:
+                        if isinstance(exc, Gone):
+                            forget(url)              # the resolve below lists the channel afresh
                         url = self._url_fn()         # an expired URL: resolve it once more
                         text = self._get(url).text
                     pl = parse_playlist(text, url)
@@ -475,10 +492,13 @@ class HlsReader:
                         self.last_seq = seg.seq
                     if pl.ended:
                         hole(skipped + unlisted)
+                        forget(url)
                         decoder.proc.stdin.close()
                         return
                     stop.wait(max(1.0, pl.target_duration / 2))
             except BaseException as exc:  # noqa: BLE001 - handed to the consumer below
+                if isinstance(exc, Gone):
+                    forget(url)
                 errors.append(exc)
                 try:
                     decoder.proc.stdin.close()
@@ -505,10 +525,10 @@ class HlsReader:
                     if time.monotonic() - placed > STAMP_WATCHDOG_S:
                         raise StreamLost("no frame could be stamped for 30 s")
                     continue
-                check(image)                         # raises StreamFrozen
+                moved = check(image)                 # raises StreamFrozen
                 self.last_at = at
                 first = first or at
-                yield Stamped(image, at, pts)
+                yield Stamped(image, at, pts, moved)
                 placed = time.monotonic()            # the consumer's own time does not count
                 if seconds is not None and (at - first).total_seconds() >= seconds:
                     return

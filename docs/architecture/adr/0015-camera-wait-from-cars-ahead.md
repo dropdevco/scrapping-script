@@ -10,8 +10,9 @@
   unchanged, because no camera Signal is built.
 - **Changes:** the component doc's "for grading and calibration, not for display", which now reads that
   the owner sees the numbers on this PC (decision 2).
-- **References:** QUESTIONS.md Q-21, Q-22 and Q-23 to Q-26; `docs/components/border-camera-reader.md`,
-  section "Combined estimate"; SPEC §5.1.
+- **References:** QUESTIONS.md Q-21, Q-22, Q-23 to Q-26 and Q-33; `docs/components/border-camera-reader.md`,
+  section "Combined estimate"; SPEC §5.1. How a line's gaps are found, and how far its count is
+  "seen", is [ADR-0016](0016-frozen-when-the-picture-repeats.md) (Proposed, 2026-10-27).
 
 ## Context
 
@@ -60,8 +61,9 @@ Four facts shaped the decision:
 
    **The methods sit side by side and are never averaged.** There is no mean, no envelope and no
    combined minutes. `agree` says whether they agree, within max(3 min, 20 %) (ASSUMPTION). Agreement
-   is necessary but not sufficient: both counters see the same frames and zones, and the same cars
-   hide from both. One method per condition (light, speed band) is chosen later from hand counts.
+   is necessary but not sufficient: where both counters measure a group, they see the same frames and
+   zones, and the same cars hide from both. One method per condition (light, speed band) is chosen
+   later from hand counts.
 
    If any segment is not known, the result is a **floor**: the sum of the known lows, with no minutes
    and no high. B→booth stays unknown, so every total is a floor, until all three of these exist:
@@ -90,6 +92,10 @@ Four facts shaped the decision:
    - **As built, the rule is one step stricter than the owner's words.** A count that transit flags
      (no anchors have checked it within `CHECK_MAX_MIN`, 60 min) also shows "—", as "count not checked
      by anchors in the last 60 min" (asked in Q-26).
+   - **As built, a method the runner does not measure for a group** (a zone's `"methods"` in
+     `cameras.json` leaves it out, as yolox-only col-e does for the loop's SENTRI at PDN) shows "—, not
+     measured: <why>", and is listed among that group's `would_vote` reasons. It shows no minutes, so
+     the rule above is unchanged (added 2026-10-27).
    - **`show_minutes`** in `pairs.json` is true. Set to false, the page and terminal say only "recorded,
      not shown".
    - **The page shows each stretch** through the same rule. The A→B stretch is gated by its count. The
@@ -110,6 +116,8 @@ Four facts shaped the decision:
 4. **Only a pair with a CBP lane id votes (Proposed).** At PDN that is the SENTRI group (`car_sentri`).
    The normal group pools standard and Ready, so it has no lane id and never votes, unless the owner
    confirms that Ready is physically separate before line B (Q-25). A pooled "mixed" group never votes.
+   While col-e is counted by yolox only (Q-24), SENTRI has one method. Its `agree` stays None, and
+   "loop not measured" alone keeps its `would_vote` false, until a 15-min col-e hand count lifts that.
 
 ## Alternatives considered
 
@@ -133,21 +141,39 @@ Four facts shaped the decision:
 
   `pdn-north` is pulled twice, once by the runner and once by the queue reader (the owner's OK,
   2026-10-26). The command calls `cv2.setNumThreads(4)`, and `--methods loop` is the fallback if the
-  CPU falls behind.
+  CPU falls behind. That fallback gives no SENTRI wait while col-e is counted by yolox only (Q-24).
 - **Files.**
   - New: `queue-<date>.jsonl`, `camera-<date>.jsonl` and `camera-replay-<name>.jsonl`.
   - They hold derived numbers only, with every time cut to the minute. No frame is written.
   - Per-vehicle data stays in the runner's memory for at most 3 h, as ADR-0014 decision 4 requires.
   - `--replay` recombines the logged files under the live rule and prints the self-check. It gives
     back the live records, except where a reading reached the log after its tick, after a restart,
-    or across a UTC midnight (component doc).
+    across a UTC midnight, or, for a log that does not carry its run's `not_measured`, where
+    `cameras.json` `"methods"` or `--methods` are not the live run's (component doc).
 - **Tonight every total is a floor,** because B→booth is not timed. After dusk the count is unsure:
   no colour anchors form in the dark.
 - **Lane types are measured apart.** Zones are typed per Q-22, and the runner measures each type that
-  both lines carry on its own: one record per method and group. At PDN the groups are
-  `normal` (A lanes 1-4 ↔ B col-1..col-4) and `sentri` (A lane-5 ↔ B col-e). A pair pools its lanes
+  both lines carry on its own: one record per method and group. The exception is a group with a zone
+  that names the counters allowed there (`cameras.json` `"methods"`). Any other method leaves that
+  group "not measured", with no record. At PDN the groups are
+  `normal` (A lanes 1-4 ↔ B col-1..col-4) and `sentri` (A lane-5 ↔ B col-e). col-4's cars cover col-e,
+  so col-e is counted by yolox only (Q-24), and a tick gives 3 records: loop normal, yolox normal and
+  yolox sentri. A pair pools its lanes
   as "mixed" only when its lines share no type. ADR-0014's consequence "One lane type per pair"
   describes the state before this. It is not edited here, because it is an accepted record.
+- **A method that is not measured (2026-10-27, after review).**
+  - `camera estimate` writes the run's `not_measured` into every transit record, and `--replay` uses
+    it. Rejected: logging only `--methods`, which still drifts when `cameras.json` `"methods"` change
+    (as when col-e is lifted after its hand count); documenting the difference only.
+  - In `combine`, `not_measured` wins over a record of the same method and group, which then feeds
+    neither `agree` nor the vote's reasons. Rejected: letting the record win, which would show a wait
+    that today's configuration says does not hold. The live path cannot reach this; only a replay of a
+    log without `not_measured` under a changed `cameras.json` can (Q-33).
+  - A run in which no method measures any group writes no camera record, and the page says why.
+    Rejected: an empty camera record, which a replay could not make again. Refusing to start is left
+    to the owner (Q-33).
+  - The page's agreement line names the method that is not measured, instead of "both methods need
+    minutes".
 - **Line B was redrawn on 2026-10-26** from two daylight City frames, by the owner's leave. That voids
   any K_eff timed before, though none existed. Every timing must use these zones.
 - **City frames.** `snapshot` and `read --debug` refuse a display:false camera unless `--calibration`
@@ -165,4 +191,5 @@ Four facts shaped the decision:
   - hand counts per group at A and B (Q-24);
   - whether Ready is separate before line B (Q-25);
   - whether SENTRI cars queue with the others on the street before lane-5 splits off (Q-27);
-  - decisions 3 and 4 (Q-26).
+  - decisions 3 and 4 (Q-26);
+  - three choices about methods that are not measured (Q-33).

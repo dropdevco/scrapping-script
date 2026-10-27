@@ -27,6 +27,7 @@ disagree, the commit body is the primary source.
 | [0013](0013-weighted-fusion-of-wait-signals.md) | A trust-weighted Chisme estimate is shown beside today's freshest-reading number | Accepted |
 | [0014](0014-crossing-time-from-two-cameras.md) | Crossing time is measured between a Mexican-side and a US-side camera, by two methods side by side | Accepted |
 | [0015](0015-camera-wait-from-cars-ahead.md) | The camera wait is counted from the cars ahead, one method at a time, and shown only to the owner | Accepted in part (decision 2, display on the owner's PC); decisions 1, 3 and 4 Proposed |
+| [0016](0016-frozen-when-the-picture-repeats.md) | A whole-scene camera is frozen when its picture repeats; a line where nothing moves is held back, and cut after 300 s | Proposed |
 
 ## Writing a new one
 

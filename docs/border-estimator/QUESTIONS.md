@@ -143,7 +143,8 @@ not a confirmed one.
     as a wait, so it is not labelled SENTRI or filed as `car_sentri` until it is checked against
     timed crossings.
 - **SENTRI and normal are measured apart.** The runner gives one record per counting method and lane
-  type.
+  type. The exception is the loop's SENTRI at PDN, which is not measured: col-e is counted by yolox
+  only (Q-24).
 - **Two rulings from the redraw, for the owner to confirm:**
   - The band along the left wall has no zone. It was empty in both frames while every other column
     was queued, has cones at its far end, and is about 1-2 m wide by a rough model of the camera.
@@ -194,10 +195,20 @@ capture, hours_utc, n, date}`. A method is checked for a group when its capture 
 lines.
 
 **Column E first.** Seen from this low camera, col-4's cars cover col-e, and the loop counter does
-count them as SENTRI: in a rendered check (2026-10-26), a loop over col-e alone counted each col-4
-car passing in front of it 3 times. So `cameras.json` names col-e as counted by yolox only
+count them as SENTRI: in a rendered check (2026-10-26, synthetic frames, script not kept), a loop
+over col-e alone counted 2 crossings for 6 col-4 cars passing in front of it with the zones'
+`metres` (3 per car before the zones had them). So `cameras.json` names col-e as counted by yolox only
 (`"methods": ["yolox"]`), and the loop does not measure SENTRI: its SENTRI wait reads "not
 measured". A 15-min hand count at col-e lifts that.
+
+**The normal columns too.** col-1..col-3 cars cover the next column in the same way, so the loop's
+normal count at B also counts them again in col-2..col-4 (by how much is not measured; ASSUMPTION).
+That over-count stays inside the group, so it reads as drift, not as another group's cars. The
+loop's normal stays measured but cannot vote: hand-count the normal columns at B for 15 min with
+col-1 queued.
+- **Open (2026-10-27):** take the loop off col-2..col-4 now (`"methods": ["yolox"]`), or only if that
+  count is not within 5 %? Either way the loop then measures nothing at PDN. **Default, as built:**
+  only if the count fails.
 
 ### Q-25. Is Ready physically separate from standard before line B?
 
@@ -220,7 +231,7 @@ numbers filed under `car` and `car_ready`.
 - **(c)** only grade?
 
 **2. Decision 4.** Only a pair with a CBP lane id votes. At PDN that is SENTRI, unless Q-25 says Ready
-is separate.
+is separate. While col-e is counted by yolox only, SENTRI has one method and cannot vote (Q-24).
 
 **3. Display details.** Decision 2 (display on this PC) is accepted. As built:
 - **(i) A flagged count.** A count that anchors have not checked within 60 min shows "—". That is
@@ -252,7 +263,148 @@ known, for a group whose own lanes are short of A:
 Should those be unknown too until this is answered? Today it changes nothing shown, because every total
 is a floor until K_eff is timed (Q-23).
 
+### Q-28. ADR-0016: how long may nothing move at a line, and what comes with it
+
+The City camera (line B) has no burned-in clock. Its picture now counts as frozen only when it repeats
+exactly. A freeze re-encoded with noise is caught by the runner instead: once nothing has moved at a line
+for more than `QUIET_S`, that stretch is cut, and until then the line counts as seen only up to its last
+moving frame ([ADR-0016](../architecture/adr/0016-frozen-when-the-picture-repeats.md), Proposed). Each
+choice below is built as its default, which stays an ASSUMPTION until you confirm it.
+
+**1. `QUIET_S`.** **Default: 300 s.** The figures come from one 20-min night at line B (2026-10-26,
+21:32-21:52 local), with its motion bursts thinned to stand for lighter traffic (ASSUMPTION):
+
+| `QUIET_S` | Gaps an hour at full / half / a quarter of that traffic | A noisy freeze shorter than this reads as |
+|---|---|---|
+| 120 s | 0 / 0.8 / 5.8 | a quiet road, for up to 2 min |
+| **300 s (built)** | 0 / 0 / 0.13 | a quiet road, for up to 5 min |
+| 600 s | 0 / 0 / 0 | a quiet road, for up to 10 min |
+
+The old rule caught such a freeze in 20-30 s, but it fired 50.4 times an hour on a live picture and made
+every cut. At about 3 cars a minute (ASSUMPTION), a 5-min freeze hides about 15 exits at B, and a sure
+count stays sure until anchors dispute it.
+
+**2. Smaller choices**, each built as its default:
+- **(i) The still tier's share.** Frozen when 14 of the last 40 pairs repeat exactly, a third. It is a
+  judgement: the live night had at most 0 in any 40, with each pair at least 0.48 s apart against a
+  longest unchanged native stretch of 0.42 s. **Default:** keep it, and check it in the runs of Q-32.
+- **(ii) Black with noise.** Black re-encoded with noise is now caught only by the no-motion gap. Should a
+  whole scene darker than `BLACK_LEVEL` for 20 s be frozen on its own? **Default:** no.
+- **(iii) A standing queue at B.** With nothing moving there for more than 120 s, the page marks the
+  camera wait "Stale" although the stream is live, and its text names only a stopped stream. Accept it,
+  and with what words? Proposed: "Stale: the slower counting line is N min behind live (its stream may
+  have stopped without a refusal, or nothing has moved at it), so these waits are N min old."
+  **Default:** today's text.
+- **(iv) The reopen backoff.** After freeze after freeze the wait grows to at most 300 s, and drops back
+  to 10 s after a read gave 60 s of frames. It spares the City feed (read at your risk, ADR-0014), but
+  a real recovery can be read up to 5 min late. **Default:** as built.
+- **(v) A car counted in a still frame.** After more than 300 s with nothing moving, a car counted in a
+  frame whose picture barely changed ends that stretch with a gap that cuts the car too. Accept that, or
+  take such a crossing as proof that the road was live? **Default:** cut.
+- **(vi) What records now say about gaps.** Each gap's start (to the minute), its length in seconds, and
+  its reasons, which can name a segment number ("segment N expired before it was fetched"). Within the
+  privacy rule? **Default:** written. The review judged minute-level starts safe.
+- **(vii) Reopens.** Records count them since the runner started (`reconnects_a`, `reconnects_b`). Is
+  that enough to measure line A's restart rate for Q-29, or do you want a count per record span (which
+  overlapping 3-h spans make hard to difference)? **Default:** since the start.
+- **(viii) A YouTube stream restarted under a new id.** Two paths are still slow: the new stream not yet
+  listed when the channel is listed again (that listing is then kept up to 10 min), and an old playlist
+  that stalls instead of ending. Drop the listing on every miss too, at the cost of listing the channel
+  on every reopen while a stream is down? **Default:** no.
+
+### Q-29. Anchoring needs about 3 h uncut: how should runs be made?
+
+An anchor sets the count from nothing only when both ends of its trip lie inside the measured span with
+`HI_MIN` (90 min) to spare. So the first anchoring epoch must run longer than 180 − T min uncut at
+**both** lines: about 174 min for a trip T of about 6 min (ASSUMPTION; read it as 150-179 min). Your
+97.5-min run on 2026-10-26 could not have anchored even with no cut. No code change alone lets a run of
+under about 3 h anchor.
+
+- **(a) Run longer, no code.** **Default.** Run `camera transit` or `camera estimate` for at least
+  3.5 h, away from sunset: wholly after civil dusk (for example 19:00-22:30 local now) or wholly in
+  daylight. Sunset at PDN was 18:22 on 2026-10-26; after DST ends on 1 Nov it is about 17:15 local.
+  Around sunset the old rule cut 6 times in 7 min, and the loop's road is least known there (Q-31). A
+  reopen at either line restarts the 174 min, and line A's reopen rate is not measured (0 in 117.7 min).
+- **(b) Lower `hi_min` for PDN, through a new ADR.** A per-pair `hi_min` in `pairs.json`, for example
+  45 min, so that `hi_min` − T is under `CHECK_MAX_MIN` (60 min). An anchoring epoch then needs only
+  more than 90 − T min. The cost: a trip longer than `hi_min` cannot anchor, and its epoch comes out
+  flagged (simulation only). That A→B stays under 90 min is itself an ASSUMPTION (ADR-0014).
+
+**Neither alone promises an unflagged "now".** Under (a), every enclosed anchor left B at least
+`hi_min` − T (about 84 min) before the end, which is more than `CHECK_MAX_MIN`, and they all fall within
+one stretch T wide, so they give no drift. "Now" is then unflagged only if later anchors lie within 3
+cars (`INLIER_MIN_CARS`) of an offset 90 min old: A and B capture must agree to about 1 % (3 in 270
+cars). On 2026-10-26 at 21:30, yolox counted "normal" at 2.62 a minute at A and 2.97 at B over rough
+spans, which neither shows nor rules out 1 %. A 15-min hand count of yolox "normal" at both lines
+(Q-24) should come first.
+
+### Q-30. Was SENTRI open at 21:30 on 2026-10-26, or is col-e in the wrong place?
+
+In the live check of 2026-10-26, 21:32-21:52 local, yolox counted **0 cars** at B's col-e in every
+measured span, while A's lane-5 counted about 1.75 a minute. SENTRI cannot anchor while that holds.
+- **(a) SENTRI was closed or empty at B then.** CBP's published SENTRI lanes for that hour would tell.
+- **(b) col-e is drawn in the wrong place.** It was drawn from two daylight frames with no car in
+  column E (Q-22).
+
+**Default:** nothing changes, and SENTRI stays unanchored. A col-e hand count (Q-24) in hours when
+SENTRI is open settles it either way.
+
+### Q-31. The loop's learnt road across the change from day to night light
+
+In your run of 2026-10-26 (17:30-19:07 local, before line B's redraw, pooled "mixed"), the loop's exits
+at B per 15 min were 17, 18, 8, 3, 4, 0, 4. They fell from about 18:00, while its entries at A stayed at
+40-97 and yolox's exits at B at 18-37. A loop zone replaces a held road only after about 32 min of
+refreshes that agree (`loop.AGREE_REFRESHES`), and meanwhile it says "counting", with no gap. So a road
+learnt in one light probably counts short in the other, without a flag; a road saved at night would do
+the same at the next daytime start. This is an inference, not proven: that run also used the old line B.
+- **(a)** Mark a held or saved road stale on a large change in the whole scene's light, and relearn it
+  (a gap while learning).
+- **(b)** Open a gap while the whole sample bank disagrees with the held road.
+- **(c)** Use the loop at B by day or by night only, or not across dusk.
+- **(d) Default, as built:** nothing. The loop at B is not trusted across dusk, and runs for Q-29 avoid
+  sunset.
+
+Is the loop worth keeping at B across dusk at all?
+
+### Q-32. Verification runs for ADR-0016, logging numbers only
+
+The frozen rule, `QUIET_S` and the hold's lag rest on one 20-min night at line B. May one designated
+agent, or you, make these runs? Each pulls the City stream at your risk (ADR-0014), and logs numbers only:
+frame differences, segment times and records, never a picture.
+
+| Run | When (local) | What it checks |
+|---|---|---|
+| Dusk | across sunset, for example 17:30-19:30 now (sunset 18:22; about 17:15 after 1 Nov) | the still tier through the camera's change to night, where the old rule cut 6 times in 7 min; the loop's road (Q-31) |
+| Deep night | 01:00-04:00 | an empty bridge: false "nothing moved" gaps |
+| Peak | a standing queue at B | the hold's lag, and the "Stale" flag (Q-28 iii) |
+| Under load | any, under `camera estimate` | lag and expired segments with the queue reader running too. At night yolox took up to 538 ms a frame at B and 723 ms at A, against 500 ms at 2 fps |
+
+Each run logs:
+- at B, the most pairs that repeat exactly in any 40 (the still tier needs 14), the native repeat
+  lengths (the live maximum was 0.42 s), and the black level;
+- `seen_until` minus the latest frame at B, and every "nothing moved" gap;
+- every reopen per line (line A's rate is unmeasured), and the reasons in `gaps_a` and `gaps_b`;
+- each line's lag behind live.
+
+Expected: no `StreamFrozen` at B, and one epoch per method and group after the loop learns its road.
+**Default:** no run until you say.
+
+### Q-33. Methods that are not measured: three choices
+
+At PDN the loop does not measure SENTRI (Q-24). Built on 2026-10-27, each as its default:
+- **(i) A run that measures nothing.** When no method of a run measures any group, `camera estimate`
+  runs, writes no camera record, and the page says why. Should it refuse to start instead, and so not
+  read the City stream for nothing? **Default:** it runs.
+- **(ii) Replaying an old log.** For a log that does not carry its run's `not_measured`, replayed under a
+  later `cameras.json`, the method `cameras.json` now refuses is shown "not measured" and the run's wait
+  for it is hidden. Is that the grading you want, or should a replay keep what the run measured?
+  **Default:** "not measured" wins.
+- **(iii) `camera transit`'s logs.** Only `camera estimate` writes `not_measured` into its records. Should
+  `camera transit` write it too, so that its logs replay exactly? **Default:** no.
+
 ---
 
 *Answers recorded 2026-10-12 on branch `chisme-border`; Q-21 on 2026-10-24 and Q-22 on 2026-10-26 on
-`chisme-border-waittime`. Q-23 to Q-26 raised 2026-10-26 with ADR-0015; Q-27 the same day, with the lane-type split.*
+`chisme-border-waittime`. Q-23 to Q-26 raised 2026-10-26 with ADR-0015; Q-27 the same day, with the lane-type split.
+Q-28 to Q-33, and the open point in Q-24, raised 2026-10-26/27 from that evening's run and the night's
+live check, with ADR-0016 and the review of methods that are not measured.*

@@ -9,13 +9,18 @@ import unittest
 import unittest.mock
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 pytest.importorskip("cv2")
 
+import queue_sim as qs
+from test_border_camera_combine import PAST_A, measured, no_line_at_a, pair, timed_k
+
+from scraper.border.camera import combine, viewer
 from scraper.border.camera.calibration import Lane
+from scraper.border.camera.hls import Gap
 from scraper.border.camera.measure import LaneEstimate
 from scraper.border.camera.viewer import serve
 from scraper.border.camera.worker import lane_summary
@@ -358,6 +363,171 @@ class OneWorkerPerStateDir(unittest.TestCase):
             url = f"http://127.0.0.1:{server.server_address[1]}/status.json"
             with urllib.request.urlopen(url) as r:
                 self.assertEqual(list(json.loads(r.read())["cameras"]), ["mine"])
+
+
+class EstimateSection(unittest.TestCase):
+    """The page's camera-estimate section (owner decision 2026-10-26, ADR-0015 decision 2):
+    per lane-type group, each counting method's wait for PDN northbound side by side, exactly as
+    combine.display allows, with CBP's published wait beside it for comparison only."""
+
+    @classmethod
+    def setUpClass(cls):
+        run = qs.run(**PAST_A)
+        end = run.at(run.minutes)
+        m, sure = measured(run)
+        _, unsure = measured(run, start_min=100.0)
+        cls.sure_a_to_b = combine.a_to_b(sure).minutes
+        cls.pair = pair()
+        records = [sure, dict(unsure, method="yolox"), dict(sure, lane_type="normal"),
+                   dict(unsure, method="yolox", lane_type="normal")]
+        cls.floor = combine.combine(records, no_line_at_a(end), cls.pair, end)
+        timed = pair(k_eff={"loop": [timed_k(run, m)], "yolox": []}, primary_booths=10)
+        cls.whole = combine.combine([sure], no_line_at_a(end), timed, end,
+                                    q_b={("loop", "sentri"): True})
+        cls.cbp = {"240202": {"car": {"state": "open", "minutes": 25, "label": None},
+                              "car_ready": {"state": "open", "minutes": 20, "label": None},
+                              "car_sentri": {"state": "closed", "minutes": None, "label": None}}}
+
+    def snapshot(self, record, show=True):
+        return {"pair": {"a": "pdn-north", "b": "city-pdn-north", "port_number": "240202",
+                         "direction": "north", "show_minutes": show, "camera_votes": False},
+                "record": record, "stopped": None, "updated_at": None}
+
+    def test_each_value_and_reason_is_what_combine_display_gives(self):
+        shown = viewer.estimate_view(self.snapshot(self.floor), self.cbp)
+        self.assertEqual(shown["title"], "Paso del Norte northbound - camera estimate")
+        self.assertEqual([g["group"] for g in shown["groups"]], ["normal", "sentri"])
+        for g in shown["groups"]:
+            self.assertEqual([m["method"] for m in g["methods"]], ["loop", "yolox"])
+            self.assertFalse({"minutes", "low", "high", "mean", "average"} & set(g))
+            for m in g["methods"]:
+                d = combine.display(self.floor["groups"][g["group"]]["methods"][m["method"]])
+                self.assertEqual((m["value"], m["detail"]), (d["value"], d["detail"]))
+        loop, yolox = shown["groups"][1]["methods"]
+        self.assertRegex(loop["value"], r"^≥ \d+$")
+        self.assertEqual(loop["unit"], " min")
+        self.assertEqual((yolox["value"], yolox["unit"]), ("—", ""))
+        self.assertIn("count not anchored", yolox["detail"])
+        # Each stretch by the same rule on its own, B->booth untimed. So the sure loop's A->B
+        # shows its minutes beside a floor total (asked in Q-26), and the page's note says so.
+        # The yolox count here has no sd, which already makes its A->B unknown: that the stretch
+        # follows the count's sureness is shown by the carried count's test below.
+        self.assertIn("beside a floor", shown["note"])
+        loop_segs = {s["name"]: s for s in loop["segments"]}
+        yolox_segs = {s["name"]: s for s in yolox["segments"]}
+        self.assertEqual(loop_segs["a_to_b"]["value"], str(round(self.sure_a_to_b)))
+        self.assertEqual(yolox_segs["a_to_b"]["value"], "—")
+        self.assertIn("count not anchored", yolox_segs["a_to_b"]["detail"])
+        self.assertEqual(loop_segs["tail_to_a"]["value"], "0")
+        self.assertEqual(loop_segs["b_to_booth"]["value"], "—")
+        self.assertIn("not timed", loop_segs["b_to_booth"]["detail"])
+
+    def test_a_count_with_its_sd_known_but_not_sure_shows_no_a_to_b_minutes(self):
+        """CountTest 6b's carried count: A->B has minutes in the record (sd known), but the
+        count is not sure, so that stretch shows "—" like the total, not its minutes."""
+        run = qs.run(**PAST_A)
+        g0 = run.at(192.0)
+        b = [c for c in run.b if not g0 < c.at <= g0 + timedelta(seconds=30)]
+        _, rec = measured(run, b=b, gaps_b=(Gap(g0, 30.0, "test"),))
+        end = run.at(200.0)
+        out = combine.combine([rec], no_line_at_a(end), self.pair, end)
+        w = out["groups"]["sentri"]["methods"]["loop"]
+        self.assertTrue(next(s for s in w["segments"] if s["name"] == "a_to_b")["known"])
+        self.assertFalse(w["count"]["sure"])
+        loop = viewer.estimate_view(self.snapshot(out))["groups"][0]["methods"][0]
+        a_b = {s["name"]: s for s in loop["segments"]}["a_to_b"]
+        self.assertEqual((a_b["value"], a_b["unit"]), ("—", ""))
+        self.assertIn("count not anchored (carried)", a_b["detail"])
+
+    def test_a_record_far_behind_live_is_flagged_stale(self):
+        """When the slower line has stopped moving on (a stream dropped without a refusal),
+        each tick re-measures the same old minute: the page says how far behind live it is."""
+        at = datetime.fromisoformat(self.floor["at"])
+        fresh = dict(self.snapshot(self.floor), updated_at=(at + timedelta(minutes=2)).isoformat())
+        shown = viewer.estimate_view(fresh)
+        self.assertEqual((shown["message"], shown["stale"]), ("", False))
+        old = dict(fresh, updated_at=(at + timedelta(minutes=7)).isoformat())
+        shown = viewer.estimate_view(old)
+        self.assertTrue(shown["stale"])
+        self.assertIn("7 min behind live", shown["message"])
+        self.assertEqual(len(shown["groups"]), 2)          # still shown, under the flag
+        page = viewer.PAGE
+        self.assertIn("estimate.stopped || estimate.stale", page)
+
+    def test_minutes_only_for_a_sure_count_with_every_stretch_known(self):
+        shown = viewer.estimate_view(self.snapshot(self.whole))
+        loop = shown["groups"][0]["methods"][0]
+        w = self.whole["groups"]["sentri"]["methods"]["loop"]
+        self.assertTrue(loop["minutes_shown"])
+        self.assertEqual((loop["value"], loop["unit"]), (str(round(w["minutes"])), " min"))
+        self.assertTrue(all(s["unit"] == " min" for s in loop["segments"]), loop["segments"])
+
+    def test_with_show_minutes_false_no_number_is_shown(self):
+        shown = viewer.estimate_view(self.snapshot(self.whole, show=False))
+        for g in shown["groups"]:
+            for m in g["methods"]:
+                for item in (m, *m["segments"]):
+                    self.assertEqual((item["value"], item["unit"], item["detail"]),
+                                     ("", "", combine.NOT_SHOWN))
+
+    def test_cbp_sits_beside_each_group_for_its_own_lane_type_and_feeds_nothing(self):
+        shown = viewer.estimate_view(self.snapshot(self.floor), self.cbp)
+        normal, sentri = shown["groups"]
+        self.assertEqual(normal["cbp_text"],
+                         "For comparison only, CBP publishes: standard 25 min · Ready 20 min.")
+        self.assertEqual(sentri["cbp_text"], "For comparison only, CBP publishes: SENTRI closed.")
+        other = viewer.estimate_view(self.snapshot(self.floor),
+                                     {"240202": {"car_sentri": {"state": "open", "minutes": 90}}})
+        for got in (shown, other):
+            for g in got["groups"]:
+                g.pop("cbp_text")
+        self.assertEqual(shown, other)
+        none = viewer.estimate_view(self.snapshot(self.floor))
+        self.assertIn("not fetched yet", none["groups"][0]["cbp_text"])
+        failed = viewer.estimate_view(self.snapshot(self.floor), None, "TimeoutError: x")
+        self.assertIn("unavailable", failed["groups"][0]["cbp_text"])
+
+    def test_each_group_names_its_cbp_lane_and_why_it_does_not_vote(self):
+        normal, sentri = viewer.estimate_view(self.snapshot(self.floor))["groups"]
+        self.assertEqual(sentri["lane_text"], "CBP lane car_sentri")
+        self.assertEqual(normal["lane_text"], "No CBP lane id: this group never votes.")
+        for g in (normal, sentri):
+            self.assertTrue(g["vote_text"].startswith("Votes in the hidden estimate: no ("))
+            self.assertIn("ADR-0015 decision 3 proposed", g["vote_text"])
+        self.assertEqual(sentri["agree_text"], "Agreement: — (both methods need minutes).")
+
+    def test_under_camera_view_the_section_says_the_estimate_is_not_running(self):
+        server = serve(0)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        with urllib.request.urlopen(base + "/estimate.json") as r:
+            shown = json.loads(r.read())
+        self.assertEqual(shown, {"running": False, "message": viewer.NOT_RUNNING,
+                                 "title": "Paso del Norte northbound - camera estimate"})
+        with urllib.request.urlopen(base + "/") as r:
+            page = r.read().decode("utf-8")
+        self.assertIn('id="estimate"', page)
+        self.assertIn('fetch("estimate.json"', page)
+
+    def test_the_running_estimate_is_served_with_cbp_from_its_worker(self):
+        from scraper.border.camera.estimate import Live
+
+        live = Live(self.pair)
+        live.update(self.floor)
+        server = serve(0)
+        server.estimate = live
+        server.worker = unittest.mock.Mock(status={"cameras": {}, "cbp": self.cbp},
+                                           _lock=threading.Lock())
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/estimate.json"
+        with urllib.request.urlopen(url) as r:
+            shown = json.loads(r.read())
+        self.assertEqual(shown, viewer.estimate_view(live.snapshot(), self.cbp))
+        self.assertEqual(shown["at"], self.floor["at"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,19 @@
+{
+  "_readme": "Facts about a pair of counting lines (ADR-0014) that the camera wait (combine.py, ADR-0015 proposed) needs and the cameras cannot give. Keyed by camera A. a/b: the cameras holding line A and line B; street: the camera before A whose queue reader times a line reaching back past camera A's view. Line A's place on camera A's strips is not stored here: it is computed from cameras.json when the pair is loaded. gap_street_a_m: the road between the street's view and camera A's, from a map, unverified. k_eff: per method, the B-to-booth constant in that method's counted cars, K_eff = t_Bb x mu_B (one timed car's minutes from line B to the canopy front, times the method's counted rate at B that minute). Each entry is an aggregate only, never one car's timing: {lane_type, light, hours_utc [from, to), low, high, n, date}; an entry with no hours_utc holds at every hour. Any redraw of line B voids every entry. primary_booths: CBP's total primary car booths here, a site fact (never CBP's live lanes open), null until the owner gives it; with under_canopy_cars_per_booth (ASSUMPTION) it bounds the cars no camera sees under the canopy. hand_counts: per method, lane type and line, the method's capture against a 15-min hand count: {method, lane_type, line, capture, hours_utc, n, date}. line_a_verified/line_b_verified: the owner has signed off the line's drawing. show_minutes: the owner sees each method's camera wait on this PC (ADR-0015 decision 2, accepted 2026-10-26; never public). camera_votes: the camera wait votes in the hidden estimate (ADR-0015 decision 3, proposed: false).",
+  "pdn-north": {
+    "port_number": "240202",
+    "direction": "north",
+    "a": "pdn-north",
+    "b": "city-pdn-north",
+    "street": "pdn-south-street",
+    "gap_street_a_m": {"value": 70, "uncertainty": 83, "source": "map, unverified"},
+    "k_eff": {"loop": [], "yolox": []},
+    "primary_booths": null,
+    "under_canopy_cars_per_booth": [0, 2],
+    "hand_counts": [],
+    "line_a_verified": false,
+    "line_b_verified": false,
+    "show_minutes": true,
+    "camera_votes": false
+  }
+}

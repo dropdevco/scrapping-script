@@ -10,15 +10,56 @@ the last reading's frame with each metre of lane tinted by occupancy. That pictu
 the worker's memory and served from there, never written to disk. Under each bridge, CBP's own
 published waits are shown for comparison only; they never feed the camera estimate.
 Only bound to localhost; it is a viewer for the machine running the cameras, not a website.
+
+Below the cards, a "camera estimate" section shows each counting method's camera wait for
+Paso del Norte northbound (combine.py), per lane-type group, side by side and never averaged,
+with its stretches and flags, and CBP's published wait for that lane type beside it for
+comparison only (ADR-0015 decision 2, accepted 2026-10-26: the owner, on this PC). What each
+number shows is decided by combine.display alone (`estimate_view`). The section is filled only
+when `camera estimate` serves the page; under `camera view` it says the estimate is not running.
+Line B's camera (the City's) is read by that command and never shown: the section has no
+picture.
 """
 from __future__ import annotations
 
+import copy
 import json
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from ..cbp import PORTS
+from . import combine
+from .estimate import LAG_ALERT_S
 from .measure import plain
 from .reader import state_dir
+
+ESTIMATE_PAIR = {"port_number": "240202", "direction": "north"}   # the pair `camera estimate`
+                                                                  # measures (pairs.json)
+NOT_RUNNING = ("The camera estimate is not running: this page was started by `camera view`. "
+               "Run `camera estimate` instead to see each counting method's camera wait here.")
+NOTHING_YET = ("No camera wait this minute: the counting lines have nothing measured yet (both "
+               "streams must be seen first).")
+ESTIMATE_NOTE = (
+    "Each counting method's wait is shown on its own, never averaged. A method's wait shows "
+    "minutes only while the count between the lines is anchored (or given, or continued from "
+    "such a count) with its spread known, and every stretch is measured; otherwise the floor "
+    "(≥) or a dash, with the reason. Each stretch is shown by the same rule on its own, so a "
+    "measured stretch can show minutes beside a floor (asked in Q-26). For you on this PC only: "
+    "nothing here votes or is published. Line B's camera is read but never shown.")
+STALE = ("Stale: the slower counting line is {n} min behind live (its stream may have stopped "
+         "without a refusal), so these waits are {n} min old.")
+GROUP_LABELS = {"sentri": "SENTRI", "normal": "Normal lanes (standard and Ready, not told apart)",
+                "mixed": "Every lane pooled (lane types not split)"}
+METHOD_LABELS = {"loop": "Loop counter", "yolox": "YOLOX counter"}
+SEGMENT_LABELS = {"tail_to_a": "Back of the line → line A", "a_to_b": "Line A → line B",
+                  "b_to_booth": "Line B → booth"}
+CBP_LANES = {"sentri": (("car_sentri", "SENTRI"),),                 # display only, never an input
+             "normal": (("car", "standard"), ("car_ready", "Ready")),
+             "mixed": (("car", "standard"), ("car_ready", "Ready"), ("car_sentri", "SENTRI"))}
+AGREE_TEXT = {True: "The two methods agree (within 3 min or 20 %).",
+              False: "The two methods disagree.",
+              None: "Agreement: — (both methods need minutes)."}
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -72,6 +113,16 @@ footer { font-size:12.5px; color:var(--soft) }
   font-size:13px; padding:12px; text-align:center }
 .legend { font-size:12px; color:var(--soft) }
 .cbp { font-size:12.5px; color:var(--soft); margin-top:-6px }
+.estimate .egroup { display:grid; gap:8px; border-top:1px dashed var(--line); padding-top:10px }
+.estimate h3 { margin:0; font-size:1.05rem }
+.methods { display:grid; gap:10px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)) }
+.method { border:1px solid var(--line); border-radius:6px; padding:10px 12px; display:grid; gap:4px;
+  align-content:start }
+.method .wait { text-align:left }
+.mname { font-size:13px; color:var(--soft) }
+.seg { display:grid; grid-template-columns: 1fr auto; gap:0 10px; font-size:13px }
+.seg .detail { font-size:12px }
+.estimate .cbp { margin-top:0 }
 </style></head>
 <body><main>
 <header>
@@ -81,6 +132,7 @@ footer { font-size:12.5px; color:var(--soft) }
   booth ÷ that speed. <span id="clock"></span></p>
 </header>
 <div class="grid" id="bridges"><div class="empty">Waiting for the worker's first status…</div></div>
+<section class="bridge estimate" id="estimate" aria-live="polite"></section>
 <footer id="foot"></footer>
 </main>
 <script>
@@ -239,12 +291,59 @@ function render() {
     "Live video is YouTube's own embedded player. " +
     (age > 10 ? `Status not refreshed for ${age} s — is the worker still running?` : "");
 }
+// The camera estimate (estimate.json): every value, sign and reason is decided in Python by
+// combine.display (viewer.estimate_view); the page only prints them. It has no picture.
+let estimate = null;
+function renderEstimate() {
+  const box = document.getElementById("estimate");
+  if (!estimate) return;
+  const parts = [el("h2", null, estimate.title)];
+  if (!estimate.running) {
+    parts.push(el("div", "status", estimate.message));
+    box.replaceChildren(...parts);
+    return;
+  }
+  if (estimate.at) parts.push(el("div", "status", `As of ${clock(new Date(estimate.at))} (the slower counting line's time).`));
+  if (estimate.message) parts.push(el("div", estimate.stopped || estimate.stale ? "flag" : "status", estimate.message));
+  for (const g of estimate.groups) {
+    const sec = el("div", "egroup");
+    sec.append(el("h3", null, g.label), el("div", "detail", g.lane_text));
+    const row = el("div", "methods");
+    for (const m of g.methods) {
+      const card = el("div", "method");
+      card.append(el("div", "mname", m.label));
+      const w = el("div", "wait", m.value);
+      if (m.unit) w.append(el("small", null, m.unit));
+      card.append(w, el("div", "detail", m.detail));
+      for (const s of m.segments) {
+        const r = el("div", "seg");
+        r.append(el("span", null, s.label), el("span", null, s.value + s.unit));
+        if (s.detail) r.append(el("span", "detail", s.detail));
+        card.append(r);
+      }
+      if (m.count_text) card.append(el("div", "detail", m.count_text));
+      if (m.transient.length) card.append(el("div", "flag", m.transient.join(" · ")));
+      if (m.info.length) card.append(el("div", "detail", m.info.join(" · ")));
+      row.append(card);
+    }
+    sec.append(row, el("div", "cbp", g.cbp_text), el("div", "detail", g.agree_text),
+      el("div", "detail", g.vote_text));
+    parts.push(sec);
+  }
+  parts.push(el("div", "legend", estimate.note));
+  box.replaceChildren(...parts);
+}
 async function poll() {
   try {
     const r = await fetch("status.json", { cache: "no-store" });
     if (r.ok) { status = await r.json(); fetchedAt = Date.now(); }
   } catch (e) { /* keep showing the last status; the footer says how old it is */ }
+  try {
+    const r = await fetch("estimate.json", { cache: "no-store" });
+    if (r.ok) estimate = await r.json();
+  } catch (e) { /* keep the last one */ }
   render();
+  renderEstimate();
 }
 poll(); setInterval(poll, 2000); setInterval(render, 1000);
 </script></body></html>
@@ -273,6 +372,9 @@ class Handler(BaseHTTPRequestHandler):
                 path = state_dir() / "status.json"
                 body = path.read_bytes() if path.exists() else b'{"cameras": {}}'
             kind = "application/json"
+        elif self.path.split("?")[0] == "/estimate.json":
+            body = json.dumps(_estimate(self.server), ensure_ascii=False).encode("utf-8")
+            kind = "application/json"
         else:
             self.send_error(404)
             return
@@ -285,6 +387,120 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):     # the worker's output matters; request lines do not
         pass
+
+
+def _estimate(server) -> dict:
+    """The page's camera-estimate section from the `camera estimate` running this server
+    (`server.estimate`, an estimate.Live), with CBP's published waits from its Worker; or, with
+    none (`camera view`), that it is not running."""
+    live = getattr(server, "estimate", None)
+    if live is None:
+        return estimate_view(None)
+    worker = getattr(server, "worker", None)
+    cbp = cbp_error = None
+    if worker is not None:
+        with worker._lock:
+            cbp = copy.deepcopy(worker.status.get("cbp"))
+            cbp_error = worker.status.get("cbp_error")
+    return estimate_view(live.snapshot(), cbp, cbp_error)
+
+
+def estimate_view(snapshot: dict | None, cbp: dict | None = None,
+                  cbp_error: str | None = None) -> dict:
+    """What the camera-estimate section prints, from the latest camera record (combine.combine)
+    in `snapshot` (estimate.Live.snapshot). Every value and reason comes from combine.display,
+    so the page shows exactly what the rule allows: per group and method, the total or its
+    floor, and each stretch. `cbp` (worker status "cbp": port -> lane -> state and minutes) is
+    shown beside each group for comparison only; it never reaches a camera number.
+
+    A record whose `at` lies more than LAG_ALERT_S behind the tick that made it (`updated_at`)
+    is flagged stale: a stream that stops without a refusal leaves each tick re-measuring the
+    same old minute, for up to SIGNATURE_TTL_S."""
+    pair = (snapshot or {}).get("pair") or ESTIMATE_PAIR
+    port = pair.get("port_number")
+    title = (f"{PORTS.get(port, {}).get('name', port)} {pair.get('direction')}bound - "
+             "camera estimate")
+    if snapshot is None:
+        return {"running": False, "title": title, "message": NOT_RUNNING}
+    show = bool(pair.get("show_minutes"))
+    record = snapshot.get("record")
+    behind = _behind_s(record, snapshot.get("updated_at"))
+    stale = behind > LAG_ALERT_S
+    out = {"running": True, "title": title, "at": record.get("at") if record else None,
+           "stopped": snapshot.get("stopped"), "stale": stale,
+           "message": (snapshot.get("stopped") or ("" if record else NOTHING_YET)
+                       or (STALE.format(n=round(behind / 60)) if stale else "")),
+           "groups": [], "note": ESTIMATE_NOTE}
+    lanes = (cbp or {}).get(port)
+    for group, g in ((record or {}).get("groups") or {}).items():
+        reasons = g.get("would_vote_reasons") or []
+        out["groups"].append({
+            "group": group, "label": GROUP_LABELS.get(group, group),
+            "lane_text": (f"CBP lane {g['lane']}" if g.get("lane")
+                          else "No CBP lane id: this group never votes."),
+            "methods": [_method_view(m, w, show) for m, w in g["methods"].items()],
+            "agree_text": AGREE_TEXT[g.get("agree")],
+            "vote_text": ("Votes in the hidden estimate: yes." if g.get("would_vote") else
+                          "Votes in the hidden estimate: no" + (f" ({'; '.join(reasons)})."
+                                                                 if reasons else ".")),
+            "cbp_text": _cbp_text(group, lanes, cbp_error)})
+    return out
+
+
+def _method_view(method: str, wait: dict, show: bool) -> dict:
+    shown = combine.display(wait, show)
+    count = wait.get("count") or {}
+    sd = count.get("offset_sd")
+    return {"method": method, "label": METHOD_LABELS.get(method, method),
+            "value": shown["value"], "unit": _unit(shown["value"]), "detail": shown["detail"],
+            "minutes_shown": shown["minutes_shown"],
+            "segments": [_segment_view(s, count, show) for s in wait.get("segments") or []],
+            "count_text": ("" if wait.get("not_measured") else
+                           f"Cars between the lines: count {count.get('source') or 'none'}, "
+                           f"sd {'—' if sd is None else f'{sd} cars'}"
+                           + ("" if count.get("sure") else ", not sure")),
+            "transient": list(wait.get("transient") or []), "info": list(wait.get("info") or [])}
+
+
+def _segment_view(seg: dict, count: dict, show: bool) -> dict:
+    """One stretch through combine.display, as a wait of that stretch alone. Line A to B rests
+    on the count between the lines, so it carries that count and is shown only as the count
+    allows; the tail (the queue reader) and B to the booth (K_eff over the counted exit rate)
+    do not rest on that count. Each stretch is gated on its own, so a measured stretch can show
+    minutes beside the method's floor total (asked in Q-26 (ii); ESTIMATE_NOTE says so)."""
+    one = {"count": count if seg["name"] == "a_to_b" else {"sure": True},
+           "floor": not seg["known"], "minutes": seg["minutes"], "low": seg["low"],
+           "high": seg["high"], "segments": [seg], "transient": []}
+    shown = combine.display(one, show)
+    return {"name": seg["name"], "label": SEGMENT_LABELS.get(seg["name"], seg["name"]),
+            "value": shown["value"], "unit": _unit(shown["value"]), "detail": shown["detail"]}
+
+
+def _behind_s(record: dict | None, updated_at: str | None) -> float:
+    """Seconds from the record's `at` (the slower line's time) to the tick that made it; both
+    are cut to the minute. 0 when either is missing."""
+    if not record or not record.get("at") or not updated_at:
+        return 0.0
+    return (datetime.fromisoformat(updated_at)
+            - datetime.fromisoformat(record["at"])).total_seconds()
+
+
+def _unit(value: str) -> str:
+    return "" if value in ("", "—") else " min"
+
+
+def _cbp_text(group: str, lanes: dict | None, error: str | None) -> str:
+    if not lanes:
+        return ("CBP's published waits unavailable right now." if error
+                else "CBP's published waits not fetched yet.")
+    parts = []
+    for lane_id, label in CBP_LANES.get(group, ()):
+        lane = lanes.get(lane_id) or {}
+        if lane.get("state") == "open" and lane.get("minutes") is not None:
+            parts.append(f"{label} {lane['minutes']} min")
+        else:
+            parts.append(f"{label} {str(lane.get('state') or 'not published').replace('_', ' ')}")
+    return f"For comparison only, CBP publishes: {' · '.join(parts)}."
 
 
 def serve(port: int, host: str = "127.0.0.1") -> ThreadingHTTPServer:

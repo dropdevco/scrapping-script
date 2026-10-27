@@ -10,9 +10,18 @@
                                                                # the always-on worker
     python -m scraper.border camera view [--cameras ...] [--every 120] [--port 8090]
                                                                # the worker plus a live page
+    python -m scraper.border camera estimate [--port 8090] [--every 60] [--methods loop,yolox]
+                                                               # queue reader + both counters,
+                                                               # each method's PDN camera wait
+    python -m scraper.border camera estimate --replay transit-<date>.jsonl
+                                             [--queue queue-<date>.jsonl]
 
 `read` and `reference` take --source FILE to work from a recorded clip instead of the live
 stream, which is how a calibration is tuned and how a reading is reproduced.
+
+A camera marked display: false (the City of El Paso's) is never shown on our pages, and its
+frames are not written: `snapshot` and `read --debug` refuse it before opening anything, unless
+--calibration says the frame is for drawing a counting line (see HIDDEN_RULE).
 
 Runs on a machine we own (QUESTIONS.md, Q-3), not GitHub Actions: it has to watch video
 continuously. State (each lane's empty-road reference, the worker's heartbeat) lives in
@@ -359,6 +368,33 @@ def _camera(cameras: dict[str, Camera], cid: str) -> Camera:
     return cameras[cid]
 
 
+HIDDEN_RULE = (
+    "{cam} is display: false: its frames are never shown on our pages (ADR-0014 decision 5; "
+    "QUESTIONS.md Q-21) and are not written except to draw a counting line.")
+CALIBRATION_RULE = (
+    "--calibration: this frame is only for drawing a counting line, by the owner's leave "
+    "(2026-10-26). Keep it outside the repository, never commit or publish it, delete it once "
+    "the line is drawn, and never describe the plates or people in it.")
+# The repository root, for this package installed editable from src/ (as in .venv): a hidden
+# camera's calibration frame must never be written inside it.
+REPO = Path(__file__).resolve().parents[4]
+
+
+def _refuse_hidden(cam: Camera, calibration: bool, out: str) -> None:
+    """Stop before any stream is opened when a hidden camera's frame would be written, unless
+    the frame is for calibration and `out` lies outside the repository; then print the rule it
+    is written under."""
+    if cam.display:
+        return
+    if not calibration:
+        raise SystemExit(HIDDEN_RULE.format(cam=cam.id)
+                         + " Pass --calibration only to draw a counting line.")
+    if Path(out).resolve().is_relative_to(REPO):
+        raise SystemExit(HIDDEN_RULE.format(cam=cam.id) + f" {out} is inside the repository "
+                         f"({REPO}); write the calibration frame to a temp folder instead.")
+    print(HIDDEN_RULE.format(cam=cam.id) + " " + CALIBRATION_RULE, flush=True)
+
+
 def cmd_list(args, cameras) -> int:
     for cam in cameras.values():
         if cam.source == "hls":
@@ -379,6 +415,7 @@ def cmd_list(args, cameras) -> int:
 
 def cmd_snapshot(args, cameras) -> int:
     cam = _camera(cameras, args.camera)
+    _refuse_hidden(cam, getattr(args, "calibration", False), args.out)
     if args.source:
         frame = next(frames(args.source, FPS, 1, live_region(cam)))
     else:
@@ -459,6 +496,8 @@ def _read_once(cam: Camera, source: str | None, seconds: float,
 
 def cmd_read(args, cameras) -> int:
     cam = _camera(cameras, args.camera)
+    if args.debug:
+        _refuse_hidden(cam, getattr(args, "calibration", False), args.debug)
     try:
         signals = _read_once(cam, args.source, args.seconds, args.debug)
     except StreamError as exc:
@@ -511,6 +550,12 @@ def cmd_transit(args, cameras) -> int:
     return transit(args, cameras)
 
 
+def cmd_estimate(args, cameras) -> int:
+    from .estimate import cmd_estimate as estimate
+
+    return estimate(args, cameras)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m scraper.border camera", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -520,6 +565,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--camera", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--source")
+    p.add_argument("--calibration", action="store_true",
+                   help="allow a display: false camera's frame, only to draw a counting line "
+                        "(--out outside the repository)")
     p = sub.add_parser("reference")
     p.add_argument("--camera", required=True)
     p.add_argument("--seconds", type=float, default=REFERENCE_SECONDS)
@@ -532,6 +580,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source")
     p.add_argument("--json", action="store_true")
     p.add_argument("--debug", help="write the last frame with occupancy and queue drawn on")
+    p.add_argument("--calibration", action="store_true",
+                   help="allow --debug on a display: false camera, only to draw a counting line "
+                        "(the file outside the repository)")
     p = sub.add_parser("run")
     p.add_argument("--cameras", required=True)
     p.add_argument("--seconds", type=float, default=WINDOW_SECONDS)
@@ -548,11 +599,21 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--methods", default="loop,yolox")
     p.add_argument("--every", type=float, default=60, help="seconds between measurements")
     p.add_argument("--minutes", type=float, help="stop after this long (default: run on)")
+    p = sub.add_parser("estimate", help="queue reader and both counters in one process: each "
+                                        "method's camera wait for PDN northbound")
+    p.add_argument("--port", type=int, default=8090)
+    p.add_argument("--every", type=float, default=60, help="seconds between ticks")
+    p.add_argument("--queue-every", type=float, default=120,
+                   help="seconds between queue-reader cycles")
+    p.add_argument("--methods", default="loop,yolox")
+    p.add_argument("--replay", metavar="PATH",
+                   help="re-make the camera records from a logged transit-<date>.jsonl")
+    p.add_argument("--queue", metavar="PATH", help="with --replay: the queue-<date>.jsonl")
     args = parser.parse_args(argv)
     cameras = load_cameras()
     handler = {"list": cmd_list, "snapshot": cmd_snapshot, "reference": cmd_reference,
                "read": cmd_read, "run": cmd_run, "view": cmd_view,
-               "transit": cmd_transit}[args.cmd]
+               "transit": cmd_transit, "estimate": cmd_estimate}[args.cmd]
     return handler(args, cameras)
 
 

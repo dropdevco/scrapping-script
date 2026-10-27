@@ -272,6 +272,120 @@ class ReadCommand(unittest.TestCase):
         self.assertIn("wait at least 7 min", out.getvalue())
 
 
+class HiddenFrames(unittest.TestCase):
+    """A display: false camera (the City's) is never shown and its frames are not written:
+    `snapshot` and `read --debug` refuse it before opening any stream, unless --calibration,
+    which prints the rule the frame is written under (owner, 2026-10-26; Q-21)."""
+
+    def setUp(self):
+        import contextlib
+        import io
+        from pathlib import Path
+
+        from scraper.border.camera import reader as reader_module
+        from scraper.border.camera.calibration import load_cameras
+
+        self.reader = reader_module
+        self.assertFalse(load_cameras()["city-pdn-north"].display)
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.out = Path(d.name) / "frame.png"
+        self.printed = io.StringIO()
+        self.redirect = contextlib.redirect_stdout(self.printed)
+
+    def opened(self):
+        """Every way a frame could be opened, each failing the test if called."""
+        never = AssertionError("a stream or clip was opened")
+        return (unittest.mock.patch.object(self.reader, "live_frames", side_effect=never),
+                unittest.mock.patch.object(self.reader, "frames", side_effect=never),
+                unittest.mock.patch.object(self.reader, "_read_once", side_effect=never))
+
+    def refused(self, argv):
+        live, clip, read = self.opened()
+        with live, clip, read, self.redirect, self.assertRaises(SystemExit) as caught:
+            self.reader.main(argv)
+        self.assertIn("ADR-0014 decision 5", str(caught.exception.code))
+        self.assertIn("--calibration", str(caught.exception.code))
+        self.assertFalse(self.out.exists())
+
+    def test_a_snapshot_of_a_hidden_camera_is_refused_before_any_stream(self):
+        self.refused(["snapshot", "--camera", "city-pdn-north", "--out", str(self.out)])
+        self.refused(["snapshot", "--camera", "city-pdn-north", "--out", str(self.out),
+                      "--source", "clip.ts"])
+
+    def test_read_debug_on_a_hidden_camera_is_refused_before_any_stream(self):
+        self.refused(["read", "--camera", "city-pdn-north", "--debug", str(self.out)])
+
+    def test_read_without_debug_writes_no_frame_and_is_not_refused(self):
+        with unittest.mock.patch.object(self.reader, "_read_once", return_value=[]) as read, \
+                self.redirect:
+            self.assertEqual(self.reader.main(["read", "--camera", "city-pdn-north"]), 0)
+        self.assertIsNone(read.call_args.args[3])
+
+    def test_with_calibration_the_rule_is_printed_and_the_frame_written(self):
+        from datetime import UTC, datetime
+
+        from scraper.border.camera.hls import Stamped
+
+        black = Stamped(np.zeros((720, 1280, 3), np.uint8), datetime(2026, 10, 26, tzinfo=UTC), 0)
+        with unittest.mock.patch.object(self.reader, "live_frames", return_value=iter([black])), \
+                self.redirect:
+            self.reader.main(["snapshot", "--camera", "city-pdn-north", "--out", str(self.out),
+                              "--calibration"])
+        self.assertTrue(self.out.exists())
+        self.assertIn(self.reader.CALIBRATION_RULE, self.printed.getvalue())
+        # The rule printed says when a frame may be written; it does not claim it never is.
+        self.assertNotIn("never written", self.printed.getvalue())
+        with unittest.mock.patch.object(self.reader, "_read_once", return_value=[]) as read, \
+                self.redirect:
+            self.reader.main(["read", "--camera", "city-pdn-north", "--debug", str(self.out),
+                              "--calibration"])
+        self.assertEqual(read.call_args.args[3], str(self.out))
+        self.assertEqual(self.printed.getvalue().count(self.reader.CALIBRATION_RULE), 2)
+
+    def refused_in_repo(self, argv, path):
+        live, clip, read = self.opened()
+        with live, clip, read, self.redirect, self.assertRaises(SystemExit) as caught:
+            self.reader.main(argv)
+        self.assertIn("inside the repository", str(caught.exception.code))
+        self.assertFalse(path.exists())
+
+    def test_with_calibration_a_frame_bound_for_the_repository_is_refused(self):
+        """A City frame never enters the repository: with --calibration, an --out inside it,
+        given whole or relative to a run from the repository root, is refused before any
+        stream opens."""
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parents[2]
+        inside = repo / "tests" / "border" / "_never.png"
+        self.refused_in_repo(["snapshot", "--camera", "city-pdn-north", "--out", str(inside),
+                              "--calibration"], inside)
+        here = os.getcwd()
+        os.chdir(repo)
+        self.addCleanup(os.chdir, here)
+        self.refused_in_repo(["snapshot", "--camera", "city-pdn-north", "--out", "check.jpg",
+                              "--calibration"], repo / "check.jpg")
+
+    def test_with_calibration_a_debug_frame_bound_for_the_repository_is_refused(self):
+        from pathlib import Path
+
+        inside = Path(__file__).resolve().parents[2] / "tests" / "border" / "_never.png"
+        self.refused_in_repo(["read", "--camera", "city-pdn-north", "--debug", str(inside),
+                              "--calibration"], inside)
+
+    def test_a_displayed_camera_needs_no_flag_and_prints_no_rule(self):
+        from datetime import UTC, datetime
+
+        from scraper.border.camera.hls import Stamped
+
+        frame = Stamped(np.zeros((480, 854, 3), np.uint8), datetime(2026, 10, 26, tzinfo=UTC), 0)
+        with unittest.mock.patch.object(self.reader, "live_frames", return_value=iter([frame])), \
+                self.redirect:
+            self.reader.main(["snapshot", "--camera", "pdn-north", "--out", str(self.out)])
+        self.assertTrue(self.out.exists())
+        self.assertNotIn(self.reader.CALIBRATION_RULE, self.printed.getvalue())
+
+
 class WaitBounds(unittest.TestCase):
     def test_the_low_end_is_the_short_distance_at_the_fastest_speed(self):
         low, high = wait_bounds(100, 0, 20, fastest=0.4, slowest=0.2, scale_verified=True)

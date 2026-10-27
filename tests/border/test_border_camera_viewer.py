@@ -496,6 +496,28 @@ class EstimateSection(unittest.TestCase):
             self.assertIn("ADR-0015 decision 3 proposed", g["vote_text"])
         self.assertEqual(sentri["agree_text"], "Agreement: — (both methods need minutes).")
 
+    def test_a_method_not_measured_shows_why_and_no_count_line(self):
+        """A method the runner does not measure (cameras.json counts col-e by yolox only) is a
+        card with its reason: no wait, no stretches, and no 'Cars between the lines' line. It
+        keeps its place before yolox, and the group says agreement is not possible, not that
+        it waits on minutes."""
+        run = qs.run(**PAST_A)
+        end = run.at(run.minutes)
+        _, sure = measured(run)
+        why = "city-pdn-north col-e is counted by yolox only"
+        rec = combine.combine([dict(sure, method="yolox")], no_line_at_a(end), self.pair, end,
+                              not_measured={("loop", "sentri"): why})
+        sentri = next(g for g in viewer.estimate_view(self.snapshot(rec))["groups"]
+                      if g["group"] == "sentri")
+        self.assertEqual([m["method"] for m in sentri["methods"]], ["loop", "yolox"])
+        loop = sentri["methods"][0]
+        self.assertEqual((loop["value"], loop["unit"], loop["detail"], loop["count_text"],
+                          loop["segments"], loop["transient"], loop["info"]),
+                         ("—", "", f"not measured: {why}", "", [], [], []))
+        self.assertIn("if (m.count_text)", viewer.PAGE)
+        self.assertEqual(sentri["agree_text"],
+                         "Agreement: — (not possible: loop not measured here).")
+
     def test_under_camera_view_the_section_says_the_estimate_is_not_running(self):
         server = serve(0)
         threading.Thread(target=server.serve_forever, daemon=True).start()

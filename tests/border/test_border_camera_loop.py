@@ -699,6 +699,23 @@ class Geometry(unittest.TestCase):
         self.assertGreaterEqual(cars, 8)
         self.assertEqual((missed, false), (0, 0))
 
+    def test_a_ground_rectangle_wins_over_a_zones_own_metres_and_a_warning_says_so(self):
+        # A zone's metres are an ASSUMPTION for a camera with no ground rectangle: once the
+        # camera is calibrated, the rectangle measures the zone (LANE_W across, FAR - NEAR
+        # along), and stale assumed metres left in cameras.json must not win silently.
+        cam = camera()
+        zone = Zone(cam.id, "A", "car", zone_quad(NEAR, FAR), metres=(3.5, 3.5))
+        with self.assertLogs("scraper.border.camera.loop", "WARNING") as logged:
+            loop = LoopCounter(cam, (zone,), sample_every_s=0.5, bank_min=8)
+        lp = loop._loops[0]
+        self.assertAlmostEqual(lp.width_m, LANE_W, places=1)
+        self.assertAlmostEqual(lp.length_m, FAR - NEAR, places=1)
+        self.assertIn("car: its metres are not used", logged.output[0])
+        # Metres given to the counter (a tape) still come first.
+        loop = LoopCounter(cam, (zone,), metres={("A", "car"): (3.9, 3.1)}, sample_every_s=0.5,
+                           bank_min=8)
+        self.assertEqual((loop._loops[0].width_m, loop._loops[0].length_m), (3.9, 3.1))
+
     def test_without_a_ground_rectangle_equal_metres_judge_a_car_across_two_columns_once(self):
         # The City's line B: columns side by side, no ground rectangle. Read with square pixels
         # no two columns matched in length, so _beside paired none and a 2.2 m car 0.1 m over

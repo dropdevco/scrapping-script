@@ -243,6 +243,29 @@ class NotMeasuredTest(StateDir):
                                    runner_mod.unmeasured(REAL_CAMS["pdn-north"],
                                                          REAL_CAMS["city-pdn-north"], ["loop"]))
         self.assertEqual(replayed[0]["groups"]["sentri"], json.loads(json.dumps(sentri)))
+        # The run's not_measured goes with each transit record, for a later replay.
+        self.assertEqual([r["not_measured"] for r in records], [{"loop": {"sentri": why}}])
+
+    def test_a_run_that_measures_no_group_says_so_not_that_nothing_is_measured_yet(self):
+        """Every City zone counted by yolox only and a loop-only run: no (method, group) is
+        measured, so no tick will ever make a camera record. The page and the status give the
+        reasons, not "nothing measured yet (both streams must be seen first)"."""
+        yolox_only = {**REAL_CAMS, "city-pdn-north": replace(
+            REAL_CAMS["city-pdn-north"], count_zones=tuple(
+                replace(z, methods=("yolox",)) for z in REAL_CAMS["city-pdn-north"].count_zones))}
+        est = self.open(cams=yolox_only)
+        self.assertEqual(sorted(est.runner.not_measured), [("loop", "normal"), ("loop", "sentri")])
+        self.feed(est, 0, 20)
+        status = est.step(now=T0 + timedelta(minutes=20))
+        self.assertEqual(list(self.dir.glob("camera-*.jsonl")), [])
+        shown = viewer.estimate_view(est.live.snapshot())
+        nm = est.runner.not_measured
+        self.assertEqual(shown["message"], "No camera wait: no method of this run measures any "
+                         f"group (loop normal: {nm[('loop', 'normal')]}; loop sentri: "
+                         f"{nm[('loop', 'sentri')]}).")
+        self.assertTrue(shown["stopped"])                   # shown as a flag, not a status
+        self.assertIn("camera wait: none - no method of this run measures any group", status)
+        self.assertNotIn("nothing measured yet", status)
 
 
 class StatusTest(StateDir):
@@ -521,6 +544,71 @@ class ReplayTest(StateDir):
         self.assertEqual(len({r["run"] for r in logged}), 1)
         again = estimate.replay(logged, [], est.pair)
         self.assertEqual(json.loads(json.dumps(again, ensure_ascii=False, default=str)), live)
+
+    def live_and_replayed(self, method: str, replay_methods: str,
+                          logged: bool = True) -> tuple[list[dict], list[dict]]:
+        """One live tick on the real cameras (col-e counted by yolox only) by scripted `method`
+        counters, and its transit log replayed by cmd_replay with `replay_methods` as
+        --methods. Without `logged`, the log's records do not carry the run's not_measured,
+        as `camera transit`'s and older ones do not."""
+        with unittest.mock.patch.object(TransitRunner, "_counters", lambda self, cam: []):
+            est = estimate.Estimate(REAL_CAMS, self.pair, [method], 120,
+                                    notify=self.alerts.append, alert=False)
+        self.addCleanup(est.close)
+        counter = type("Scripted", (Counter,), {"method": method})
+        at_a, at_b = cars(40)
+        a, b = est.runner.cams
+        est.runner.counters = {a.id: [counter(a, "A", at_a)], b.id: [counter(b, "B", at_b)]}
+        self.feed(est, 0, 20)
+        est.step(now=T0 + timedelta(minutes=20))
+        live = lines(self.dir, "camera-*.jsonl")      # before camera-replay-* exists
+        records = lines(self.dir, "transit-*.jsonl")
+        if not logged:
+            for rec in records:
+                del rec["not_measured"]
+        source = self.dir / "t.jsonl"
+        source.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(estimate.cmd_replay(
+                SimpleNamespace(replay=str(source), queue=None, methods=replay_methods),
+                REAL_CAMS), 0)
+        return live, lines(self.dir, "camera-replay-t.jsonl")
+
+    def test_a_replay_lists_as_not_measured_what_the_log_says_whatever_its_methods(self):
+        """A loop-only run did not measure loop SENTRI, and its log says so: a replay given
+        other --methods still gives back the live record."""
+        live, again = self.live_and_replayed("loop", "yolox")
+        self.assertIn("not_measured", live[0]["groups"]["sentri"]["methods"]["loop"])
+        self.assertEqual(again, live)
+
+    def test_cmd_replay_rebuilds_not_measured_for_a_log_that_does_not_carry_it(self):
+        """With the live run's --methods, the rebuilt not_measured gives back the live record:
+        loop SENTRI listed as not measured, with why."""
+        live, again = self.live_and_replayed("loop", "loop", logged=False)
+        self.assertIn("not_measured", live[0]["groups"]["sentri"]["methods"]["loop"])
+        self.assertEqual(again, live)
+
+    def test_cmd_replay_adds_no_method_the_live_run_did_not_run(self):
+        live, again = self.live_and_replayed("yolox", "yolox", logged=False)
+        self.assertEqual(list(live[0]["groups"]["sentri"]["methods"]), ["yolox"])
+        self.assertEqual(again, live)
+
+    def test_a_log_from_before_lane_types_gains_no_typed_group_in_a_replay(self):
+        """A log written before lane types (every record "mixed", no not_measured) replayed
+        with today's typed cameras: today's loop-SENTRI entry is not added to its ticks."""
+        est = self.open()
+        self.feed(est, 0, 20)
+        est.step(now=T0 + timedelta(minutes=20))
+        old = [dict(r, lane_type="mixed") for r in lines(self.dir, "transit-*.jsonl")
+               if r["lane_type"] == "normal"]
+        for rec in old:
+            del rec["not_measured"]
+        today = runner_mod.unmeasured(REAL_CAMS["pdn-north"], REAL_CAMS["city-pdn-north"],
+                                      ["loop", "yolox"])
+        self.assertIn(("loop", "sentri"), today)
+        again = estimate.replay(old, [], est.pair, today)
+        self.assertEqual([sorted(r["groups"]) for r in again], [["mixed"]])
+        self.assertEqual(list(again[0]["groups"]["mixed"]["methods"]), ["loop"])
 
 
 class CommandTest(StateDir):

@@ -439,12 +439,22 @@ def estimate_view(snapshot: dict | None, cbp: dict | None = None,
             "lane_text": (f"CBP lane {g['lane']}" if g.get("lane")
                           else "No CBP lane id: this group never votes."),
             "methods": [_method_view(m, w, show) for m, w in g["methods"].items()],
-            "agree_text": AGREE_TEXT[g.get("agree")],
+            "agree_text": _agree_text(g),
             "vote_text": ("Votes in the hidden estimate: yes." if g.get("would_vote") else
                           "Votes in the hidden estimate: no" + (f" ({'; '.join(reasons)})."
                                                                  if reasons else ".")),
             "cbp_text": _cbp_text(group, lanes, cbp_error)})
     return out
+
+
+def _agree_text(g: dict) -> str:
+    """AGREE_TEXT, except that a group with a method the runner does not measure (combine's
+    not_measured: at PDN the loop's SENTRI) cannot agree until that changes, so the page names
+    that method rather than waiting on its minutes."""
+    skipped = [m for m, w in g["methods"].items() if w.get("not_measured")]
+    if g.get("agree") is None and skipped:
+        return f"Agreement: — (not possible: {' and '.join(skipped)} not measured here)."
+    return AGREE_TEXT[g.get("agree")]
 
 
 def _method_view(method: str, wait: dict, show: bool) -> dict:

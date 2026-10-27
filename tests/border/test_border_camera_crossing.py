@@ -60,14 +60,18 @@ class MethodsAndMetres(unittest.TestCase):
 
     def test_bad_methods_are_refused(self):
         # A bare string would read as its letters; an empty list would count the zone by none.
-        for bad in ("yolox", [], ["yolo"], ["loop", "radar"]):
-            with self.subTest(methods=bad), self.assertRaises(ValueError):
+        # A number or a nested list is refused with the message, not a bare TypeError; a dict
+        # would read as its keys ({"yolox": false} as yolox only); a duplicate would read
+        # "counted by yolox and yolox only" in runner.unmeasured's reason.
+        for bad in ("yolox", [], ["yolo"], ["loop", "radar"], 5, True, [["loop"]],
+                    {"yolox": True}, ["yolox", "yolox"]):
+            with self.subTest(methods=bad), self.assertRaisesRegex(ValueError, "cam zone e: "):
                 zones_from_raw("cam", [{"line": "B", "lane": "e", "quad": QUAD, "methods": bad}])
 
     def test_bad_metres_are_refused(self):
         for bad in ("3.5", [3.5], [3.5, 3.5, 3.5], [0, 3.5], [3.5, -1], [math.nan, 3.5],
-                    [math.inf, 3.5], [True, 3.5], ["3.5", 3.5]):
-            with self.subTest(metres=bad), self.assertRaises(ValueError):
+                    [math.inf, 3.5], [True, 3.5], ["3.5", 3.5], 3.5, True, {"a": 1, "b": 2}):
+            with self.subTest(metres=bad), self.assertRaisesRegex(ValueError, "cam zone e: "):
                 zones_from_raw("cam", [{"line": "B", "lane": "e", "quad": QUAD, "metres": bad}])
 
 

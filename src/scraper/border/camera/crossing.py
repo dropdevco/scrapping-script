@@ -3,7 +3,8 @@
 A count zone is a short band across one lane, given as four image points at the camera's
 `frame_size`, in this order: near-left, near-right, far-right, far-left. "Near" is where cars come
 from and "far" is where they go, so a car crosses the zone from its near edge to its far edge. At
-PDN both cameras look along the traffic, so far is higher in the picture. The zones of one camera
+PDN, pdn-north looks along the traffic and city-pdn-north looks obliquely across it from low at
+the west wall (cameras.json notes); at both, far is higher in the picture. The zones of one camera
 that share a `line` name ("A", "B") together make that camera's counting line.
 
 Two counters implement `Counter` and run on the same stamped frames:
@@ -60,7 +61,8 @@ class Zone:
     # does not count the zone, and runner.py does not measure the zone's lane-type group by it.
     methods: tuple[str, ...] | None = None
     # (width, length) in metres, for a camera with no ground rectangle (loop._zone_metres);
-    # an ASSUMPTION unless measured.
+    # an ASSUMPTION unless measured. On a camera with one, the ground rectangle measures the
+    # zone and these are not used (loop.LoopCounter warns).
     metres: tuple[float, float] | None = None
 
 
@@ -121,15 +123,19 @@ def zones_from_raw(camera_id: str, raw: list[dict]) -> tuple[Zone, ...]:
             raise ValueError(f"{camera_id} zone {z.get('lane')}: a zone needs exactly four points")
         if z.get("lane_type") not in (None, *LANE_TYPES):
             raise ValueError(f"{camera_id} zone {z.get('lane')}: unknown lane_type")
+        # A list, or the checks below raise a bare TypeError (a number) or read a dict's keys.
+        # `m in METHODS` before set(): an unhashable element must not raise either.
         methods = z.get("methods")
-        if methods is not None and (isinstance(methods, str) or not methods
-                                    or not set(methods) <= set(METHODS)):
-            raise ValueError(f"{camera_id} zone {z.get('lane')}: methods must name one or more "
-                             f"of {', '.join(METHODS)}")
+        if methods is not None and (not isinstance(methods, list | tuple) or not methods
+                                    or not all(m in METHODS for m in methods)
+                                    or len(set(methods)) != len(methods)):
+            raise ValueError(f"{camera_id} zone {z.get('lane')}: methods must be a list naming "
+                             f"one or more of {', '.join(METHODS)}, each once")
         metres = z.get("metres")
-        if metres is not None and (isinstance(metres, str) or len(metres) != 2 or not all(
-                isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
-                and v > 0 for v in metres)):
+        if metres is not None and (not isinstance(metres, list | tuple) or len(metres) != 2
+                                   or not all(isinstance(v, int | float)
+                                              and not isinstance(v, bool) and math.isfinite(v)
+                                              and v > 0 for v in metres)):
             raise ValueError(f"{camera_id} zone {z.get('lane')}: metres must be [width, length], "
                              f"each above 0")
         zones.append(Zone(camera_id, str(z["line"]), str(z["lane"]), quad, z.get("lane_type"),

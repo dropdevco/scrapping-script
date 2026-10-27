@@ -373,13 +373,19 @@ def combine(records: Sequence[Mapping], queue_windows: Iterable[Mapping], pair: 
     `pair` an entry of pairs.json plus a_lanes, a_m and r_m (computed at load); `at` the
     runner's seen_until(). `q_b` is (method, group) -> B inside the line, when measured.
     `not_measured` is (method, group) -> why the runner does not measure it
-    (TransitRunner.not_measured): such a method is listed with its reason, never as a wait."""
+    (TransitRunner.not_measured): such a method is listed with its reason, never as a wait.
+    It wins over a record of that method and group, which then feeds neither `agree` nor the
+    vote's reasons: the live runner writes none, so only a replay that rebuilt not_measured
+    from cameras.json as it is now can hold one (estimate.replay)."""
     windows = list(queue_windows)
+    nm = not_measured or {}
     by_group: dict[str, dict[str, Mapping]] = defaultdict(dict)
     for rec in records:
-        by_group[rec.get("lane_type") or MIXED][rec.get("method")] = rec
+        m, g = rec.get("method"), rec.get("lane_type") or MIXED
+        if (m, g) not in nm:
+            by_group[g][m] = rec
     skipped: dict[str, dict[str, str]] = defaultdict(dict)
-    for (m, g), why in (not_measured or {}).items():
+    for (m, g), why in nm.items():
         skipped[g][m] = why
         by_group[g]                     # a group no method measures still appears
     groups = {}

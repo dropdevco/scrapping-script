@@ -4,7 +4,7 @@ method's camera wait for Paso del Norte northbound, side by side (combine.py, AD
     python -m scraper.border camera estimate [--port 8090] [--every 60] [--queue-every 120]
                                              [--methods loop,yolox]
     python -m scraper.border camera estimate --replay transit-<date>.jsonl
-                                             [--queue queue-<date>.jsonl]
+                                             [--queue queue-<date>.jsonl] [--methods loop,yolox]
 
 One process holds both locks: `transit.lock`, and through its Worker `worker.lock`. So
 `camera view`, `camera run` and `camera transit` refuse to start while it runs, and it refuses
@@ -33,6 +33,14 @@ live tick wrote where a reading reached the log after that tick, after a restart
 process starts with no readings in memory), or across a UTC midnight (one --queue file).
 Each transit record `camera estimate` writes names its tick (`run`, the process's start cut
 to the minute, and `tick`, a count), so a replay splits the log into the live ticks exactly.
+It also carries the run's `not_measured` (method -> group -> why), so a replay lists the same
+methods as not measured whatever cameras.json and --methods say by then. A record without it
+(`camera transit`'s, or one written before it was logged) has it rebuilt from cameras.json
+"methods" as they are now and from the replay's --methods (give the live run's), for the
+record's own kind of group only: a log of untyped ("mixed") records gains no typed group.
+Where those are not the live run's, such a replay can differ in the methods it lists as not
+measured, and a method they now refuse is listed so even where the run measured it
+(combine.combine).
 
 The owner is shown each method's wait on this PC (ADR-0015 decision 2, accepted 2026-10-26),
 through combine.display, the one rule for what is shown; nothing votes (decisions 3 and 4,
@@ -192,7 +200,8 @@ def tick(runner, queue_log: QueueLog, pair: Mapping,
     """Measure, write the runner's records as `camera transit` does, and combine them into the
     camera record, appended to camera-<UTC date>.jsonl. Returns (measured, records, camera
     record or None). `name` ({"run", "tick"}) is written into each transit record, so a
-    replay knows which records one tick wrote (`ticks`).
+    replay knows which records one tick wrote (`ticks`), and so is the runner's not_measured,
+    so a replay lists the methods this run did not measure (`replay`).
 
     Once line B's camera has refused us it is never read again (ADR-0014 decision 5), and its
     count would only be re-measured over the same frozen stretch: then nothing is written and
@@ -202,8 +211,11 @@ def tick(runner, queue_log: QueueLog, pair: Mapping,
     if pair["b"] in runner.blocked:
         return measured, [], None
     records = runner.records(measured)
+    skipped: dict[str, dict[str, str]] = {}
+    for (m, g), why in runner.not_measured.items():
+        skipped.setdefault(m, {})[g] = why
     for rec in records:
-        rec.update(name or {})
+        rec.update(name or {}, not_measured=skipped)
     runner.write(records)
     if not records:
         return measured, records, None
@@ -308,12 +320,24 @@ def status_text(runner, records: Sequence[Mapping], camera: Mapping | None,
     if pair["b"] in runner.blocked:
         lines.append(f"  camera wait: none - line B stopped: {pair['b']} refused us "
                      "(ADR-0014 decision 5)")
+    elif camera is None and measures_nothing(runner):
+        lines.append("  camera wait: none - no method of this run measures any group (above)")
     elif camera is None:
         lines.append("  camera wait: nothing measured yet")
     else:
         lines.append(combine.status_text(camera, bool(pair.get("show_minutes"))))
     lines += [f"  alert: {text}" for text in alerts]
     return "\n".join(lines).encode("ascii", "replace").decode("ascii")
+
+
+def measures_nothing(runner) -> str | None:
+    """Why no tick of this run will ever make a camera record, when every method and group of
+    the run is not measured (runner.not_measured, from cameras.json "methods" and --methods);
+    else None. The page and the status say so, not that nothing is measured yet."""
+    keys = [(m, g) for m in runner.methods for g in runner.groups]
+    if not keys or not all(k in runner.not_measured for k in keys):
+        return None
+    return "; ".join(f"{m} {g}: {runner.not_measured[(m, g)]}" for m, g in keys)
 
 
 class Cpu:
@@ -386,6 +410,11 @@ class Estimate:
             stopped = (f"Line B stopped: {self.pair['b']} refused us "
                        f"({self.runner.errors.get(self.pair['b'], 'blocked')}). It is never "
                        "retried (ADR-0014 decision 5), so there is no camera wait.")
+        elif camera is None and (why := measures_nothing(self.runner)):
+            # Not "nothing measured yet": no tick of this run will measure anything. No camera
+            # record is written for it, since a replay, which works from transit records, could
+            # not make it again.
+            stopped = f"No camera wait: no method of this run measures any group ({why})."
         self.live.update(camera, stopped, now)
         alerts = self.alerts.check(self.runner, now)
         self.runner.maybe_save_refs()
@@ -453,15 +482,29 @@ def replay(records: Iterable[Mapping], signals: Iterable[Mapping], pair: Mapping
            not_measured: Mapping[tuple[str, str], str] | None = None) -> list[dict]:
     """The camera records made again from the logged transit records (split into the live
     ticks by `ticks`) and queue signals, under the live rule: see the module docstring for
-    where they can differ from the records the live ticks wrote. `not_measured` is the live
-    runner's (runner.unmeasured), rebuilt from the cameras and the live run's methods."""
+    where they can differ from the records the live ticks wrote. A tick's not_measured is the
+    one its records carry; for records that carry none, `not_measured` (runner.unmeasured,
+    rebuilt from the cameras and the live run's methods), as `_not_measured` narrows it."""
     readings = [s for s in signals if _is_reading(s)]
     out = []
     for group in ticks(records):
         at = _parse(group[0]["seen_until"])
         out.append(combine.combine(group, within(readings, at), pair, at,
-                                   not_measured=not_measured))
+                                   not_measured=_not_measured(group, not_measured)))
     return out
+
+
+def _not_measured(tick: Sequence[Mapping],
+                  rebuilt: Mapping[tuple[str, str], str] | None) -> dict[tuple[str, str], str]:
+    """One tick's not_measured: as its records logged it (`tick`, method -> group -> why), or
+    else `rebuilt`, without a typed group's key for a tick of untyped ("mixed") records, nor
+    the reverse: a log written before lane types must not gain a group no live tick had."""
+    logged = tick[0].get("not_measured")
+    if isinstance(logged, Mapping):
+        return {(m, g): why for m, by in logged.items() for g, why in by.items()}
+    mixed = all((r.get("lane_type") or combine.MIXED) == combine.MIXED for r in tick)
+    return {(m, g): why for (m, g), why in (rebuilt or {}).items()
+            if (g == combine.MIXED) == mixed}
 
 
 def ticks(records: Iterable[Mapping]) -> Iterator[list[Mapping]]:
@@ -497,8 +540,9 @@ def cmd_replay(args, cameras: Mapping[str, Camera]) -> int:
     records = read_jsonl(source)
     signals = read_jsonl(Path(args.queue)) if getattr(args, "queue", None) else []
     pair = load_pair(cameras)
-    # The live run's --methods: a method all of whose groups were skipped leaves no record to
-    # infer it from, and the replay would then differ from the live camera record.
+    # Only for records that do not carry their run's not_measured: the live run's --methods,
+    # since a method all of whose groups were skipped leaves no record to infer it from, and
+    # the replay would then differ from the live camera record.
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     out = replay(records, signals, pair,
                  unmeasured(cameras[pair["a"]], cameras[pair["b"]], methods))

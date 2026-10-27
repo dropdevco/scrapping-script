@@ -360,6 +360,37 @@ class RecordTest(unittest.TestCase):
             for g in record["groups"].values():
                 self.assertFalse({"minutes", "low", "high"} & set(g))
 
+    def test_a_method_not_measured_keeps_its_place_in_methods_order(self):
+        """cameras.json counts col-e by yolox only, so SENTRI has a yolox wait and a loop that is
+        not measured. The loop is still listed first, in crossing.METHODS order, not after the
+        measured method, so SENTRI's cards read in the same order as the normal group's."""
+        out = combine.combine([self.yolox], no_line_at_a(self.end), self.pair, self.end,
+                              not_measured={("loop", "sentri"): "x"})
+        self.assertEqual(list(out["groups"]["sentri"]["methods"]), ["loop", "yolox"])
+
+    def test_not_measured_wins_over_a_record_of_the_same_method_and_group(self):
+        """A replay that rebuilt not_measured from a later cameras.json can hold a record the
+        live run measured for a (method, group) now refused. The method is listed as not
+        measured, and its hidden wait feeds neither `agree` nor the vote's reasons."""
+        why = "city-pdn-north col-e is counted by yolox only"
+        both = combine.combine([self.loop, self.yolox], no_line_at_a(self.end), self.pair,
+                               self.end, q_b=self.both)
+        self.assertTrue(both["groups"]["sentri"]["agree"])        # what the hidden wait gave
+        self.assertTrue([r for r in both["groups"]["sentri"]["would_vote_reasons"]
+                         if "for loop" in r])
+        out = combine.combine([self.loop, self.yolox], no_line_at_a(self.end), self.pair,
+                              self.end, q_b=self.both, not_measured={("loop", "sentri"): why})
+        group = out["groups"]["sentri"]
+        self.assertEqual(group["methods"]["loop"],
+                         {"method": "loop", "lane_type": "sentri", "not_measured": why})
+        self.assertIsNone(group["agree"])
+        self.assertIn(f"loop not measured: {why}", group["would_vote_reasons"])
+        self.assertFalse([r for r in group["would_vote_reasons"] if "for loop" in r],
+                         group["would_vote_reasons"])
+        alone = combine.combine([self.yolox], no_line_at_a(self.end), self.pair, self.end,
+                                q_b=self.both, not_measured={("loop", "sentri"): why})
+        self.assertEqual(out["groups"], alone["groups"])
+
     def test_lane_ids_and_the_vote(self):
         """9. "mixed" and "normal" have no CBP lane id; "sentri" files as car_sentri. None
         would vote: the vote is undecided (ADR-0015 decision 3), and a group with no lane id

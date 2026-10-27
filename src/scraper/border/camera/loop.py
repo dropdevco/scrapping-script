@@ -136,12 +136,17 @@ Where it fails, plainly:
   motorbikes (narrower than ROW_SPAN_M), and two side by side (one car); night (headlight
   pools, no colour for the signature); compression noise; zones of one line drawn with unequal
   lengths (no lane-line rule between them).
-- A camera with no ground rectangle (the City's bridgepdn1) is read with an assumed lane width
-  and square pixels (_zone_metres): a foreshortened zone reads short and is refused.
+- A camera with no ground rectangle is read with each zone's own "metres" (cameras.json) or,
+  without them, an assumed lane width and square pixels (_zone_metres): a foreshortened zone
+  then reads short, and under MIN_ZONE_M is refused. The City's bridgepdn1 zones all carry
+  3.5 x 3.5 m (ASSUMPTION: ASSUMED_LANE_M and the rough model's length, not measured), so
+  _zone_metres is not used for them. On a camera with a ground rectangle, the rectangle
+  measures every zone and a zone's own metres are not used (LoopCounter warns).
 """
 from __future__ import annotations
 
 import itertools
+import logging
 import math
 from collections import deque
 from dataclasses import dataclass, field
@@ -155,6 +160,8 @@ from .crossing import Crossing, Zone, look
 from .hls import Gap, Stamped
 from .measure import Image, Reference, foreground, image_features
 from .reader import EMPTY_MIN_SAMPLES
+
+log = logging.getLogger(__name__)
 
 MARGIN_M = 1.5           # road followed beyond each end of the zone: a rear is seen in more frames
 HIGHPASS_M = 0.25        # structure scale: see zone_features()
@@ -292,7 +299,8 @@ def _zone_metres(camera: Camera, quad: np.ndarray) -> tuple[float, float]:
     ASSUMPTION: the zone is one lane ASSUMED_LANE_M wide and its pixels are square in metres,
     so its length is its width scaled by the quad's aspect. That ignores foreshortening, which
     makes a zone seen at a slant read short; the thresholds in metres then mean somewhat more
-    road than they say. Calibrating a ground rectangle on the camera removes the assumption."""
+    road than they say. Calibrating a ground rectangle on the camera removes the assumption, and
+    the rectangle then wins over a zone's own metres too (LoopCounter)."""
     def side(a, b):
         return float(np.hypot(*(b - a)))
 
@@ -490,8 +498,10 @@ class LoopCounter:
                  metres: dict[tuple[str, str], tuple[float, float]] | None = None,
                  sample_every_s: float = SAMPLE_EVERY_S, bank_min: int = BANK_MIN):
         """`metres`: (width, length) of a zone, by (line, lane), measured some other way (a map,
-        a tape) for a camera with no ground rectangle; otherwise the zone's own `metres`
-        (cameras.json), otherwise see _zone_metres().
+        a tape); it comes first. Otherwise a camera's ground rectangle measures the zone, and
+        only on a camera with none do the zone's own `metres` (cameras.json) count: they are an
+        ASSUMPTION a calibration replaces, so on a calibrated camera they are not used and a
+        warning says so. Otherwise see _zone_metres().
         `sample_every_s` and `bank_min` exist so tests can learn the road in seconds."""
         zones = camera.count_zones if zones is None else zones
         if not zones:
@@ -502,7 +512,11 @@ class LoopCounter:
         for z in zones:
             if z.camera != camera.id:
                 raise ValueError(f"zone {z.line}/{z.lane} belongs to {z.camera}, not {camera.id}")
-            given = (metres or {}).get((z.line, z.lane)) or z.metres
+            calibrated = camera.width_m > 0 and camera.length_m > 0     # as _zone_metres
+            if z.metres and calibrated:
+                log.warning("%s zone %s/%s: its metres are not used, the camera's ground "
+                            "rectangle measures it", camera.id, z.line, z.lane)
+            given = (metres or {}).get((z.line, z.lane)) or (None if calibrated else z.metres)
             width_m, length_m = given or _zone_metres(camera, np.float32(z.quad))
             if length_m < MIN_ZONE_M:
                 raise ValueError(f"{camera.id} zone {z.line}/{z.lane}: {length_m:.2f} m is too "
@@ -828,8 +842,9 @@ def _beside(loops: list[_Loop]) -> list[tuple[int, int]]:
     """(left, right) zone indexes of the zones of one line that share a side: the left one's
     near-right and far-right corners are the right one's near-left and far-left, within
     BESIDE_PX. ASSUMPTION: zones drawn that way, with the same length, cover the same stretch
-    of road, so their patches' rows line up (pdn-north's line A is drawn so). Zones of unequal
-    length are left to judge cars alone."""
+    of road, so their patches' rows line up (pdn-north's line A is drawn so; the City's
+    col-1..col-4 share sides and pair only because cameras.json gives them equal metres,
+    ASSUMPTION, not measured). Zones of unequal length are left to judge cars alone."""
     pairs = []
     for i, a in enumerate(loops):
         for j, b in enumerate(loops):

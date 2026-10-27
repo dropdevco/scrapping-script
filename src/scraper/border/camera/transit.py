@@ -16,9 +16,10 @@ car" but not the curves: the area between them is still the sum of every car's t
 lines, so the mean transit holds, and the median holds while the order only changes locally.
 Anchors tolerate less reordering than that (below).
 
-The pairing holds for one lane type at a time (`of_lane_type`), but no zone has a lane type yet:
-the runner pools every lane, and its records say lane_type "mixed" unless every zone at both
-lines has one type. Pooled lane types whose trips differ are paired across types, and p10-p90
+The pairing holds for one lane type at a time (`of_lane_type`). The runner measures each lane
+type that zones at both lines carry on its own (at PDN, SENTRI and normal: QUESTIONS.md Q-22),
+and pools every lane as "mixed" only when the lines share no type. What follows is that pooled
+case. Pooled lane types whose trips differ are paired across types, and p10-p90
 is not the spread of trips. Given the true count, a window's median is near the flow-weighted
 mean of their trips, the trip of none of them: half the cars at 7 min and half at 45 gave
 medians of 23.5-29.1 min, each within 2.5 min of its window's mean trip. An anchored offset
@@ -57,7 +58,9 @@ Three things keep the counts honest.
   is set by at least MIN_ANCHORS enclosed anchors within OUTLIER_CARS of the enclosed anchors'
   line, and only when they are at least half of the enclosed ones; the other anchors near that
   line are kept too. Without them, an epoch's anchors can only confirm an offset carried into it,
-  never set one unflagged.
+  never set one unflagged. Where they confirm it, the cars' offsets rest on the anchors that agree
+  with it and with each other, and on the others only near those anchors' line: near the epoch's
+  edges the others are look-alikes, and a line fitted to all of them tilted (EdgeLookAlikeTest).
 - Drift. A counter that misses or double counts drifts. If A counts a share bias_A too many and B
   a share bias_B, a transit read with a fixed offset is off by about
   bias_A x (minutes since the start, at A) - bias_B x (minutes since the start, at B). Once the
@@ -649,14 +652,14 @@ def _theil_sen(xs: Sequence[float], ys: Sequence[float]) -> float | None:
     return _quantile(slopes, 0.5)
 
 
-def _fit(found: Sequence[Anchor], start: datetime,
-         extra: Sequence[Anchor] = ()) -> tuple[tuple[float, float], tuple[Anchor, ...]]:
-    """The trend line of `found` (offset at `start`, cars per minute) and the anchors near it:
-    those of `found`, then those of `extra` that share no car with one already kept. In A
-    order."""
+def _fit(found: Sequence[Anchor], start: datetime, extra: Sequence[Anchor] = (),
+         trend: bool = True) -> tuple[tuple[float, float], tuple[Anchor, ...]]:
+    """The trend line of `found` (offset at `start`, cars per minute; flat without `trend`) and
+    the anchors near it: those of `found`, then those of `extra` that share no car with one
+    already kept. In A order."""
     xs = [_minutes(x.entered_at - start) for x in found]
     ys = [x.offset for x in found]
-    slope = _theil_sen(xs, ys) if len(found) >= REANCHOR_MIN_ANCHORS else None
+    slope = _theil_sen(xs, ys) if trend and len(found) >= REANCHOR_MIN_ANCHORS else None
     slope = 0.0 if slope is None else slope
     line = (_quantile(sorted(y - slope * x for x, y in zip(xs, ys)), 0.5), slope)
 
@@ -706,9 +709,11 @@ def measure(a: Sequence[Crossing], b: Sequence[Crossing], lo_min: float, hi_min:
     Every other epoch's offset comes from the first of these that applies:
     - "anchors": at least MIN_ANCHORS enclosed anchors that agree with their line (module
       docstring) and do not dispute the offset carried in. Short of that, at least MIN_ANCHORS
-      anchors near their line whose offset at the epoch's start lies within
-      OUTLIER_CARS + AGREE_SDS sd of the carried one. Each car then takes the median of the
-      kept anchors within REANCHOR_HALF_MIN of it, or their line where there are too few.
+      anchors whose offsets lie within OUTLIER_CARS + AGREE_SDS sd of the carried one, where
+      the line of all the anchors agrees with it at the epoch's start too. The line is then
+      fitted to those of them that also lie near their own median, and the others are kept
+      only near it. Each car then takes the median of the kept anchors within
+      REANCHOR_HALF_MIN of it, or their line where there are too few.
     - "disputed": enclosed anchors that disagree with the carried offset. Used, flagged.
     - "continued": a sure prior its anchors cannot check, last checked (by anchors' crossings at
       B, or a given count) no more than CHECK_MAX_MIN before the epoch's end. Used as it is.
@@ -809,10 +814,25 @@ def _epoch(ea: Sequence[Crossing], eb: Sequence[Crossing], s: datetime, e: datet
             source, off, uncertainty, checked_at = "given", given, 0.0, s
             inliers = fit_near                   # shown against the given offset
         elif incoming is not None:
-            if (len(fit_near) >= MIN_ANCHORS and incoming.uncertainty is not None
+            # These anchors can only confirm the count carried in. Near the epoch's edges they
+            # pair cars with look-alikes, and fitted with the rest those tilted the line and set
+            # the offsets there: 241 cars short at an epoch's end, carried across the next gap,
+            # unflagged (EdgeLookAlikeTest). So the offsets rest on the anchors that follow on
+            # from the carried count (`_following`) and agree with each other, and on the others
+            # only where they lie near those anchors' line. With each other, near their median:
+            # a look-alike within the tolerance can be the only anchor DRIFT_MIN_DT_MIN from the
+            # rest, and then its slope is the line's (0.7 cars/min in a review run, 47 cars out
+            # a trip on). Held flat instead, the line lost the drift in LiveTest's night:
+            # windows 3.6 min out.
+            agreeing = ([] if incoming.uncertainty is None else
+                        _following(found, incoming.offset, _tolerance(incoming.uncertainty)))
+            if agreeing:
+                agreeing = list(_fit(agreeing, s, trend=False)[1])
+            if (len(agreeing) >= MIN_ANCHORS and len(fit_near) >= MIN_ANCHORS
                     and abs(fit_off - incoming.offset) <= _tolerance(incoming.uncertainty)):
-                source, line, inliers = "anchors", fit_line, fit_near
-                off, uncertainty = fit_off, ANCHORED_SD
+                line, inliers = _fit(agreeing, s, extra=found)
+                source, uncertainty = "anchors", ANCHORED_SD
+                off = _line_offsets(line, inliers, s, [s])[0]
             else:
                 checked_at = incoming.checked_at
                 fresh = (checked_at is not None
@@ -840,6 +860,20 @@ def _epoch(ea: Sequence[Crossing], eb: Sequence[Crossing], s: datetime, e: datet
 
 def _tolerance(uncertainty: float) -> float:
     return OUTLIER_CARS + AGREE_SDS * uncertainty
+
+
+def _following(found: Sequence[Anchor], offset: int, tolerance: float) -> list[Anchor]:
+    """The anchors, in A order, that each lie within `tolerance` of the median of the last
+    REANCHOR_MIN_ANCHORS kept before them (of `offset`, the count carried in, before any). The
+    band follows the counters' drift through the epoch: held at the carried count, it kept 8 of
+    45 true anchors at about 20 cars an hour of drift, and their flat line put sure transits up
+    to 6 min out (DriftConfirmTest). A look-alike tens of cars off is still left out."""
+    kept: list[Anchor] = []
+    for x in found:
+        recent = sorted(k.offset for k in kept[-REANCHOR_MIN_ANCHORS:])
+        if abs(x.offset - (_quantile(recent, 0.5) if recent else offset)) <= tolerance:
+            kept.append(x)
+    return kept
 
 
 def _unsure(epoch: Epoch, at: datetime) -> bool:

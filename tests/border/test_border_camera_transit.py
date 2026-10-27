@@ -952,6 +952,122 @@ class WindowTest(unittest.TestCase):
         self.assertEqual(wins[-1].entered, n(sim.a, T0 + timedelta(minutes=45), end))
 
 
+class EdgeLookAlikeTest(unittest.TestCase):
+    """(12) Anchors their epoch does not enclose can only confirm the count carried into it, and
+    near its edges they pair cars with look-alikes (ShortEpochTest). Once the count is confirmed,
+    those must not set the cars' offsets. Found at the end of the camera audit: line A blind for
+    30 s, then the cars of the next 45 s never counted (each stood in a zone when counting
+    resumed), measured as the runner measures, from a sure count 180 min before the end. The
+    trend line was fitted to every anchor, look-alikes too, and they tilted it. Before the fix,
+    47 of 688 such measurements (seeds 1-8, A blind at 200 or 209 min, ends every minute from
+    280 to 322) gave a sure number that was wrong. In the runner, read every minute for two hours
+    after the gap, 20 window medians and 90 counts of the cars between were sure and wrong, with
+    or without the cars missed (simulations, 2026-10-26)."""
+
+    LO, HI = 0.5, 90.0                      # the runner's bounds
+    CASES = (   # (seed, A blind from minute, measured to minute, A's cars missed after, s)
+        (1, 209, 320, 45), (2, 200, 288, 45), (3, 200, 291, 45), (4, 200, 320, 45),
+        (5, 200, 295, 45), (6, 200, 281, 45), (7, 209, 294, 45), (8, 209, 300, 45),
+        (7, 209, 288, 0),   # nothing missed: one look-alike that agrees set the line's slope
+    )
+
+    def measured(self, seed, cut_min, end_min, missed_s):
+        sim = simulate(seed=seed, steady=True)
+        g0 = T0 + timedelta(minutes=cut_min)
+        a = [c for c in sim.a if not g0 < c.at <= g0 + timedelta(seconds=30 + missed_s)]
+        end = T0 + timedelta(minutes=end_min)
+        start = end - timedelta(minutes=180)
+        # The true count, sure as an anchored one is (ANCHORED_SD).
+        m = measure(a, sim.b, self.LO, self.HI, gaps_a=[Gap(g0, 30.0, "test")], end=end,
+                    prior=Prior(start, sim.between(start), sure=True, uncertainty=2.0))
+        return sim, m, now_from(m, end)
+
+    def assertAllRight(self, sim, m, current):
+        wrong = self.sure_and_wrong(sim, m, current)
+        self.assertEqual(wrong[:3], [], f"{len(wrong)} sure and wrong")
+
+    def sure_and_wrong(self, sim, m, current) -> list:
+        """What a reader takes as sure and is not: an unflagged transit or window median more
+        than a minute from the steady trip, an unflagged count of the cars between more than 3
+        out."""
+        trip = STEADY_S / 60
+        out = [("transit", t.entered_at, t.minutes) for t in m.transits
+               if not t.flagged and abs(t.minutes - trip) > 1]
+        truth = sim.between(current.at + TICK)
+        if not current.flagged and abs(current.between - truth) > 3:
+            out.append(("now", current.between, truth))
+        for w in windows(m):
+            for s in (w.by_exit, w.by_entry):
+                if not w.flagged and s.median is not None and abs(s.median - trip) > 1:
+                    out.append(("window", w.start, s.median))
+        return out
+
+    def test_the_audits_case(self):
+        # Seed 2 at 288 min. The epoch before the gap was confirmed, but its line, tilted by
+        # look-alikes, put its end 241 cars short. That count was carried across, and after the
+        # gap the look-alikes happened to agree with it: window medians of 9.8-15.6 min against
+        # 55, and 47 cars between against 328, all unflagged.
+        sim, m, current = self.measured(2, 200, 288, 45)
+        self.assertAllRight(sim, m, current)
+        before, after = m.epochs
+        self.assertEqual(before.source, "anchors")
+        # Counted right on a steady stretch, the offset at its end is the one at its start.
+        self.assertEqual(offset_at(before, before.end), sim.between(before.start))
+        self.assertLessEqual(abs(after.incoming - sim.between(after.start)), 3)
+        self.assertNotIn(after.source, SURE)       # its anchors are look-alikes: none agrees
+
+    def test_sure_numbers_are_right_and_still_given(self):
+        seen = []
+        for case in self.CASES:
+            with self.subTest(case=case):
+                sim, m, current = self.measured(*case)
+                self.assertAllRight(sim, m, current)
+                sure = sum(1 for t in m.transits if not t.flagged)
+                seen.append((case, [e.source for e in m.epochs], sure, not current.flagged))
+                # Not by flagging everything: each case keeps a sure epoch and its transits.
+                self.assertTrue(any(e.source in SURE for e in m.epochs), m.epochs)
+                self.assertGreater(sure, 100)
+        print(f"\nedge look-alikes (case, sources, sure transits, now sure): {seen}")
+
+
+class DriftConfirmTest(unittest.TestCase):
+    """(13) Anchors that confirm a carried count must follow the counters' drift through the
+    epoch. The counters drift when A and B miss or double count at different rates, which
+    cameras.json expects (the loop misses about 30 % at line A in free flow, and may count a col-4
+    car again in col-e). Held at the count carried in, the band kept 8 of 45 true anchors at about
+    20 cars an hour of drift (A misses 3 % and doubles 1 %, B misses 1 % and doubles 4 %), their
+    line came out flat, and sure transits were up to 6 min out (review, 2026-10-26). Measured as
+    EdgeLookAlikeTest measures, A blind for 30 s, from a sure count 180 min before the end. Not
+    "no unflagged transit more than 2 min out": a sure count stays sure CHECK_MAX_MIN after the
+    anchors last set it, and over that a drifting count moves a few cars (up to 3.1 min here)."""
+
+    CASES = ((2, 200, 252), (3, 200, 258), (3, 209, 267), (4, 209, 261))   # (seed, cut, end)
+
+    def test_a_confirmed_count_follows_the_counters_drift(self):
+        for seed, cut, end_min in self.CASES:
+            with self.subTest(seed=seed, cut=cut, end=end_min):
+                sim = simulate(seed=seed, steady=True, miss_a=0.03, double_a=0.01,
+                               miss_b=0.01, double_b=0.04)
+                g0 = T0 + timedelta(minutes=cut)
+                a = [c for c in sim.a if not g0 < c.at <= g0 + timedelta(seconds=30)]
+                end = T0 + timedelta(minutes=end_min)
+                start = end - timedelta(minutes=180)
+                # The count between in B's own counts (its doubles included), as anchors give it.
+                between = sum(1 for c in sim.b if c.at >= start
+                              and sim.enter[sim.owner[c]] < (start - T0).total_seconds())
+                m = measure(a, sim.b, 0.5, 90.0, gaps_a=[Gap(g0, 30.0, "test")], end=end,
+                            prior=Prior(start, between, sure=True, uncertainty=2.0))
+                self.assertEqual(m.epochs[0].source, "anchors")
+                truth = {c.at: sim.true_minutes(c) for c in a}
+                err = sorted(abs(t.minutes - truth[t.entered_at])
+                             for t in m.transits if not t.flagged)
+                self.assertGreater(len(err), 100)
+                self.assertLess(err[int(0.9 * (len(err) - 1))], 2.5)
+                worst = max(abs(w.by_entry.median - STEADY_S / 60) for w in windows(m)
+                            if not w.flagged and w.by_entry.median is not None)
+                self.assertLess(worst, 2.0)
+
+
 def _realised_bias(sim: Sim, line: str) -> float:
     """Net extra counts per true crossing in this run: doubles minus misses."""
     seen = sim.a if line == "A" else sim.b

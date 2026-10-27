@@ -17,8 +17,11 @@ of two numbers (Q-1, ADR-0013). This module computes the second, as SPEC.md §4 
 - **Crowd guards** (§4.3) decide which reports from people vote at all, and cap what
   they can weigh together. A position report is a person's report too (§4.1).
 - **Closures follow CBP** (§4.4, consensus rule 1). A measured signal (a camera or Maps)
-  that saw traffic moving after CBP first said closed raises closure_conflict: the lane
-  shows both facts, and neither overrides the other (Q-2, ADR-0013 decision 4).
+  that saw traffic moving, a wait above zero, after CBP first said closed raises
+  closure_conflict: the lane shows both facts, and neither overrides the other (Q-2,
+  ADR-0013 decision 4). An empty road, or a queue stalled long enough that its rolled
+  wait is gone, is what a closed lane looks like. A queue that has only just stalled still
+  carries its rolled wait, so it raises the flag (see _under_closure).
 
 Rules the SPEC implies and this module makes explicit:
 
@@ -109,7 +112,8 @@ class Vote:
     weight. outcome is one of:
 
     - counted: it voted. On a lane CBP closes, CBP's closure is the one counted claim.
-    - conflict: a measured signal saw traffic after CBP first said closed (Q-2).
+    - conflict: a measured signal saw traffic moving (a wait above zero) after CBP first
+      said closed (Q-2).
     - lane_closed: any other open claim on a lane CBP calls closed.
     - mirror: it republishes CBP, so it never votes (consensus rule 3).
     - stale: older than LIVE_HALF_LIVES half-lives of its kind.
@@ -345,10 +349,25 @@ def _under_closure(s: Signal, since: datetime) -> str:
     contradicts it. A site showing minutes is usually a stale page (consensus rule 1), a
     person never opens a lane (§4.3), and a count from before the closure is consistent
     with it. This holds whatever the measured source's cadence: Maps' reading from 40
-    minutes into a closure conflicts as a camera's from 4 minutes in does."""
+    minutes into a closure conflicts as a camera's from 4 minutes in does.
+
+    Moving means a wait above zero. A camera calls a lane open whenever it can see it, so
+    an empty road (0, or no wait with the booth out of view) is an open claim too, and is
+    what a closed lane looks like: flagging it would flag every lane CBP closes overnight
+    under a camera. A floor carries no minutes either, and the camera pair sends one for a
+    stalled queue, so it shows no movement.
+
+    One camera's stalled queue is not always without minutes. The worker publishes its
+    15-minute rolled wait (worker.signal_from_roll), and the roll counts the minutes before
+    the stop, so a lane that has just stopped keeps a wait above zero until the rolled speed
+    falls below the slowest the worker times: for as long as measure.ROLLING_SECONDS. That
+    claim raises the flag, though the movement it carries may predate the closure. Fusion
+    cannot tell it from moving traffic: the stalled state rides in evidence, which storage
+    does not keep (storage.SIGNAL_COLUMNS), so fusion never reads it."""
     if s.state != "open":
         return "no_minutes"
-    if s.kind == "measured" and s.observed_at >= since:
+    moving = s.minutes is not None and s.minutes > 0
+    if s.kind == "measured" and moving and s.observed_at >= since:
         return "conflict"
     return "lane_closed"
 
@@ -433,7 +452,10 @@ def _low(s: Signal) -> int:
 
 
 def _high(s: Signal) -> int:
-    """An open-ended "at least" (high None, SPEC §5.3) adds nothing above its own claim."""
+    """A claim with no high end adds nothing above its own minutes: a person still in line
+    ("llevo 40 min", SPEC §5.3), or a camera whose line runs on past its view. Only a
+    counted claim reaches here, and it has minutes. A floor (minutes None, low the floor)
+    never does: it votes no_minutes, so it widens nothing."""
     return s.high if s.high is not None else s.minutes
 
 

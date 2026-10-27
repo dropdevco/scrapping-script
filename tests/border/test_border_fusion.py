@@ -326,6 +326,33 @@ CLOSURES = [
     ("a camera's count from before CBP first said closed is not",
      [*closed_for(10), measured(15, 10, 20, age=11)], ("closed", False),
      [(CAM, "lane_closed"), ("cbp", "counted"), ("cbp", "superseded")]),
+    # Q-2 and ADR-0013 decision 4 flag traffic moving, not a camera that is merely open.
+    # Overnight CBP closes lanes the cameras still watch, and they see an empty road.
+    ("a camera that sees an empty road under a closure is not",
+     [*closed_for(20), measured(0, 0, 0, age=10)], ("closed", False),
+     [(CAM, "lane_closed"), ("cbp", "counted")] + [("cbp", "superseded")] * 2),
+    ("nor one whose empty road ends out of view, so it gives no wait",
+     [*closed_for(20), measured(None, age=10)], ("closed", False),
+     [(CAM, "lane_closed"), ("cbp", "counted")] + [("cbp", "superseded")] * 2),
+    # The worker sends a stalled queue with no minutes only once its 15-minute rolled speed
+    # has fallen below the slowest it times (worker.signal_from_roll, measure.rolling).
+    ("nor one whose queue stalled long enough that its rolled wait is gone",
+     [*closed_for(20), measured(None, age=10, evidence={"state": "stalled"})], ("closed", False),
+     [(CAM, "lane_closed"), ("cbp", "counted")] + [("cbp", "superseded")] * 2),
+    # Until then it publishes the rolled wait, which counts the minutes before the stop.
+    # Storage keeps no evidence, so fusion cannot see the stall: the flag is raised.
+    ("a queue that has only just stalled still carries its rolled wait, and is a conflict",
+     [*closed_for(20), measured(13, 10, 17, age=10, evidence={"state": "stalled"})],
+     ("closed", True),
+     [(CAM, "conflict"), ("cbp", "counted")] + [("cbp", "superseded")] * 2),
+    # A floor is also what the camera pair sends for a stalled queue (the combined design's
+    # transient flags), so it is no evidence that anything moved.
+    ("nor a floor, which carries no minutes",
+     [*closed_for(20), measured(None, low=12, age=10)], ("closed", False),
+     [(CAM, "lane_closed"), ("cbp", "counted")] + [("cbp", "superseded")] * 2),
+    ("a camera's wait of a single minute is traffic moving, and a conflict",
+     [*closed_for(20), measured(1, age=10)], ("closed", True),
+     [(CAM, "conflict"), ("cbp", "counted")] + [("cbp", "superseded")] * 2),
     # ADR-0013 names Maps too. On the free tier it reads about every 52 minutes (§5.1).
     ("Maps read 40 minutes into an hour's closure is a conflict",
      [*closed_for(60), measured(15, 10, 20, age=40, source="maps")], ("closed", True),
@@ -460,6 +487,17 @@ def test_a_range_with_no_claim_does_not_vote():
     estimate = fuse([published("cbp", 30), measured(None, 20, 40)], NOW)
     assert (estimate.minutes, estimate.low, estimate.high) == (30, 30, 30)
     assert sorted(outcomes(estimate)) == [(CAM, "no_minutes"), ("cbp", "counted")]
+
+
+def test_a_floor_does_not_vote_and_a_line_past_the_view_adds_no_top():
+    # A floor carries minutes None and low = the floor, so it never reaches the range. A
+    # camera whose line runs past its view carries a wait and no high end: its top is its
+    # own wait, not a guess above it.
+    floor = fuse([published("cbp", 30), measured(None, low=45)], NOW)
+    assert (floor.minutes, floor.low, floor.high) == (30, 30, 30)
+    assert sorted(outcomes(floor)) == [(CAM, "no_minutes"), ("cbp", "counted")]
+    past_view = fuse([measured(30, low=20)], NOW)
+    assert (past_view.minutes, past_view.low, past_view.high) == (30, 20, 30)
 
 
 # -- confidence (§4.5) -----------------------------------------------------------------

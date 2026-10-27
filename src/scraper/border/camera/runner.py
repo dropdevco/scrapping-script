@@ -7,10 +7,11 @@ from the stream's own clock. Each frame goes to every counter of its camera:
 - loop.LoopCounter, deterministic;
 - detect.DetectorCounter, YOLOX-S.
 
-Their crossings and gaps are kept in memory. Every `every` seconds each method is measured on
-its own (transit.measure), and one record per method is appended to
-CAMERA_STATE_DIR/transit-YYYY-MM-DD.jsonl. A record holds derived numbers only: counts, rates,
-transit statistics per window, epochs. No frame, signature or crossing is written, and no transit
+Their crossings and gaps are kept in memory. Every `every` seconds each method and each lane-type
+group (below) is measured on its own (transit.measure), and one record per method and group is
+appended to CAMERA_STATE_DIR/transit-YYYY-MM-DD.jsonl, its lane_type the group's. A record holds
+derived numbers only: counts, rates, transit statistics per window, epochs. No frame, signature
+or crossing is written, and no transit
 as a record of its own (window statistics over few transits can give their times back, not which
 car had which). Crossings, and the signatures in them, are dropped after SIGNATURE_TTL_S (of stream
 time, plus the wall time since the newest frame arrived). Each measurement covers at most that
@@ -26,6 +27,24 @@ Those times are gaps at that line, never "no cars". Gaps cut the transit measure
 epochs. Each epoch needs its own anchors, or a sure count continued from the measurement before
 with no gap, before its transits are trusted; a count carried across a gap is flagged until
 anchors confirm it.
+
+Lane types (QUESTIONS.md Q-22). The k-th car at A is the (offset + k)-th at B only among cars of
+one lane type, so each lane type that zones at both lines carry is a group, measured from its
+own lanes' crossings only, with its own chain of measurements. At PDN that is SENTRI (A lane-5,
+B column E) and "normal" (the other lanes and columns). Then a lane with no type, or with a type
+the other line lacks, is in no group, and its crossings are not measured; a warning names it at
+start. A pair whose lines share no lane type (nothing typed, as before Q-22, or one camera
+typed and the other not) is measured as before: one group of every lane, "mixed". Gaps,
+learning and expiry stay per line: a gap at a line, or any loop zone of it still learning, cuts
+every group there.
+
+A zone may name the methods that count it (cameras.json "methods"; every method if it names
+none). Each method's counter counts only the zones that name it, and a group with a zone, at
+either line, that a method does not count is not measured by that method: its count there would
+miss that lane's cars or hold others'. `not_measured` says why, and so do a warning at start and
+the status line. At PDN that is the loop's SENTRI: in both daylight City frames a col-4 car
+covers column E, and in a rendered pass the loop counted such cars there (line-B review,
+2026-10-26).
 
 The loop counters' learnt roads are saved to CAMERA_STATE_DIR/<camera>.loop.npz and seeded on
 start, so a restart in a queue does not wait for the lane to clear. Each road is a median of
@@ -52,7 +71,7 @@ import numpy as np
 
 from . import transit
 from .calibration import Camera
-from .crossing import SIGNATURE_TTL_S, Crossing
+from .crossing import METHODS, SIGNATURE_TTL_S, Crossing, Zone
 from .hls import Blocked, Gap
 from .reader import live_reader, state_dir
 from .stream import FROZEN_SECONDS, StreamError, StreamFrozen
@@ -72,7 +91,7 @@ LO_MIN = 0.5             # the fastest believable trip from line A to line B, mi
 HI_MIN = SIGNATURE_TTL_S / 60 / 2
 RECONNECT_S = 10.0       # wait before opening a stream again after it failed
 SAVE_EVERY_S = 600       # how often the loop counters' learnt roads are saved
-METHODS = ("loop", "yolox")
+MIXED = "mixed"          # the one group of a pair whose lines share no lane type: every lane
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +107,20 @@ class TransitRunner:
         self.line_a, self.line_b = self.lines[cam_a.id], self.lines[cam_b.id]
         self.methods = tuple(methods)
         self.lo_min, self.hi_min = lo_min, hi_min
+        self.types = {self.lines[cam.id]: transit.lane_types(cam.count_zones)
+                      for cam in self.cams}     # line -> lane -> lane type
+        self.groups = _groups(self.types[self.line_a], self.types[self.line_b])
+        if self.groups != (MIXED,):
+            alone = [f"{cam.id} {lane} ({kind})" for cam in self.cams
+                     for lane, kind in self.types[self.lines[cam.id]].items()
+                     if kind not in self.groups]
+            if alone:
+                log.warning("no lane type at both lines, so never measured: %s", ", ".join(alone))
+        # (method, group) -> why that method does not measure that group
+        self.not_measured = unmeasured(cam_a, cam_b, self.methods)
+        if self.not_measured:
+            log.warning("a zone of the group is not counted by the method, so not measured: %s",
+                        "; ".join(f"{m} {g} ({why})" for (m, g), why in self.not_measured.items()))
         self.counters = {cam.id: self._counters(cam) for cam in self.cams}
         self.crossings: dict[tuple[str, str], deque[Crossing]] = {
             (m, ln): deque() for m in self.methods for ln in (self.line_a, self.line_b)}
@@ -96,8 +129,9 @@ class TransitRunner:
         self.first_at: dict[str, datetime] = {}
         self.last_at: dict[str, datetime] = {}
         self.seen_mono: dict[str, float] = {}   # camera -> time.monotonic() of its latest frame
-        # method -> the last measurement, and the prior it was opened with
-        self.previous: dict[str, tuple[transit.Measurement, transit.Prior | None]] = {}
+        # (method, group) -> the last measurement, and the prior it was opened with
+        self.previous: dict[tuple[str, str],
+                            tuple[transit.Measurement, transit.Prior | None]] = {}
         self.errors: dict[str, str] = {}
         self.blocked: set[str] = set()      # cameras whose server refused us: never retried
         self._lock = threading.RLock()
@@ -105,18 +139,24 @@ class TransitRunner:
         self._saved_at = time.monotonic()
 
     def _counters(self, cam: Camera) -> list:
+        """Each method's counter, over the zones that method counts (_counts). A zone stays in
+        when its group is not measured by the method: line A's loop judges a car across lane-4
+        and lane-5 by both (loop._beside), so leaving lane-5 out would change lane-4's count."""
         out = []
-        if "loop" in self.methods:
+        loop_zones = tuple(z for z in cam.count_zones if _counts(z, "loop"))
+        if "loop" in self.methods and loop_zones:      # a LoopCounter with no zones refuses
             from .loop import LoopCounter
-            loop = LoopCounter(cam)
+            loop = LoopCounter(cam, loop_zones)
             refs = _load_refs(cam)
             if refs:
                 still = loop.seed(refs)
                 log.info("%s: loop roads seeded; still learning %s", cam.id, still or "none")
             out.append(loop)
-        if "yolox" in self.methods:
+        yolox_zones = tuple(z for z in cam.count_zones if _counts(z, "yolox"))
+        if "yolox" in self.methods and yolox_zones:
             from .detect import DetectorCounter
-            out.append(DetectorCounter(cam))     # one network per camera: one thread each
+            # one network per camera: one thread each
+            out.append(DetectorCounter(cam, zones=yolox_zones))
         return out
 
     # -- reading ------------------------------------------------------------------------------
@@ -235,7 +275,8 @@ class TransitRunner:
                 return None
             return min(self.last_at.values())
 
-    def measure(self) -> dict[str, tuple[transit.Measurement, transit.Now | None]]:
+    def measure(self) -> dict[tuple[str, str], tuple[transit.Measurement, transit.Now | None]]:
+        """(method, group) -> its measurement and the count now, for each one measurable."""
         with self._lock:
             if not self.last_at:
                 return {}
@@ -257,27 +298,39 @@ class TransitRunner:
                 return {}
             out = {}
             for m in self.methods:
-                a = list(self.crossings[(m, self.line_a)])
-                b = list(self.crossings[(m, self.line_b)])
                 ga = self._gaps_for(m, self.line_a, at)
                 gb = self._gaps_for(m, self.line_b, at)
-                start, prior = self._start(m, horizon, ga + gb)
-                try:
-                    measured = transit.measure(a, b, self.lo_min, self.hi_min, gaps_a=ga,
-                                               gaps_b=gb, start=start if prior is None else None,
-                                               end=at, prior=prior)
-                except ValueError as exc:        # e.g. `start` inside a gap
-                    log.warning("%s: not measurable: %s", m, exc)
-                    self.previous.pop(m, None)   # start afresh next tick, not from a stale one
-                    continue
-                self.previous[m] = (measured, prior)
-                current = transit.now_from(measured, at) if measured.epochs else None
-                out[m] = (measured, current)
+                for group in self.groups:
+                    key = (m, group)
+                    if key in self.not_measured:
+                        continue
+                    a = self._of_group(self.crossings[(m, self.line_a)], self.line_a, group)
+                    b = self._of_group(self.crossings[(m, self.line_b)], self.line_b, group)
+                    start, prior = self._start(key, horizon, ga + gb)
+                    try:
+                        measured = transit.measure(a, b, self.lo_min, self.hi_min, gaps_a=ga,
+                                                   gaps_b=gb,
+                                                   start=start if prior is None else None,
+                                                   end=at, prior=prior)
+                    except ValueError as exc:        # e.g. `start` inside a gap
+                        log.warning("%s %s: not measurable: %s", m, group, exc)
+                        self.previous.pop(key, None)  # start afresh next tick, not from a stale one
+                        continue
+                    self.previous[key] = (measured, prior)
+                    current = transit.now_from(measured, at) if measured.epochs else None
+                    out[key] = (measured, current)
         return out
 
-    def _start(self, method: str, horizon: datetime,
+    def _of_group(self, crossings, line: str, group: str) -> list[Crossing]:
+        """The crossings at `line` in the lanes of lane-type group `group`."""
+        if group == MIXED:
+            return list(crossings)
+        return transit.of_lane_type(crossings, self.types[line], group)
+
+    def _start(self, key: tuple[str, str], horizon: datetime,
                gaps: list[Gap]) -> tuple[datetime, transit.Prior | None]:
-        """Where this measurement starts, and the cars-between count carried to it.
+        """Where the measurement of `key`, (method, group), starts, and the cars-between count
+        carried to it. Each group carries its own count, from its own last measurement.
 
         The start never moves backwards (once an earlier measurement moved it past a gap, it
         stays there), and it is never left just before a gap: the count carried across a gap
@@ -290,7 +343,7 @@ class TransitRunner:
         confirmed nor disputed, and would stand until anchors outvoted it. When the start moves,
         the count at it is carried only if its uncertainty is known, so that anchors can check
         it; otherwise the measurement starts afresh."""
-        prev, opened = self.previous.get(method, (None, None))
+        prev, opened = self.previous.get(key, (None, None))
         start = horizon
         if prev is not None and prev.start > start:
             start = prev.start
@@ -332,8 +385,8 @@ class TransitRunner:
 
     def records(self, measured: dict) -> list[dict]:
         out = []
-        for method, (m, current) in measured.items():
-            rec = transit.record(m, transit.windows(m), current, lane_type=self._lane_type())
+        for (method, group), (m, current) in measured.items():
+            rec = transit.record(m, transit.windows(m), current, lane_type=group)
             rec.update({"method": method,    # m.method is "unknown" when neither line had a car
                         "written_at": datetime.now(UTC).isoformat(),
                         # to the minute: the latest frame's time can be a car's crossing time
@@ -342,16 +395,6 @@ class TransitRunner:
                         "line_b": f"{self.cams[1].id}:{self.line_b}"})
             out.append(rec)
         return out
-
-    def _lane_type(self) -> str:
-        """The lane type every zone at both lines is confirmed as, else "mixed". transit pairs
-        the k-th car at A with the (offset + k)-th at B, which holds within one lane type only:
-        pooled with general lanes, SENTRI and Ready cars reorder. In simulation, anchored as
-        here, a window's median followed one type's trip, the type with most enclosed anchors:
-        41-47 min in some runs and 7-11 in others, unflagged, against a flow-weighted mean of
-        35-39."""
-        types = {z.lane_type for cam in self.cams for z in cam.count_zones}
-        return types.pop() if len(types) == 1 and None not in types else "mixed"
 
     def write(self, records: list[dict]) -> None:
         if not records:
@@ -373,19 +416,25 @@ class TransitRunner:
             if cam.id in self.blocked:
                 parts[-1] += " (stopped: blocked)"
         lines = [" | ".join(parts)]
-        for m in self.methods:
+        for m, group in ((m, g) for m in self.methods for g in self.groups):
+            if (m, group) in self.not_measured:
+                lines.append(f"  {m:5} {group:6}: not measured: {self.not_measured[(m, group)]}")
+                continue
             with self._lock:
-                a = [c.at for c in self.crossings[(m, self.line_a)]]
-                b = [c.at for c in self.crossings[(m, self.line_b)]]
+                a = [c.at for c in self._of_group(self.crossings[(m, self.line_a)],
+                                                  self.line_a, group)]
+                b = [c.at for c in self._of_group(self.crossings[(m, self.line_b)],
+                                                  self.line_b, group)]
             if at is not None:
                 since = at - timedelta(minutes=10)
                 rate_a = sum(1 for t in a if t >= since) / 10
                 rate_b = sum(1 for t in b if t >= since) / 10
             else:
                 rate_a = rate_b = 0.0
-            text = f"  {m:5}: A {len(a)} cars ({rate_a:.1f}/min)  B {len(b)} ({rate_b:.1f}/min)"
-            if m in measured:
-                meas, current = measured[m]
+            text = (f"  {m:5} {group:6}: A {len(a)} cars ({rate_a:.1f}/min)  "
+                    f"B {len(b)} ({rate_b:.1f}/min)")
+            if (m, group) in measured:
+                meas, current = measured[(m, group)]
                 last = meas.epochs[-1] if meas.epochs else None
                 text += f"  epochs {len(meas.epochs)}"
                 if last is not None:
@@ -419,6 +468,44 @@ def _one_line(cam: Camera) -> str:
     if len(lines) != 1:
         raise ValueError(f"{cam.id}: needs exactly one counting line, has {lines or 'none'}")
     return lines[0]
+
+
+def _groups(types_a: dict[str, str | None], types_b: dict[str, str | None]) -> tuple[str, ...]:
+    """The lane-type groups measured: each lane type that zones at both lines carry, else
+    (MIXED,), every lane pooled. Pooled, the k-th car at A is paired with the (offset + k)-th at B
+    whatever its type, and SENTRI, Ready and general cars reorder between the lines. In
+    simulation, anchored as here, a pooled window's median followed one type's trip, the type
+    with most enclosed anchors: 41-47 min in some runs and 7-11 in others, unflagged, against a
+    flow-weighted mean of 35-39. With half the cars SENTRI at 8 min and the rest at 40, every
+    pooled window read 7.8-11.2 min, anchored and unflagged, where each group measured on its
+    own read 7.9-8.1 and 39.9-40.1 (the scenario of LaneTypeGroups in
+    tests/border/test_border_camera_runner.py, run through this runner as of 1221c9f)."""
+    shared = ({t for t in types_a.values()} & {t for t in types_b.values()}) - {None}
+    return tuple(sorted(shared)) or (MIXED,)
+
+
+def unmeasured(cam_a: Camera, cam_b: Camera,
+               methods=METHODS) -> dict[tuple[str, str], str]:
+    """(method, group) -> why that method does not measure that lane-type group: a zone of the
+    group, at either line, that the method does not count (_counts). The runner's
+    `not_measured`, which a reader of its records (a replay) can rebuild from the cameras."""
+    types = [transit.lane_types(cam.count_zones) for cam in (cam_a, cam_b)]
+    out = {}
+    for m in methods:
+        for g in _groups(*types):
+            refused = [z for cam in (cam_a, cam_b) for z in cam.count_zones
+                       if (g == MIXED or z.lane_type == g) and not _counts(z, m)]
+            if refused:
+                out[(m, g)] = "; ".join(f"{z.camera} {z.lane} is counted by "
+                                        f"{' and '.join(z.methods)} only" for z in refused)
+    return out
+
+
+def _counts(zone: Zone, method: str) -> bool:
+    """Whether `method` counts cars at `zone`. A zone's `methods` (crossing.Zone, cameras.json
+    "methods") names the counters whose count there holds; one with none is counted by every
+    method."""
+    return zone.methods is None or method in zone.methods
 
 
 def _refs_path(cam: Camera):

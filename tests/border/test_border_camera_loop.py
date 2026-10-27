@@ -685,6 +685,50 @@ class Geometry(unittest.TestCase):
         self.assertGreaterEqual(cars, 8)
         self.assertEqual((missed, false), (0, 0))
 
+    def test_without_a_ground_rectangle_a_zones_own_metres_count(self):
+        # cameras.json "metres" on the zone, so every way of building the counter gets them.
+        cam = camera_from_dict("city", {
+            "title": "rendered", "port_number": "000000", "direction": "north",
+            "frame_size": FRAME, "source": {"kind": "hls", "url": "https://example.invalid/x.m3u8",
+                                             "clock": "last-modified"},
+            "display": False,
+            "count_zones": [{"line": "B", "lane": "car", "quad": zone_quad(NEAR, FAR),
+                             "metres": [LANE_W, FAR - NEAR]}]})
+        loop = LoopCounter(cam, sample_every_s=0.5, bank_min=8)
+        cars, missed, false = score(steady(45, 3.0, headway=9.0), run=Run(loop).warm())
+        self.assertGreaterEqual(cars, 8)
+        self.assertEqual((missed, false), (0, 0))
+
+    def test_without_a_ground_rectangle_equal_metres_judge_a_car_across_two_columns_once(self):
+        # The City's line B: columns side by side, no ground rectangle. Read with square pixels
+        # no two columns matched in length, so _beside paired none and a 2.2 m car 0.1 m over
+        # the line was judged by each zone alone (the line-B review, 2026-10-26).
+        lanes = ((0.0, 3.5), (3.5, 7.0))
+        cam = camera_from_dict("city", {
+            "title": "rendered", "port_number": "000000", "direction": "north",
+            "frame_size": FRAME, "source": {"kind": "hls", "url": "https://example.invalid/x.m3u8",
+                                             "clock": "last-modified"},
+            "display": False,
+            "count_zones": [{"line": "B", "lane": f"col-{k + 1}",
+                             "quad": zone_quad(NEAR, FAR, u0, u1, 7.0),
+                             "metres": [3.5, FAR - NEAR]} for k, (u0, u1) in enumerate(lanes)]})
+
+        def run(metres=None):
+            scene = WideScene(road_w=7.0, car_w=2.2, lines=(0.0, 3.5, 7.0),
+                              centre=lambda car_id: 3.6)
+            loop = LoopCounter(cam, metres=metres, sample_every_s=0.5, bank_min=8)
+            r = Run(loop, Frames(scene=scene)).warm()
+            return loop, score(steady(60, 3.0, headway=9.0), run=r)
+
+        loop, (cars, missed, false) = run()
+        self.assertEqual(len(loop._beside), 1)
+        self.assertGreaterEqual(cars, 10)
+        self.assertEqual((missed, false), (0, 0), f"{cars} cars: {missed} missed, {false} false")
+        unequal = {("B", "col-1"): (3.5, FAR - NEAR), ("B", "col-2"): (3.5, FAR - NEAR + 0.5)}
+        loop, (cars, missed, false) = run(unequal)
+        self.assertEqual(loop._beside, [])
+        self.assertGreater(false, 0, "the case no longer exercises the straddle de-dup")
+
 
 class Scenes(unittest.TestCase):
     def test_a_car_driving_out_of_view_paints_only_itself(self):

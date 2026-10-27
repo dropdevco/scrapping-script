@@ -41,6 +41,12 @@ import numpy as np
 from .hls import Gap, Stamped
 
 SIGNATURE_TTL_S = 3 * 3600      # the longest believable wait; per-vehicle data is dropped after it
+# A zone's lane type. "normal" is a car lane that is not SENTRI, where standard and Ready are not
+# told apart: the owner named SENTRI and "normal" lanes in each view (QUESTIONS.md Q-22), and
+# that "normal" covers both of CBP's other car lanes is an ASSUMPTION. Such a lane has no one CBP
+# lane id.
+LANE_TYPES = ("general", "ready", "sentri", "normal")
+METHODS = ("loop", "yolox")     # the counters (Counter.method)
 
 
 @dataclass(frozen=True)
@@ -49,7 +55,13 @@ class Zone:
     line: str                                  # "A", "B": zones with one name form one line
     lane: str
     quad: tuple[tuple[float, float], ...]      # near-left, near-right, far-right, far-left
-    lane_type: str | None = None               # general | ready | sentri; None until confirmed
+    lane_type: str | None = None               # LANE_TYPES; None until confirmed
+    # The counters whose count at this zone holds (METHODS); None, every one. A counter left out
+    # does not count the zone, and runner.py does not measure the zone's lane-type group by it.
+    methods: tuple[str, ...] | None = None
+    # (width, length) in metres, for a camera with no ground rectangle (loop._zone_metres);
+    # an ASSUMPTION unless measured.
+    metres: tuple[float, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +119,20 @@ def zones_from_raw(camera_id: str, raw: list[dict]) -> tuple[Zone, ...]:
         quad = tuple(tuple(float(v) for v in p) for p in z["quad"])
         if len(quad) != 4:
             raise ValueError(f"{camera_id} zone {z.get('lane')}: a zone needs exactly four points")
-        if z.get("lane_type") not in (None, "general", "ready", "sentri"):
+        if z.get("lane_type") not in (None, *LANE_TYPES):
             raise ValueError(f"{camera_id} zone {z.get('lane')}: unknown lane_type")
-        zones.append(Zone(camera_id, str(z["line"]), str(z["lane"]), quad, z.get("lane_type")))
+        methods = z.get("methods")
+        if methods is not None and (isinstance(methods, str) or not methods
+                                    or not set(methods) <= set(METHODS)):
+            raise ValueError(f"{camera_id} zone {z.get('lane')}: methods must name one or more "
+                             f"of {', '.join(METHODS)}")
+        metres = z.get("metres")
+        if metres is not None and (isinstance(metres, str) or len(metres) != 2 or not all(
+                isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
+                and v > 0 for v in metres)):
+            raise ValueError(f"{camera_id} zone {z.get('lane')}: metres must be [width, length], "
+                             f"each above 0")
+        zones.append(Zone(camera_id, str(z["line"]), str(z["lane"]), quad, z.get("lane_type"),
+                          None if methods is None else tuple(methods),
+                          None if metres is None else (float(metres[0]), float(metres[1]))))
     return tuple(zones)

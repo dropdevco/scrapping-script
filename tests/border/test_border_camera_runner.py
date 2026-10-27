@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 import unittest.mock
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -16,11 +17,11 @@ import pytest
 pytest.importorskip("cv2")
 
 from test_border_camera_transit import T0 as SIM_T0
-from test_border_camera_transit import simulate
+from test_border_camera_transit import simulate, wheel
 
 from scraper.border.camera import runner as runner_mod
 from scraper.border.camera import transit
-from scraper.border.camera.calibration import camera_from_dict
+from scraper.border.camera.calibration import camera_from_dict, load_cameras
 from scraper.border.camera.crossing import SIGNATURE_TTL_S, Crossing
 from scraper.border.camera.hls import Blocked, Gap, Stamped
 from scraper.border.camera.runner import TransitRunner
@@ -28,6 +29,7 @@ from scraper.border.camera.stream import FROZEN_SECONDS, StreamFrozen, StreamLos
 
 T0 = datetime(2026, 10, 24, 18, 0, tzinfo=UTC)
 QUAD = [[100, 300], [300, 300], [300, 200], [100, 200]]
+LOOP = ("loop", "mixed")     # the loop method's measurement of a pair with no lane type
 
 
 def cam(cid: str, line: str, lane_type: str | None = None, quad=QUAD, frame_size=(640, 360),
@@ -36,6 +38,25 @@ def cam(cid: str, line: str, lane_type: str | None = None, quad=QUAD, frame_size
         "title": cid, "port_number": "240202", "direction": "north",
         "frame_size": list(frame_size), "lanes": [], "mask": [list(m) for m in mask],
         "count_zones": [{"line": line, "lane": "l1", "quad": quad, "lane_type": lane_type}]})
+
+
+def typed(cid: str, line: str, lanes: dict[str, str | None],
+          methods: dict[str, list[str]] | None = None):
+    """A camera whose line has one zone per lane, each of the lane type given, and counted by
+    the methods `methods` gives for its lane (cameras.json "methods"; every method if none)."""
+    return camera_from_dict(cid, {
+        "title": cid, "port_number": "240202", "direction": "north", "frame_size": [640, 360],
+        "lanes": [], "count_zones": [
+            {"line": line, "lane": lane, "quad": [[x + 40 * i, y] for x, y in QUAD],
+             "lane_type": lane_type,
+             **({"methods": methods[lane]} if lane in (methods or {}) else {})}
+            for i, (lane, lane_type) in enumerate(lanes.items())]})
+
+
+def zone_lanes(counter) -> list[str]:
+    """The lanes of the zones a real counter counts at."""
+    zones = counter.zones if counter.method == "yolox" else [lp.zone for lp in counter._loops]
+    return [z.lane for z in zones]
 
 
 class FakeCounter:
@@ -198,8 +219,10 @@ class Runner(RunnerSetUp):
         with unittest.mock.patch.object(TransitRunner, "_counters", lambda self, c: []):
             general = TransitRunner(cam("g-a", "A", "general"), cam("g-b", "B", "general"))
             split = TransitRunner(cam("g-a", "A", "general"), cam("s-b", "B", "sentri"))
-        self.assertEqual(general._lane_type(), "general")
-        self.assertEqual(split._lane_type(), "mixed")
+            half = TransitRunner(cam("s-a", "A", "sentri"), cam("u-b", "B"))   # B untyped
+        self.assertEqual(general.groups, ("general",))
+        self.assertEqual(split.groups, ("mixed",))
+        self.assertEqual(half.groups, ("mixed",))
 
     def test_a_record_does_not_carry_the_time_of_the_last_crossing(self):
         last = T0 + timedelta(minutes=29, seconds=30, microseconds=250000)
@@ -217,7 +240,7 @@ class Runner(RunnerSetUp):
         self.cb.cars_on = {T0 + timedelta(seconds=s) for s in range(600, 1800, 30)}
         self.feed_both(1800)
         self.run_.measure()
-        self.assertIn("loop", self.run_.previous)
+        self.assertIn(LOOP, self.run_.previous)
         self.feed(self.a, T0 + timedelta(seconds=1800 + SIGNATURE_TTL_S + 60))   # B is down
         self.assertEqual(self.run_.measure(), {})
         self.assertEqual(self.run_.previous, {})
@@ -328,7 +351,7 @@ class Feeding(RunnerSetUp):
 
     def test_the_start_moves_past_a_gap_it_would_sit_just_before(self):
         gap = Gap(T0 + timedelta(minutes=5), 60.0, "segment expired")
-        start, prior = self.run_._start("loop", T0, [gap])
+        start, prior = self.run_._start(LOOP, T0, [gap])
         self.assertEqual(start, T0 + timedelta(minutes=6))
         self.assertIsNone(prior)
 
@@ -406,16 +429,16 @@ class Ticks(unittest.TestCase):
         # B is down 30 s at minute 9, within RATE_WINDOW_MIN of the start, so the start moves
         # past it; the measurement before knew nothing of that gap.
         _, out = self.play(16, ticks=range(1, 17), b_down=[(9, 9.5)])
-        self.assertEqual([t for t, measured in out.items() if "loop" not in measured], [])
+        self.assertEqual([t for t, measured in out.items() if LOOP not in measured], [])
 
     def test_after_a_long_outage_at_one_line_the_count_starts_afresh(self):
         # B is down from minute 200 to 375.5. By then the 3 h horizon has slid up to the outage,
         # so the start moves past it, beyond anything the last measurement saw: no count can be
         # carried there from it.
         _, out = self.play(380, ticks=[195, 300, 370, 380], b_down=[(200, 375.5)])
-        self.assertEqual(out[195]["loop"][0].epochs[0].source, "anchors")
-        self.assertIn("loop", out[380])
-        self.assertNotIn(out[380]["loop"][0].epochs[0].source, transit._SURE)
+        self.assertEqual(out[195][LOOP][0].epochs[0].source, "anchors")
+        self.assertIn(LOOP, out[380])
+        self.assertNotIn(out[380][LOOP][0].epochs[0].source, transit._SURE)
 
     def test_after_a_long_outage_at_night_nothing_comes_back_sure(self):
         # B is down from minute 150 to 345, and from minute 300 no car has a colour. Before the
@@ -425,8 +448,8 @@ class Ticks(unittest.TestCase):
         _, out = self.play(560, ticks=range(140, 561, 10), b_down=[(150, 345)], night=300)
         self.assertEqual(out[340], {})                  # B more than the TTL behind
         for t in range(350, 561, 10):
-            self.assertIn("loop", out[t], t)
-            measured, now = out[t]["loop"]
+            self.assertIn(LOOP, out[t], t)
+            measured, now = out[t][LOOP]
             self.assertEqual([e.source for e in measured.epochs if e.source in transit._SURE], [],
                              t)
             self.assertTrue(now is None or now.flagged, t)
@@ -460,7 +483,7 @@ class Ticks(unittest.TestCase):
                 self.assertLogs(runner_mod.log, "WARNING"):
             _, out = self.play(200, ticks=[190, 195, 200])
         self.assertEqual(out[195], {})
-        self.assertIn("loop", out[200])
+        self.assertIn(LOOP, out[200])
         self.assertIsNone(priors[SIM_T0 + timedelta(minutes=200)])
 
     def assert_measured_afresh(self, sim, out):
@@ -469,9 +492,238 @@ class Ticks(unittest.TestCase):
             alone = transit.measure([c for c in sim.a if c.at <= end],
                                     [c for c in sim.b if c.at <= end],
                                     runner_mod.LO_MIN, runner_mod.HI_MIN, start=SIM_T0, end=end)
-            got = measured["loop"][0].epochs[0]
+            got = measured[LOOP][0].epochs[0]
             self.assertEqual((got.source, got.offset),
                              (alone.epochs[0].source, alone.epochs[0].offset), f"minute {t}")
+
+
+def replay(crossings, method="loop"):
+    """A Replay counter for `method`, its crossings relabelled to it."""
+    counter = Replay([replace(c, method=method) for c in crossings])
+    counter.method = method
+    return counter
+
+
+TRIPS = {"sentri": 8.0, "normal": 40.0}     # minutes from A to B, per lane type
+LANES = {"sentri": ("lane-5", "col-e"), "normal": ("lane-1", "col-1")}     # (A lane, B column)
+
+
+class LaneTypeGroups(unittest.TestCase):
+    """Each lane type that zones at both lines carry is measured on its own (QUESTIONS.md Q-22):
+    the k-th car at A is the (offset + k)-th at B only among cars of one lane type."""
+    STEP_S = 5
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        patcher = unittest.mock.patch.dict(os.environ, {"CAMERA_STATE_DIR": self.dir.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def runner(self, a, b, methods=("loop",)):
+        with unittest.mock.patch.object(TransitRunner, "_counters", lambda self, c: []):
+            return TransitRunner(a, b, methods=methods)
+
+    def two_types(self, methods=("loop",)):
+        return self.runner(typed("cam-a", "A", {"lane-1": "normal", "lane-5": "sentri"}),
+                           typed("cam-b", "B", {"col-1": "normal", "col-e": "sentri"}), methods)
+
+    def play(self, run, counters, minutes, ticks):
+        """Frames at both cameras every STEP_S for `minutes`; measure() at each minute in
+        `ticks`."""
+        run.counters = counters
+        due = {round(t * 60): t for t in ticks}
+        out = {}
+        for s in range(0, int(minutes * 60) + 1, self.STEP_S):
+            for camera in run.cams:
+                run._frame(camera, run.lines[camera.id],
+                           SimpleNamespace(at=SIM_T0 + timedelta(seconds=s)))
+            if s in due:
+                out[due[s]] = run.measure()
+        return out
+
+    def test_each_lane_type_is_measured_on_its_own_with_its_own_trip(self):
+        # SENTRI cars take 8 min from A to B and the others 40. Pooled, as the runner measured
+        # before, the one "mixed" record had every window's median at 7.8-11.2 min, anchored and
+        # unflagged: the 40-min cars were paired with SENTRI cars.
+        minutes, sims, a, b = 200, {}, [], []
+        for seed, (group, (lane_a, lane_b)) in enumerate(LANES.items(), 21):
+            sims[group] = wheel(seed, TRIPS[group], minutes=minutes)
+            a += [replace(c, camera="cam-a", lane=lane_a) for c in sims[group][0]]
+            b += [replace(c, camera="cam-b", lane=lane_b) for c in sims[group][1]]
+        run = self.two_types()
+        out = self.play(run, {"cam-a": [replay(a)], "cam-b": [replay(b)]}, minutes,
+                        [180, 190, 200])
+        for t, measured in out.items():
+            self.assertEqual(list(measured), [("loop", "normal"), ("loop", "sentri")], t)
+            records = run.records(measured)
+            self.assertEqual([(r["method"], r["lane_type"]) for r in records],
+                             [("loop", "normal"), ("loop", "sentri")], t)
+            for rec in records:
+                trip, at = TRIPS[rec["lane_type"]], (t, rec["lane_type"])
+                medians = [w["by_exit"]["median"] for w in rec["windows"]
+                           if not w["flagged"] and w["by_exit"]["median"] is not None]
+                self.assertGreaterEqual(len(medians), 8, at)
+                for median in medians:
+                    self.assertAlmostEqual(median, trip, delta=1.0, msg=at)
+        # From minute 190 the 3 h horizon moves each start, and each type carries its own count
+        # there from its own last measurement: about 50 cars between for SENTRI, 240 for the rest.
+        for group, (sa, sb, at_t0) in sims.items():
+            prior = run.previous[("loop", group)][1]
+            self.assertIsNotNone(prior, group)
+            truth = (at_t0 + sum(1 for c in sa if c.at < prior.at)
+                     - sum(1 for c in sb if c.at < prior.at))
+            self.assertTrue(prior.sure, group)
+            self.assertAlmostEqual(prior.between, truth, delta=3, msg=group)
+        # The status line has each type's own median transit.
+        lines = run.status(out[200]).splitlines()[1:]
+        self.assertEqual([line.split(":")[0].split() for line in lines],
+                         [["loop", "normal"], ["loop", "sentri"]])
+        for line, group in zip(lines, ("normal", "sentri")):
+            median = float(line.split("median transit ")[1].split()[0])
+            self.assertAlmostEqual(median, TRIPS[group], delta=1.0, msg=line)
+
+    def test_a_pair_with_no_lane_type_pools_every_lane_as_one_mixed_group_per_method(self):
+        # Cameras typed nowhere are measured as before Q-22: every lane at once, "mixed".
+        sa, sb, _ = wheel(23, 30.0, minutes=60)
+        a = [replace(c, camera="cam-a", lane=f"l{i % 2}") for i, c in enumerate(sa)]
+        b = [replace(c, camera="cam-b", lane="c1") for c in sb]
+        run = self.runner(typed("cam-a", "A", {"l0": None, "l1": None}),
+                          typed("cam-b", "B", {"c1": None}), methods=("loop", "yolox"))
+        self.assertEqual(run.groups, ("mixed",))
+        out = self.play(run, {"cam-a": [replay(a), replay(a, "yolox")],
+                              "cam-b": [replay(b), replay(b, "yolox")]}, 60, [60])
+        measured = out[60]
+        self.assertEqual(list(measured), [("loop", "mixed"), ("yolox", "mixed")])
+        self.assertEqual([(r["method"], r["lane_type"]) for r in run.records(measured)],
+                         [("loop", "mixed"), ("yolox", "mixed")])
+        for key, (m, _) in measured.items():
+            self.assertEqual((len(m.a_times), len(m.b_times)), (len(a), len(b)), key)
+
+    def test_a_lane_whose_type_the_other_line_lacks_is_not_measured(self):
+        # lane-2 has no type, lane-3's type is at A only and col-2's at B only: none is in a
+        # group, and a warning names each.
+        with self.assertLogs(runner_mod.log, "WARNING") as logs:
+            run = self.runner(
+                typed("cam-a", "A", {"lane-1": "normal", "lane-2": None, "lane-3": "ready"}),
+                typed("cam-b", "B", {"col-1": "normal", "col-2": "sentri"}))
+        self.assertEqual(run.groups, ("normal",))
+        for lane in ("lane-2", "lane-3", "col-2"):
+            self.assertIn(lane, "\n".join(logs.output))
+        sa, sb, _ = wheel(24, 20.0, minutes=60)
+        a = [replace(c, camera="cam-a", lane=f"lane-{1 + i % 3}") for i, c in enumerate(sa)]
+        b = [replace(c, camera="cam-b", lane=f"col-{1 + i % 2}") for i, c in enumerate(sb)]
+        out = self.play(run, {"cam-a": [replay(a)], "cam-b": [replay(b)]}, 60, [60])
+        self.assertEqual(list(out[60]), [("loop", "normal")])
+        m = out[60][("loop", "normal")][0]
+        self.assertEqual(len(m.a_times), sum(1 for c in a if c.lane == "lane-1"))
+        self.assertEqual(len(m.b_times), sum(1 for c in b if c.lane == "col-1"))
+
+    def test_pdn_norths_pair_is_measured_as_sentri_and_normal(self):
+        # Q-22: SENTRI is A's lane-5 and B's column E; every other lane and column is normal.
+        # Every lane is in a group. The one warning is that the loop does not measure SENTRI
+        # (the next test says why).
+        cameras = load_cameras()
+        with self.assertLogs(runner_mod.log, "WARNING") as logs:
+            run = self.runner(cameras["pdn-north"], cameras["city-pdn-north"],
+                              methods=("loop", "yolox"))
+        self.assertEqual(len(logs.output), 1, logs.output)
+        self.assertIn("loop sentri (city-pdn-north col-e", logs.output[0])
+        self.assertEqual(run.groups, ("normal", "sentri"))
+        self.assertEqual(list(run.not_measured), [("loop", "sentri")])
+        for line, sentri in (("A", {"lane-5"}), ("B", {"col-e"})):
+            self.assertEqual({lane for lane, t in run.types[line].items() if t == "sentri"},
+                             sentri)
+            self.assertEqual(set(run.types[line].values()), {"normal", "sentri"})
+
+    def test_pdn_norths_loop_leaves_column_e_out_and_judges_the_city_columns_together(self):
+        # Line-B review, 2026-10-26: in both daylight City frames a col-4 car covers col-e, and
+        # in a rendered pass the loop counted such cars there, so col-e is counted by yolox only
+        # and the loop's SENTRI is never measured. col-1..col-4 share their sides and are given
+        # equal metres, so a car across a column line is judged by both columns (loop._beside),
+        # as line A's lanes are. With lengths read from square pixels (1.4-3.0 m) none were.
+        cameras = load_cameras()
+        with self.assertLogs(runner_mod.log, "WARNING"):
+            run = TransitRunner(cameras["pdn-north"], cameras["city-pdn-north"],
+                                methods=("loop",))     # no saved roads: a fresh state dir
+        city, pdn = run.counters["city-pdn-north"][0], run.counters["pdn-north"][0]
+        self.assertEqual(zone_lanes(city), ["col-1", "col-2", "col-3", "col-4"])
+        self.assertEqual([(zone_lanes(city)[i], zone_lanes(city)[j]) for i, j in city._beside],
+                         [("col-1", "col-2"), ("col-2", "col-3"), ("col-3", "col-4")])
+        # lane-5 stays in A's loop: a car across lane-4 and lane-5 is still judged by both.
+        self.assertEqual(zone_lanes(pdn), [f"lane-{i}" for i in range(1, 6)])
+        self.assertIn(("lane-4", "lane-5"),
+                      [(zone_lanes(pdn)[i], zone_lanes(pdn)[j]) for i, j in pdn._beside])
+        self.assertEqual(list(run.not_measured), [("loop", "sentri")])
+
+    def test_a_group_with_a_zone_its_method_does_not_count_is_not_measured_by_it(self):
+        # col-e is counted by yolox only. A loop count of SENTRI at B would miss col-e's cars or
+        # hold others, and pair A's SENTRI cars with them: (loop, sentri) is not measured, not
+        # recorded, and the status says why. Crossings a loop counter reports at col-e anyway
+        # are never measured. The other three are measured as before.
+        b = typed("cam-b", "B", {"col-1": "normal", "col-e": "sentri"},
+                  methods={"col-e": ["yolox"]})
+        with self.assertLogs(runner_mod.log, "WARNING") as logs:
+            run = self.runner(typed("cam-a", "A", {"lane-1": "normal", "lane-5": "sentri"}), b,
+                              methods=("loop", "yolox"))
+        a_cars = [Crossing("cam-a", "A", lane, SIM_T0 + timedelta(seconds=s), "loop")
+                  for s, lane in ((0, "lane-1"), (30, "lane-5"), (60, "lane-1"))]
+        b_cars = [Crossing("cam-b", "B", lane, SIM_T0 + timedelta(seconds=s), "loop")
+                  for s, lane in ((120, "col-1"), (150, "col-e"), (180, "col-1"))]
+        out = self.play(run, {"cam-a": [replay(a_cars), replay(a_cars, "yolox")],
+                              "cam-b": [replay(b_cars), replay(b_cars, "yolox")]}, 5, [5])
+        kept = [("loop", "normal"), ("yolox", "normal"), ("yolox", "sentri")]
+        self.assertEqual(list(out[5]), kept)
+        self.assertEqual([(r["method"], r["lane_type"]) for r in run.records(out[5])], kept)
+        self.assertNotIn(("loop", "sentri"), run.previous)
+        self.assertEqual(run.not_measured,
+                         {("loop", "sentri"): "cam-b col-e is counted by yolox only"})
+        self.assertIn("loop sentri (cam-b col-e is counted by yolox only)", "\n".join(logs.output))
+        lines = run.status(out[5]).splitlines()[1:]
+        self.assertEqual([line.split(":")[0].split() for line in lines],
+                         [["loop", "normal"], ["loop", "sentri"], ["yolox", "normal"],
+                          ["yolox", "sentri"]])
+        self.assertEqual(lines[1].split(":", 1)[1].strip(),
+                         "not measured: cam-b col-e is counted by yolox only")
+        self.assertIn("B 1 (", lines[3])           # yolox counts col-e
+
+    def test_each_counter_counts_only_the_zones_that_name_its_method(self):
+        # The loop counter leaves col-e out and YOLOX keeps it. lane-5 stays in A's loop
+        # although the loop does not measure SENTRI: a zone is left out by its own "methods".
+        a = typed("cam-a", "A", {"lane-1": "normal", "lane-5": "sentri"})
+        b = typed("cam-b", "B", {"col-1": "normal", "col-e": "sentri"},
+                  methods={"col-e": ["yolox"]})
+        with unittest.mock.patch("scraper.border.camera.detect.Yolox.load",
+                                 return_value=object()), \
+                self.assertLogs(runner_mod.log, "WARNING"):
+            run = TransitRunner(a, b, methods=("loop", "yolox"))
+        self.assertEqual({cid: {c.method: zone_lanes(c) for c in counters}
+                          for cid, counters in run.counters.items()},
+                         {"cam-a": {"loop": ["lane-1", "lane-5"], "yolox": ["lane-1", "lane-5"]},
+                          "cam-b": {"loop": ["col-1"], "yolox": ["col-1", "col-e"]}})
+
+    def test_a_camera_whose_zones_no_method_of_the_run_counts_gets_no_counter(self):
+        # A LoopCounter with no zones refuses to start: the run goes on without one, and every
+        # loop group is not measured.
+        b = typed("cam-b", "B", {"col-1": "normal"}, methods={"col-1": ["yolox"]})
+        with self.assertLogs(runner_mod.log, "WARNING"):
+            run = TransitRunner(typed("cam-a", "A", {"lane-1": "normal"}), b, methods=("loop",))
+        self.assertEqual([c.method for c in run.counters["cam-b"]], [])
+        self.assertEqual(list(run.not_measured), [("loop", "normal")])
+
+    def test_the_status_has_one_line_per_method_and_lane_type_with_its_own_counts(self):
+        run = self.two_types(methods=("loop", "yolox"))
+        a = [Crossing("cam-a", "A", lane, SIM_T0 + timedelta(seconds=s), "loop")
+             for s, lane in ((0, "lane-1"), (30, "lane-1"), (60, "lane-1"), (90, "lane-5"),
+                             (120, "lane-5"), (150, "lane-9"))]       # lane-9 has no zone
+        self.play(run, {"cam-a": [replay(a)], "cam-b": []}, 3, [])
+        lines = run.status({}).splitlines()[1:]
+        self.assertEqual([line.split(":")[0].split() for line in lines],
+                         [["loop", "normal"], ["loop", "sentri"], ["yolox", "normal"],
+                          ["yolox", "sentri"]])
+        self.assertIn("A 3 cars", lines[0])
+        self.assertIn("A 2 cars", lines[1])
+        self.assertIn("A 0 cars", lines[2])
 
 
 if __name__ == "__main__":

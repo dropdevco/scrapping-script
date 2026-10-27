@@ -490,7 +490,8 @@ class LoopCounter:
                  metres: dict[tuple[str, str], tuple[float, float]] | None = None,
                  sample_every_s: float = SAMPLE_EVERY_S, bank_min: int = BANK_MIN):
         """`metres`: (width, length) of a zone, by (line, lane), measured some other way (a map,
-        a tape) for a camera with no ground rectangle; otherwise see _zone_metres().
+        a tape) for a camera with no ground rectangle; otherwise the zone's own `metres`
+        (cameras.json), otherwise see _zone_metres().
         `sample_every_s` and `bank_min` exist so tests can learn the road in seconds."""
         zones = camera.count_zones if zones is None else zones
         if not zones:
@@ -501,7 +502,7 @@ class LoopCounter:
         for z in zones:
             if z.camera != camera.id:
                 raise ValueError(f"zone {z.line}/{z.lane} belongs to {z.camera}, not {camera.id}")
-            given = (metres or {}).get((z.line, z.lane))
+            given = (metres or {}).get((z.line, z.lane)) or z.metres
             width_m, length_m = given or _zone_metres(camera, np.float32(z.quad))
             if length_m < MIN_ZONE_M:
                 raise ValueError(f"{camera.id} zone {z.line}/{z.lane}: {length_m:.2f} m is too "

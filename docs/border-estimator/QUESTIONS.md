@@ -90,6 +90,18 @@ Should replies invite people heading into Juárez to time their crossing too ("v
 Per-vehicle data (boxes, colour signatures) stays in memory for at most 3 h. Only counts and transits
 per window are written.
 
+**Exception, owner, 2026-10-26: City frames may be written only to draw a counting line.**
+- **What it was used for:** the owner asked for labelled City frames to answer Q-22, and line B was
+  redrawn from two daylight City frames of that afternoon.
+- **What the commands do:** `camera snapshot` and `camera read --debug` refuse a display:false camera
+  unless `--calibration` is passed. With the flag, they print the rule:
+  - keep the frame outside the repository (enforced: a path inside it is refused before any stream
+    opens);
+  - never commit or publish it;
+  - delete it once the line is drawn;
+  - never describe the plates or people in it.
+- **What has not changed:** City frames are still never displayed on our pages.
+
 ### Q-22. Which bridges have SENTRI lanes northbound, and which lanes in each camera are they?
 
 **Partly answered 2026-10-26 by the product owner ("for now"):**
@@ -121,7 +133,126 @@ At both PDN lines the SENTRI lane is physically separated (barrels at A, posts a
 cars can be counted and paired separately there. The Zaragoza booth answer is the owner's best recollection,
 not a confirmed one.
 
+**What changed with this answer (2026-10-26):**
+- **Zones are typed.**
+  - `pdn-north`: lane-5 is `sentri`, lanes 1-4 `normal`.
+  - `city-pdn-north`: line B was redrawn as col-1..col-4 (`normal`, left of the posts) and col-e
+    (`sentri`, column E).
+  - The queue reader's `pdn-north` strips all keep `cbp_lane` null, lane-5 included: the lane type
+    lives on the count zones. A strip's number is the queue reader's (D+L)/v, which ADR-0015 rejects
+    as a wait, so it is not labelled SENTRI or filed as `car_sentri` until it is checked against
+    timed crossings.
+- **SENTRI and normal are measured apart.** The runner gives one record per counting method and lane
+  type.
+- **Two rulings from the redraw, for the owner to confirm:**
+  - The band along the left wall has no zone. It was empty in both frames while every other column
+    was queued, has cones at its far end, and is about 1-2 m wide by a rough model of the camera.
+  - No car stood in column E in either frame, so col-e's place still needs a frame with a SENTRI car
+    in it.
+
+### Q-23. Line B to the booths: time cars for K_eff, and give the booth count
+
+Every camera wait is a floor ("≥ N min") until the stretch from line B to the booths is timed
+([ADR-0015](../architecture/adr/0015-camera-wait-from-cars-ahead.md)). Three things are needed.
+
+**1. Timed cars, for K_eff.**
+- **How:** watch the City's own public page, never ours and never a written frame. Note the minute a
+  car of distinctive colour crosses line B, and the minute it reaches the canopy front. Colour only,
+  never a plate.
+- **How many:** at least 3 cars, at fully queued moments.
+- **Kept apart:** by light (daylight first, night later) and by lane type (column E for SENTRI, the
+  columns left of the posts for normal).
+- **How a timing becomes K_eff:** K_eff = the timed minutes × that method's counted rate at line B at
+  that minute, read from `camera-<date>.jsonl`.
+- **What is stored:** `pairs.json` keeps only `{lane_type, light, hours_utc, low, high, n, date}`,
+  never one car's timing.
+- **Fewer than 3 timings:** a K_eff is used, but never votes.
+- **Redraws:** timings must use line B as redrawn on 2026-10-26. Any later redraw voids them.
+- **Hours:** entries are selected by UTC hours (`hours_utc`). Is UTC acceptable?
+
+**2. The total number of CBP primary car booths at PDN northbound.** This is a site fact, never CBP's
+live `lanes_open`. Without it, nothing bounds the cars under the canopy, so the total stays a floor
+even with K_eff.
+
+**3. B's occupancy, recorded by the runner.** This is code, not yet built.
+
+### Q-24. Hand counts at line A and line B, per lane type
+
+Neither counter has been checked against a hand count, so no number can be trusted or vote.
+
+**Where:** at each line, per lane type:
+
+| Lane type | Line A | Line B |
+|---|---|---|
+| SENTRI | lane 5 | column E |
+| Normal | lanes 1-4 | the columns left of the posts |
+
+**How long and when:** 15 min each, in free flow, in stop-and-go and at night.
+
+**What is stored:** each method's capture in `pairs.json` `hand_counts`, as `{method, lane_type, line,
+capture, hours_utc, n, date}`. A method is checked for a group when its capture is within 5 % at both
+lines.
+
+**Column E first.** Seen from this low camera, col-4's cars cover col-e, and the loop counter does
+count them as SENTRI: in a rendered check (2026-10-26), a loop over col-e alone counted each col-4
+car passing in front of it 3 times. So `cameras.json` names col-e as counted by yolox only
+(`"methods": ["yolox"]`), and the loop does not measure SENTRI: its SENTRI wait reads "not
+measured". A 15-min hand count at col-e lifts that.
+
+### Q-25. Is Ready physically separate from standard before line B?
+
+"Normal" pools CBP's standard and Ready lanes (Q-22, ASSUMPTION).
+
+**If they are separate** (their own lanes at A and their own columns at B), normal can be split, and its
+numbers filed under `car` and `car_ready`.
+
+**If not:**
+- the cameras can only ever vote for `car_sentri`;
+- if standard and Ready cars reorder between A and B, for example by queueing in different columns
+  at different speeds, the normal group's pairing is off, in the same way as a pooled pair but by
+  less.
+
+### Q-26. ADR-0015: the vote, which lanes vote, and three display details
+
+**1. Decision 3, the vote.** Once a pair is validated, does the camera wait:
+- **(a)** vote in the hidden estimate while no flag is up (recommended);
+- **(b)** only get recorded and shown, until GPS-timed crossings grade it;
+- **(c)** only grade?
+
+**2. Decision 4.** Only a pair with a CBP lane id votes. At PDN that is SENTRI, unless Q-25 says Ready
+is separate.
+
+**3. Display details.** Decision 2 (display on this PC) is accepted. As built:
+- **(i) A flagged count.** A count that anchors have not checked within 60 min shows "—". That is
+  stricter than "anchored, continued or given, with its sd known". Keep it?
+- **(ii) A stretch beside a floor.** The page shows the A→B stretch's own minutes beside a floor total
+  (for example "14 min" beside "≥ 10 min"). Acceptable, or should a stretch show minutes only when the
+  total does?
+- **(iii) `camera transit`'s status line.** It still prints an ungated "now ~N min" and median
+  transit. Should it follow the same rule?
+
+### Q-27. Do SENTRI cars queue with the other cars before lane-5 splits off?
+
+At `pdn-north`, SENTRI is lane-5, past the orange barrels (Q-22). Sometimes lanes 1-4 back up past the
+camera's near edge onto the Juárez street while lane-5 does not reach line A. The camera wait then
+cannot tell whether a SENTRI car joining now waits in that street line first.
+- **If SENTRI has its own approach** from the street, its tail before A is 0 then, and the street line
+  is the normal lanes' alone.
+- **If it shares the street approach**, its tail includes the street line, the gap, and the run-up to
+  where lane-5 splits off.
+
+Until this is answered, that tail is not known (a floor of 0). The same holds for the normal group in
+the mirror case.
+
+**A follow-up.** The tail is made unknown only when the street is queued. Two cases keep a tail of 0,
+known, for a group whose own lanes are short of A:
+- another type's line runs past the near edge but ends between the views (the street is empty);
+- the street cannot be read.
+
+Should those be unknown too until this is answered? Today it changes nothing shown, because every total
+is a floor until K_eff is timed (Q-23).
+
 ---
 
 *Answers recorded 2026-10-12 on branch `chisme-border`; Q-21 on 2026-10-24 and Q-22 on 2026-10-26 on
-`chisme-border-waittime`.*
+`chisme-border-waittime`. Q-23 to Q-26 raised 2026-10-26 with ADR-0015; Q-27 the same day, with the lane-type split.*

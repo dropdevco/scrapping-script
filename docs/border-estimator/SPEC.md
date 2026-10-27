@@ -180,6 +180,24 @@ advances, which is observed in one of two ways:
   car [A, to be calibrated].
 - **Tail-tracking form** (camera at the tail): `v_q` is how far the tail moved, divided by the time taken.
 
+**Note (2026-10-26, [ADR-0015](../architecture/adr/0015-camera-wait-from-cars-ahead.md), formula
+proposed).** At PDN northbound the throughput form is built from counted cars. It never uses
+`lanes_open` or `spacing`, because no camera sees a booth and metres are not conserved where the lanes
+fan out:
+
+```
+wait = tail before A + N / μ + K_eff / μ
+```
+
+- **N:** the cars counted between two lines.
+- **μ:** the rate counted leaving line B.
+- **K_eff:** one timed car's minutes from line B to the canopy, times μ at that minute.
+
+All three are in one counting method's own units, so its capture rate cancels. CBP's `lanes_open` is
+never an input, because CBP never feeds a camera number. A car's own time at the booth is not
+included: the wait ends on reaching a primary booth (ASSUMPTION). Until the owner times K_eff, the
+result is a floor.
+
 **Inputs by source:**
 
 | Input | Camera (FPFCH / City) | Google Maps |

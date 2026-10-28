@@ -1120,7 +1120,7 @@ class AnchoringTest(unittest.TestCase):
     or 2 x hi_min while none is measured. Counts and minutes only."""
     HI = 90.0
     KEYS = frozenset({"state", "unbroken_min", "needed_min", "transit_min", "transit_assumed",
-                      "percent", "enclosed", "min_anchors"})
+                      "percent", "enclosed", "min_anchors", "unseen"})
 
     def measure(self, a, b, minutes, **kw):
         return measure(a, b, 0.5, self.HI, start=T0, end=T0 + timedelta(minutes=minutes), **kw)
@@ -1130,9 +1130,9 @@ class AnchoringTest(unittest.TestCase):
         m = self.measure(a, b, 180)
         self.assertEqual(m.epochs[-1].source, "anchors")
         got = anchoring(m)
-        self.assertEqual(set(got), self.KEYS)
-        self.assertEqual((got["state"], got["percent"], got["unbroken_min"]),
-                         ("anchored", 100, 180.0))
+        self.assertEqual(set(got), self.KEYS)        # `unseen` too, [] while both lines are seen
+        self.assertEqual((got["state"], got["percent"], got["unbroken_min"], got["unseen"]),
+                         ("anchored", 100, 180.0, []))
         self.assertAlmostEqual(got["transit_min"], 20.0, delta=0.5)
         self.assertFalse(got["transit_assumed"])
         self.assertAlmostEqual(got["needed_min"], 2 * self.HI - got["transit_min"], delta=0.1)
@@ -1165,18 +1165,66 @@ class AnchoringTest(unittest.TestCase):
 
     def test_a_gap_at_either_line_up_to_the_end_is_broken_and_empty(self):
         a, b, _ = wheel(31, 20.0, minutes=180)
-        for gaps in ({"gaps_a": [Gap(T0 + timedelta(minutes=179), 120.0, "test")]},
-                     {"gaps_b": [Gap(T0 + timedelta(minutes=179), 120.0, "test")]}):
+        for line in ("A", "B"):
+            gaps = {f"gaps_{line.lower()}": [Gap(T0 + timedelta(minutes=179), 120.0, "test")]}
             got = anchoring(self.measure(a, b, 180, **gaps))
             self.assertEqual((got["state"], got["percent"], got["unbroken_min"], got["enclosed"]),
                              ("broken", 0, 0.0, 0), gaps)
-            self.assertIn(f"[{'.' * ANCHOR_BAR}] broken: a line is unseen now",
-                          anchoring_text("loop", "normal", got))
+            # which line, since when (to the minute) and why
+            self.assertEqual(got["unseen"], [{"line": line, "since": "2026-10-24T16:59:00+00:00",
+                                              "reasons": ["test"]}])
+            self.assertEqual(anchoring_text("loop", "normal", got),
+                             f"anchoring loop  normal [{'.' * ANCHOR_BAR}] broken: line {line} "
+                             "unseen now (test) since 16:59 UTC; the stretch starts again once "
+                             "both are seen")
         # A gap that ended before the end cuts an epoch, and the one after it is unbroken.
         got = anchoring(self.measure(a, b, 180, gaps_b=[Gap(T0 + timedelta(minutes=100), 60.0,
                                                             "test")]))
         self.assertNotEqual(got["state"], "broken")
+        self.assertEqual(got["unseen"], [])
         self.assertAlmostEqual(got["unbroken_min"], 80 - (60 + GAP_PAD_S) / 60, delta=0.1)
+
+    def test_a_line_learning_since_before_the_span_is_named_though_the_record_is_empty(self):
+        # Seen live on 2026-10-28 from 11:04 UTC: line B's loop zones learnt the empty road
+        # for over half an hour (a run started in traffic). The runner moves its start past the
+        # open gap, so the span lies wholly inside it, and the record's epochs and gaps are
+        # empty: only `unseen` says which line and why, from when the gap began, not clipped
+        # to the span. Merged gaps give every reason, each once; both lines can be unseen.
+        at = T0 + timedelta(minutes=40)
+        learning = Gap(T0 + timedelta(seconds=23), 2377.0, "loop zones learning")
+        reopened = Gap(T0 + timedelta(minutes=30), 40.0, "segment 7 expired before it was fetched")
+        m = measure([], [], 0.5, self.HI, start=at, end=at, gaps_b=[reopened, learning])
+        rec = record(m, windows(m))
+        self.assertEqual((rec["epochs"], rec["gaps_a"], rec["gaps_b"]), ([], [], []))
+        got = anchoring(m)
+        self.assertEqual((got["state"], got["unseen"]), ("broken", [{
+            "line": "B", "since": "2026-10-24T14:00:00+00:00",
+            "reasons": ["loop zones learning", "segment 7 expired before it was fetched"]}]))
+        self.assertEqual(anchoring_text("loop", "normal", got),
+                         f"anchoring loop  normal [{'.' * ANCHOR_BAR}] broken: line B unseen now "
+                         "(loop zones learning; segment 7 expired before it was fetched) since "
+                         "14:00 UTC; the stretch starts again once both are seen")
+        both = anchoring(measure([], [], 0.5, self.HI, start=at, end=at, gaps_b=[learning],
+                                 gaps_a=[Gap(T0 + timedelta(minutes=35), 300.0, "stream lost")]))
+        self.assertEqual([(u["line"], u["since"][11:16]) for u in both["unseen"]],
+                         [("A", "14:35"), ("B", "14:00")])
+        self.assertIn("broken: line A unseen now (stream lost) since 14:35 UTC, line B unseen "
+                      "now (loop zones learning) since 14:00 UTC; the stretch", anchoring_text(
+                          "loop", "normal", both))
+
+    def test_a_broken_bar_stays_ascii_and_an_old_record_keeps_the_general_words(self):
+        # A reason can hold an exception's text; the terminal is cp1252. A record written
+        # before `unseen` (the 3.5 h night run's) keeps the words it was shown with.
+        at = T0 + timedelta(minutes=10)
+        got = anchoring(measure([], [], 0.5, self.HI, start=at, end=at,
+                                gaps_a=[Gap(T0, 600.0, "stream lost: r\u00e9sum\u00e9 \u2265 3")]))
+        text = anchoring_text("loop", "normal", got)
+        self.assertTrue(text.isascii(), text)
+        self.assertIn("broken: line A unseen now (stream lost: r?sum? ? 3) since 14:00 UTC", text)
+        old = {k: v for k, v in got.items() if k != "unseen"}
+        self.assertEqual(anchoring_text("loop", "normal", old),
+                         f"anchoring loop  normal [{'.' * ANCHOR_BAR}] broken: a line is unseen "
+                         "now (a gap at A or B); the stretch starts again once both are seen")
 
     def test_a_span_wholly_inside_a_gap_is_broken_not_waiting(self):
         # The runner moves its start past a gap that runs on to the end (YOLOX stopped long

@@ -58,7 +58,7 @@ from .measure import (
     rolling,
     wait_bounds,
 )
-from .transit import _SURE, MIN_EXIT_RATE, OUTLIER_CARS, RATE_WINDOW_MIN, WINDOW_MIN
+from .transit import _SURE, MIN_EXIT_RATE, OUTLIER_CARS, RATE_WINDOW_MIN, WINDOW_MIN, unseen_text
 
 Part = tuple[float | None, float | None, float | None, str | None]  # one lane's (minutes, low,
                                                                     # high, why it is not known)
@@ -82,7 +82,8 @@ HAND_COUNT_TOLERANCE = 0.05  # ASSUMPTION: a method's capture is checked when a 
 SELF_CHECK_MIN_WINDOWS = 30  # windows before the A->B range counts as calibrated
 NOT_SHOWN = "recorded, not shown (show_minutes is false in pairs.json)"
 NO_COUNT = "no count of the cars between the lines"   # transit's Now has none: a line is down at
-                                                      # the live edge, or the epoch has no offset
+                                                      # the live edge, or the epoch has no offset;
+                                                      # a reason may go on after it (_no_count)
 STREET_UNTYPED = "street columns not typed: counted for every lane type"
 NO_DEVICE = "device not logged"   # a yolox record from before records named their device
 
@@ -148,11 +149,12 @@ def a_to_b(record: Mapping) -> Segment:
 
     with T = N / mu and n_B = mu x min(RATE_WINDOW_MIN, minutes since the epoch began), the
     exits the rate rests on. A count whose sd is not known (few-anchors, disputed, unknown) gives
-    no minutes and no range; a stalled line B gives no number; n_B <= MIN_EXITS gives no high."""
+    no minutes and no range; a stalled line B gives no number; n_B <= MIN_EXITS gives no high.
+    No count at all says which line is unseen now and why, where the record says (`_no_count`)."""
     sensor = f"{record.get('method')} counts at lines A and B"
     now = record.get("now") or {}
     if now.get("between") is None:
-        return _unknown("a_to_b", sensor, NO_COUNT)
+        return _unknown("a_to_b", sensor, _no_count(record.get("anchoring")))
     epoch = _epoch_at_now(record)
     sd = None if epoch is None else epoch.get("offset_sd")
     if sd is None:
@@ -461,7 +463,10 @@ def display(wait: Mapping, show_minutes: bool = True) -> dict:
     - A method the runner does not measure for this group: "—", not measured, and why.
     - The count between the lines not sure (not anchored, given or continued from one, sd not
       known, or not checked by anchors within 60 min): "—", count not anchored. An anchored
-      epoch with no count now (a line down at the live edge) says there is no count.
+      epoch with no count now (a line down at the live edge) says there is no count, and so
+      does a count with no source at all (no epoch holds now: a span wholly inside a gap, as
+      while line B's loop zones learnt the empty road on 2026-10-28), never "(None)". Either
+      names the line unseen now and why when the method's `anchoring` says (`_no_count`).
     - A floor: "≥ N" with N the known lows' sum rounded down, and why each unknown segment is.
     - Otherwise the minutes and their range, with any transient flag."""
     if not show_minutes:
@@ -471,12 +476,17 @@ def display(wait: Mapping, show_minutes: bool = True) -> dict:
                 "minutes_shown": False}
     count = wait.get("count") or {}
     if not count.get("sure"):
-        anchored = count.get("source") in _SURE and count.get("offset_sd") is not None
-        counted = all(s.get("why") != NO_COUNT for s in wait.get("segments") or []
-                      if s.get("name") == "a_to_b")
-        why = (f"count not anchored ({count.get('source')})" if not anchored
-               else "count not checked by anchors in the last 60 min" if counted
-               else NO_COUNT)
+        source = count.get("source")
+        anchored = source in _SURE and count.get("offset_sd") is not None
+        # a_to_b's own reason when there is no count: it names the line unseen, as its record
+        # said (a_to_b), also where the wait carries no anchoring (viewer._segment_view)
+        no_count = next((s["why"] for s in wait.get("segments") or []
+                         if s.get("name") == "a_to_b"
+                         and (s.get("why") or "").startswith(NO_COUNT)), None)
+        why = ((no_count or _no_count(wait.get("anchoring"))) if source is None
+               else f"count not anchored ({source})" if not anchored
+               else "count not checked by anchors in the last 60 min" if no_count is None
+               else no_count)
         return {"value": "—", "detail": why, "minutes_shown": False}
     if wait.get("floor"):
         reasons = [s["why"] for s in wait.get("segments", []) if not s["known"] and s["why"]]
@@ -594,6 +604,17 @@ def record_device(rec: Mapping) -> str | None:
 
 def _unknown(name: str, sensor: str, why: str, low: float | None = None) -> Segment:
     return Segment(name, None, low, None, False, sensor, why)
+
+
+def _no_count(anchoring: Mapping | None) -> str:
+    """NO_COUNT, and while a record's `anchoring` is broken, which line is unseen now and why
+    (transit.unseen_text), e.g. "no count of the cars between the lines: line B unseen now
+    (loop zones learning) since 11:04 UTC". A record written before `unseen` (2026-10-28), or
+    one that carries no anchoring, gives NO_COUNT alone, as it always did, so a replay of an
+    old log writes the a_to_b reason its live tick wrote."""
+    a = anchoring or {}
+    unseen = unseen_text(a) if a.get("state") == "broken" else ""
+    return f"{NO_COUNT}: {unseen}" if unseen else NO_COUNT
 
 
 def _segment(name: str, sensor: str, parts: Sequence[Part], info: tuple[str, ...] = (),

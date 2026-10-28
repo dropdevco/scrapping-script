@@ -99,7 +99,8 @@ half from a record that marks it complete. Right after a gap they rest on the ca
 flagged, until enough of the new epoch is seen for its anchors to confirm it (about one transit
 plus hi_min): a caller that writes a window once must either wait that long after a gap or
 accept a flag a later horizon would clear. LiveTest runs this. `anchoring` says how far the
-latest epoch has come towards anchors (each record's progress, for the owner's bars).
+latest epoch has come towards anchors (each record's progress, for the owner's bars), and while
+a line is unseen now, which one, since when and why (`unseen`).
 
 Signatures are crossing.look()'s form, (saturation x cos hue, saturation x sin hue, value, width
 share), which both counters emit. Two are compared by `colour_distance` against MATCH_DISTANCE,
@@ -1094,8 +1095,26 @@ def anchoring(m: Measurement) -> dict:
     latest WINDOW_MIN window, by exit, holding at least MIN_STATS_N unflagged transits, taken at
     most hi_min (a longer trip cannot anchor); with none, 0 (`transit_assumed`), which asks for
     the longest stretch, 2 x hi_min. None of this says the offset is right: only `measure`
-    sets "anchors", and a transit's flag and the display rule (combine.display) are as before."""
-    broken = any(g0 < m.end <= g1 for g0, g1 in (*m.gaps_a, *m.gaps_b))
+    sets "anchors", and a transit's flag and the display rule (combine.display) are as before.
+
+    `unseen` says, while broken, which line is unseen now and why: for each line ("A", "B")
+    whose unseen stretch runs to the end, the minute that stretch began (`since`) and its
+    reasons, as `gaps_a` / `gaps_b` give them (padded by GAP_PAD_S and merged, so one stretch
+    can carry several reasons). `since` is not clipped to the measured span: the runner moves
+    its start past a gap open to the end (runner._start), so a span can lie wholly inside it,
+    and then the record's epochs and gaps are empty and only this names the cause. Seen live on
+    2026-10-28: a run started in traffic, line B's loop zones learning the empty road from
+    11:04 UTC on (loop.py: a lane queued since the counter started has no empty moment), and
+    for over half an hour every loop record read "broken" with nothing saying which line or why
+    (QUESTIONS.md Q-39). It is []
+    whenever the state is not broken, so every record has the same keys and an empty list
+    says both lines are seen; a record written before 2026-10-28 has no `unseen` at all."""
+    minute = timedelta(minutes=1)
+    unseen = [{"line": line, "since": _iso(_floor(g0, minute)),
+               "reasons": list(why[i]) if i < len(why) else []}
+              for line, spans, why in (("A", m.gaps_a, m.why_a), ("B", m.gaps_b, m.why_b))
+              for i, (g0, g1) in enumerate(spans) if g0 < m.end <= g1]
+    broken = bool(unseen)
     last = None if broken or not m.epochs else m.epochs[-1]
     t = _latest_transit(m)
     needed = 2 * m.hi_min - min(t or 0.0, m.hi_min)
@@ -1109,7 +1128,8 @@ def anchoring(m: Measurement) -> dict:
         state, percent = "waiting", min(99, math.floor(100 * unbroken / needed))
     return {"state": state, "unbroken_min": round(unbroken, 1), "needed_min": round(needed, 1),
             "transit_min": _r(t, 1), "transit_assumed": t is None, "percent": percent,
-            "enclosed": 0 if last is None else last.enclosed, "min_anchors": MIN_ANCHORS}
+            "enclosed": 0 if last is None else last.enclosed, "min_anchors": MIN_ANCHORS,
+            "unseen": unseen}
 
 
 def _latest_transit(m: Measurement) -> float | None:
@@ -1133,7 +1153,10 @@ def anchoring_text(method: str, group: str, a: Mapping | None, *,
     there is. A count anchored by the anchors that follow a count carried in (fewer enclosed
     than MIN_ANCHORS, `_epoch`) says so, not a stretch and anchors it never needed. `stopped`:
     YOLOX stopped at a camera this run (runner.yolox_stopped), so a broken bar of this method
-    stays broken to the end of the run."""
+    stays broken to the end of the run. Otherwise a broken bar names the line unseen now and
+    why (`unseen_text`), e.g. "broken: line B unseen now (loop zones learning) since 11:04 UTC;
+    the stretch starts again once both are seen"; a record from before `unseen` keeps the
+    general "a line is unseen now (a gap at A or B)"."""
     head = f"anchoring {method!s:5} {group!s:6}"
     if not a:
         return f"{head} [{'?' * ANCHOR_BAR}] not recorded"
@@ -1143,8 +1166,10 @@ def anchoring_text(method: str, group: str, a: Mapping | None, *,
         return (f"{head} [{bar}] broken for the rest of this run: YOLOX stopped, its line unseen "
                 "(YOLOX STOPPED)")
     if a["state"] == "broken":
-        return (f"{head} [{bar}] broken: a line is unseen now (a gap at A or B); the stretch "
-                "starts again once both are seen")
+        # a reason can hold an exception's text: kept ASCII for the cp1252 console
+        which = unseen_text(a).encode("ascii", "replace").decode("ascii")
+        return (f"{head} [{bar}] broken: {which or 'a line is unseen now (a gap at A or B)'}; "
+                "the stretch starts again once both are seen")
     if a["state"] == "anchored" and a["enclosed"] < a["min_anchors"]:
         return (f"{head} [{bar}] 100%: anchored, the count carried in confirmed by distinctive "
                 "cars that follow it")
@@ -1157,6 +1182,21 @@ def anchoring_text(method: str, group: str, a: Mapping | None, *,
     if a["transit_assumed"]:
         text += " (no trip measured yet: taken as 0 min, the longest stretch)"
     return text
+
+
+def unseen_text(a: Mapping | None) -> str:
+    """A record's `anchoring.unseen` in words, one part per line, e.g. "line B unseen now (loop
+    zones learning) since 11:04 UTC"; "" when it names none (both lines seen, or a record
+    written before `unseen` was). The terminal's bar, the page's bar (viewer._anchoring_view)
+    and the camera wait's "no count" (combine) all say it this way."""
+    parts = []
+    for u in (a or {}).get("unseen") or []:
+        why = "; ".join(u.get("reasons") or [])
+        since = u.get("since")
+        parts.append(f"line {u.get('line')} unseen now" + (f" ({why})" if why else "")
+                     + (f" since {datetime.fromisoformat(since).astimezone(UTC):%H:%M} UTC"
+                        if since else ""))
+    return ", ".join(parts)
 
 
 # --- helpers --------------------------------------------------------------------------------

@@ -573,6 +573,44 @@ camera on both sides; nothing else was configured.
 - **(iii) BOTA** answered "technical difficulties" on all three streams on 2026-10-27, and Stanton's
   City feeds returned 404, so neither can pair. **Default:** nothing to do.
 
+### Q-39. The loop counter's learnt road across runs
+
+The GPU smoke run of 2026-10-28 started at 11:04 UTC in a fresh state folder, with morning traffic
+already standing at line B (`city-pdn-north`). A loop zone learns its empty road only from moments
+when it is near empty (`loop.py`: `EMPTY_MIN_SAMPLES` of them), and a lane queued since the counter
+started has none. While any of a line's zones learns, the loop's count at that line is a gap. So the
+loop was blind at line B for **55+ min**: every loop record from 11:05 to 11:59 UTC (55 of 55) read
+broken, with no epoch and no count, and the run was still going when we looked (11:59 UTC). The
+saved roads (`city-pdn-north.loop.npz`) held col-1 and col-2 at 11:44 UTC, and col-1, col-2 and
+col-4 at 11:54 UTC, so col-3 was still learning; the night run's file holds all four. The night
+run of 2026-10-28 started at a quiet hour, and its learning ended after 5 s. YOLOX's stretch at both lines ran unbroken meanwhile
+(39 min unbroken at 11:43 UTC).
+
+Until 2026-10-28 nothing in the records named the cause: the runner moves a measurement's start
+past a gap open to the end, so the span was empty and `epochs`, `gaps_a` and `gaps_b` were all
+`[]`. The bar said only "a line is unseen now", and the card "count not anchored (None)". They now
+say "line B unseen now (loop zones learning) since 11:04 UTC" (`anchoring.unseen`, built that day).
+
+`seed()` keeps learnt roads across restarts of one state folder. Test runs start in a fresh folder
+on purpose, so that the queue reader learns that night's or day's road (Q-34 (v), ROADMAP 6.11), and
+the loop's roads start afresh with it.
+- **(a) Default, as built:** keep fresh folders, and accept the loop gap at a line that starts in
+  traffic. The loop gives nothing there until each zone's road has been near empty often enough,
+  which on a busy morning can be most of a run.
+- **(b)** Seed only the loop's roads (`*.loop.npz`) from an earlier run's folder, and keep the queue
+  reader's references fresh. This carries the risk `loop.py` names: a road learnt wrong (a standing
+  queue learnt as road, or a road learnt in other light, Q-31) counts short while `states()` says
+  "counting", with no gap, until about 32 min of empty road replace it (`AGREE_REFRESHES`).
+- **(c)** Day and night loop roads, as ROADMAP 6.11 plans for the queue reader's references: seed the
+  road saved in the same light, and learn afresh otherwise.
+
+ASSUMPTION: col-3 (and col-4 until about 11:50 UTC) stayed unlearnt because its lane stood queued,
+not for another reason. No frame was looked at, and which zones are learning is not logged (the
+status names the camera only; the saved roads file shows which have learnt). ASSUMPTION: a run started at a quiet hour learns within minutes, as the night run did;
+that is one run.
+
+Which: (a), (b) or (c)? And does a blind loop at one line matter while YOLOX counts there?
+
 ---
 
 *Answers recorded 2026-10-12 on branch `chisme-border`; Q-21 on 2026-10-24 and Q-22 on 2026-10-26 on
@@ -581,4 +619,5 @@ Q-28 to Q-33, and the open point in Q-24, raised 2026-10-26/27 from that evening
 live check, with ADR-0016 and the review of methods that are not measured. Q-22's line A corrected
 2026-10-27. Q-28 (v) extended and (ix) added, Q-29's progress note, and Q-34 to Q-38 raised
 2026-10-28: from the free-flow review (ADR-0018), YOLOX on the GPU (ADR-0017), the anchoring bars and
-lane labels, and the camera survey of 2026-10-27.*
+lane labels, and the camera survey of 2026-10-27. Q-39 raised the same day, from the GPU smoke run's
+blind loop at line B.*

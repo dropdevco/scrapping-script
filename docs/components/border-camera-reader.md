@@ -372,8 +372,8 @@ It holds counts, rates, transit statistics per 15-minute window, epochs, each li
 stretches (`gaps_a`, `gaps_b`: the minute each began, its length in seconds as the epochs were cut,
 that is padded and merged, and its reasons), how many times each line's stream was opened again
 since the runner started (`reconnects_a`, `reconnects_b`), how far its latest epoch has come towards
-anchoring (`anchoring`, below), and, on a yolox record, which path counted at each camera
-(`devices`, below): derived numbers only. A window with fewer
+anchoring and which line is unseen now and why (`anchoring`, below), and, on a yolox record,
+which path counted at each camera (`devices`, below): derived numbers only. A window with fewer
 than 3 transits gets no median or percentiles. That ties no written time to a car, but it is not
 anonymity: with 3, the median and percentiles give the three times back. Times that could be a
 car's own are cut to the minute (`seen_until`, `now.at`, an epoch's edges, a gap's start). A gap's
@@ -467,7 +467,16 @@ PDN northbound, per lane-type group, side by side and never averaged.
   - `needed_min`: 2 × 90 − T, with T (`transit_min`) the median of the latest 15-min window holding at
     least 3 unflagged transits, at most 90; with none, T = 0 and `transit_assumed`;
   - `percent`, rounded down, at most 99 until anchored and 0 when broken;
-  - `enclosed` and `min_anchors`.
+  - `enclosed` and `min_anchors`;
+  - `unseen` (since 2026-10-28): while broken, each line whose unseen stretch runs to the end, as
+    `{"line": "B", "since": "<minute>", "reasons": ["loop zones learning"]}`, with the minute the
+    stretch began (padded and merged as `gaps_a` / `gaps_b`, not clipped to the record's span) and
+    every reason merged into it; `[]` whenever the state is not broken, so every new record has
+    the same keys. It is needed because the runner moves a measurement's start past a gap open to
+    the end: the span then lies wholly inside it, and the record's `epochs`, `gaps_a` and `gaps_b`
+    are all empty. Seen live on 2026-10-28 from 11:04 UTC, when line B's loop zones were learning
+    the empty road with traffic standing on it (Q-39). Records written before then have no
+    `unseen`, and are read as before.
 
   The status shows it as a bar under each count line, and the page as a bar per group and method,
   with one note saying what it is. It says nothing of whether a wait is right.
@@ -562,8 +571,11 @@ All of it is in that method's counted units (ADR-0015 decision 1).
 - **Otherwise:**
   - a floor with a sure count shows "≥ N min" and why each segment is unknown;
   - an unsure count shows "—, count not anchored (source)", or "count not checked by anchors in the
-    last 60 min", or, when a line is down at the live edge and there is no count at all, "no count of
-    the cars between the lines";
+    last 60 min", or, when there is no count at all, "no count of the cars between the lines". That
+    is a line down at the live edge, or no epoch at all (the span wholly inside a gap, so the count
+    has no source: before 2026-10-28 this read "count not anchored (None)"). Where the record's
+    `anchoring.unseen` says, it goes on with which line and why, for example ": line B unseen now
+    (loop zones learning) since 11:04 UTC". The A→B segment's reason says the same;
   - a method the runner does not measure for that group shows "—, not measured: <why>".
 - **`show_minutes`** is true in `pairs.json`. Set to false, only "recorded, not shown" appears.
 - **The page also shows**, per group:
@@ -585,7 +597,10 @@ All of it is in that method's counted units (ADR-0015 decision 1).
     [#####.....] 58% 101/174 min, anchors 1/3`. A count carried in and confirmed by the anchors that
     follow it reads `100%: anchored, the count carried in confirmed by distinctive cars that follow
     it`; anchors that have not checked the count for 60 min (`CHECK_MAX_MIN`, at night) read waiting,
-    at most 99 %, as the Now is then not sure; and once YOLOX has stopped, a broken yolox bar reads
+    at most 99 %, as the Now is then not sure; a broken bar names the line unseen now and why, for
+    example `broken: line B unseen now (loop zones learning) since 11:04 UTC; the stretch starts
+    again once both are seen` (the page says the same; a record from before `unseen` keeps "a line
+    is unseen now (a gap at A or B)"); and once YOLOX has stopped, a broken yolox bar reads
     `broken for the rest of this run: YOLOX stopped, its line unseen (YOLOX STOPPED)`. A stream down
     or a still picture keeps the bar as it was until frames move again (the page flags it stale
     after 120 s). Its needed minutes give T back (180 − needed),
@@ -792,6 +807,10 @@ accuracy.
 - An uncut run long enough to anchor: about 3 h at both lines, away from sunset (Q-29). No run so
   far could anchor. Each record's `anchoring`, and the status's and page's bars, now show how far a
   run has come (2026-10-28).
+- A run started in traffic leaves the loop blind at a line until that line's road is empty: on
+  2026-10-28 line B's loop zones were still learning 55 min after the 11:04 UTC start (every loop
+  record broken, still so when looked at). The record, the bars and the camera wait now name the
+  line and why; whether to seed the loop's roads from an earlier run is Q-39.
 - Day and night references for the queue reader (ROADMAP 6.11).
 - Lerdo (Fila), the Zaragoza streams (`KX-bm-Lhy3w`, `GC5RY3zipa4`, Waterfill `o5h9RB7qwY8`) and both
   Guadalupe–Tornillo streams (`8u-hBawdG8c`, `0gT7jvaLCkg`) were live on 2026-10-27 but are not
@@ -809,4 +828,5 @@ redraw and `camera estimate` (ADR-0015); updated 2026-10-27 for the frozen rule,
 no-motion gap (ADR-0016), and the not-measured review fixes; updated 2026-10-28 for YOLOX on the GPU
 (ADR-0017), the queue cards with the booth out of view (ADR-0018), the anchoring bars, the lane
 labels, `pdn-north`'s lane-4 (SENTRI) and its confirmed direction, the freeze tail after a reopen,
-and the camera survey of 2026-10-27.*
+and the camera survey of 2026-10-27; and again that day for the bars and the camera wait naming the
+line unseen now and why (`anchoring.unseen`, Q-39).*

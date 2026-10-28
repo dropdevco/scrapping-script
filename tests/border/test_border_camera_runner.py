@@ -21,7 +21,7 @@ pytest.importorskip("cv2")
 from test_border_camera_transit import T0 as SIM_T0
 from test_border_camera_transit import simulate, wheel
 
-from scraper.border.camera import gpu, transit
+from scraper.border.camera import combine, gpu, transit
 from scraper.border.camera import runner as runner_mod
 from scraper.border.camera.calibration import camera_from_dict, load_cameras
 from scraper.border.camera.crossing import SIGNATURE_TTL_S, Crossing
@@ -149,6 +149,45 @@ class Runner(RunnerSetUp):
         m, _ = self.run_.measure()[LOOP]
         self.assertEqual(m.gaps_a, ())
         self.assertEqual([(e.start, e.end) for e in m.epochs], [(T0, end)])
+
+    def test_a_line_learning_from_its_first_frame_is_named_by_the_record_bar_and_card(self):
+        """Seen live on 2026-10-28 from 11:04 UTC (the GPU smoke run): started with traffic
+        standing at line B, whose loop zones had no empty moment to learn the road from, so its
+        gap stayed open for over half an hour. _start moves the start past that open gap, so the
+        span is empty and the record has no epoch and no gap to name the cause; and the card
+        read "count not anchored (None)". Now the record's anchoring names line B and why, from
+        when it began, and so do the status bar and the camera wait."""
+        self.cb.learning = True
+        for s in range(0, 31 * 60, 30):
+            at = T0 + timedelta(seconds=s)
+            if s % 120 == 0:
+                self.ca.cars_on.add(at)          # cars cross A all the while
+            self.feed(self.a, at)
+            self.feed(self.b, at)
+        measured = self.run_.measure()
+        m, current = measured[LOOP]
+        self.assertEqual((m.start, m.end, m.epochs, current), (m.end, m.end, (), None))
+        rec = self.run_.records(measured)[0]
+        self.assertEqual((rec["epochs"], rec["gaps_a"], rec["gaps_b"], rec["now"]),
+                         ([], [], [], None))
+        self.assertEqual(rec["anchoring"]["state"], "broken")
+        self.assertEqual(rec["anchoring"]["unseen"], [
+            {"line": "B", "since": "2026-10-24T18:00:00+00:00",
+             "reasons": ["loop zones learning"]}])
+        status = self.run_.status(measured).splitlines()
+        self.assertIn("learning: cam-b", status[1])
+        self.assertEqual(status[2], "  anchoring loop  mixed  [..........] broken: line B unseen "
+                         "now (loop zones learning) since 18:00 UTC; the stretch starts again "
+                         "once both are seen")
+        out = combine.combine([rec], [], {"a": "cam-a"}, self.run_.seen_until())
+        wait = out["groups"]["mixed"]["methods"]["loop"]
+        why = ("no count of the cars between the lines: line B unseen now (loop zones learning) "
+               "since 18:00 UTC")
+        self.assertEqual(wait["count"]["source"], None)
+        self.assertEqual(next(s["why"] for s in wait["segments"] if s["name"] == "a_to_b"), why)
+        shown = combine.display(wait)
+        self.assertEqual((shown["detail"], shown["minutes_shown"]), (why, False))
+        self.assertNotIn("None", combine.display_text(wait))
 
     def test_a_stream_gap_reaches_the_counters_and_the_line(self):
         gap = Gap(T0, 12.0, "segment expired")

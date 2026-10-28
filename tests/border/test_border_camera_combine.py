@@ -613,6 +613,42 @@ class DisplayTest(unittest.TestCase):
         self.assertIn("count flagged: no count of the cars between the lines",
                       wait(out)["transient"])
 
+    def test_no_count_names_the_line_unseen_now_and_why_and_never_none(self):
+        """With the record's anchoring as the runner writes it (transit.anchoring), a_to_b's
+        reason and the card say which line is unseen at the live edge and why. A count with no
+        source at all (no epoch holds now: the span wholly inside a gap open since before it, as
+        on 2026-10-28 while line B's loop zones learnt the empty road) read "count not anchored
+        (None)": it says there is no count, and why. A record from before `unseen`, or with no
+        anchoring, gives NO_COUNT alone, as its live tick wrote, so an old log replays alike."""
+        run = qs.run(**PAST_A)
+        gap = Gap(self.end - timedelta(minutes=5), 300.0, "test: line B down")
+        m, rec = measured(run, b=[c for c in run.b if c.at < gap.after], gaps_b=(gap,))
+        rec["anchoring"] = transit.anchoring(m)
+        why = f"{combine.NO_COUNT}: line B unseen now (test: line B down) since 17:15 UTC"
+        out = combine.combine([rec], no_line_at_a(self.end), pair(), self.end)
+        self.assertEqual(segment(wait(out), "a_to_b")["why"], why)
+        self.assertEqual(self.shown(out), {"value": "—", "minutes_shown": False, "detail": why})
+
+        learning = Gap(run.at(0.0), (self.end - run.at(0.0)).total_seconds(),
+                       "loop zones learning")
+        m = transit.measure(run.a, run.b, LO_MIN, HI_MIN, gaps_b=(learning,), start=self.end,
+                            end=self.end)
+        rec = transit.record(m, transit.windows(m), None, lane_type="sentri")
+        rec.update(method="loop", anchoring=transit.anchoring(m))
+        self.assertEqual((rec["epochs"], rec["gaps_b"], rec["now"]), ([], [], None))
+        out = combine.combine([rec], no_line_at_a(self.end), pair(), self.end)
+        self.assertIsNone(wait(out)["count"]["source"])
+        why = f"{combine.NO_COUNT}: line B unseen now (loop zones learning) since 14:00 UTC"
+        self.assertEqual(segment(wait(out), "a_to_b")["why"], why)
+        self.assertEqual(self.shown(out), {"value": "—", "minutes_shown": False, "detail": why})
+
+        old = dict(rec, anchoring={k: v for k, v in rec["anchoring"].items() if k != "unseen"})
+        bare = {k: v for k, v in rec.items() if k != "anchoring"}
+        for r in (old, bare):
+            out = combine.combine([r], no_line_at_a(self.end), pair(), self.end)
+            self.assertEqual(segment(wait(out), "a_to_b")["why"], combine.NO_COUNT)
+            self.assertEqual(self.shown(out)["detail"], combine.NO_COUNT)
+
     def test_show_minutes_false_shows_nothing_but_that_it_is_recorded(self):
         out = combine.combine([self.rec], no_line_at_a(self.end), self.timed, self.end,
                               q_b={("loop", "sentri"): True})

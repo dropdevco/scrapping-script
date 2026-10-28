@@ -791,6 +791,40 @@ class AnchoringBars(unittest.TestCase):
         self.assertTrue(card["device_stopped"].startswith("YOLOX STOPPED at pdn-north"))
         self.assertIn("broken for the rest of this run", card["anchoring"]["text"])
 
+    def test_a_broken_bar_and_its_card_name_the_line_unseen_now_and_why(self):
+        """transit.anchoring's `unseen`, as on 2026-10-28 from 11:04 UTC: line B's loop zones
+        learning the empty road, the span wholly inside that gap, so the count has no epoch and
+        no source. The bar says which line and why, and the card says there is no count and
+        why, never "count not anchored (None)". YOLOX stopped keeps its own words."""
+        broken = self.a(state="broken", percent=0, unbroken_min=0.0, enclosed=0, unseen=[
+            {"line": "B", "since": "2026-10-28T11:04:00+00:00",
+             "reasons": ["loop zones learning"]}])
+        bar = ("Anchoring broken: line B unseen now (loop zones learning) since 11:04 UTC; the "
+               "unbroken stretch starts again once both are seen.")
+        self.assertEqual(viewer._anchoring_view(broken),
+                         {"state": "broken", "percent": 0, "text": bar})
+        self.assertEqual(viewer._anchoring_view(broken, stopped=True)["text"],
+                         "Anchoring broken for the rest of this run: YOLOX stopped (flagged "
+                         "below), so its line stays unseen.")
+        why = ("no count of the cars between the lines: line B unseen now (loop zones learning) "
+               "since 11:04 UTC")                  # combine.a_to_b's reason, from the record
+        a_to_b = {"name": "a_to_b", "minutes": None, "low": None, "high": None, "known": False,
+                  "sensor": "loop counts at lines A and B", "why": why}
+        rec = {"at": "2026-10-28T11:40:00+00:00", "groups": {"normal": {
+            "lane": None, "agree": None, "would_vote": False, "would_vote_reasons": [],
+            "methods": {"loop": {"count": {"source": None, "offset_sd": None, "sure": False},
+                                 "segments": [a_to_b], "floor": True, "anchoring": broken,
+                                 "transient": [], "info": []}}}}}
+        snapshot = {"pair": {"port_number": "240202", "direction": "north",
+                             "show_minutes": True}, "record": rec, "stopped": None,
+                    "updated_at": rec["at"]}
+        card = viewer.estimate_view(snapshot)["groups"][0]["methods"][0]
+        self.assertEqual((card["value"], card["detail"], card["anchoring"]["text"]),
+                         ("—", why, bar))
+        # the A->B stretch alone (_segment_view) carries no anchoring: its own reason says it
+        self.assertEqual((card["segments"][0]["value"], card["segments"][0]["detail"]),
+                         ("—", why))
+
 
 if __name__ == "__main__":
     unittest.main()

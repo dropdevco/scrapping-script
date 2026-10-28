@@ -43,7 +43,7 @@ from .estimate import LAG_ALERT_S
 from .measure import plain
 from .reader import state_dir
 from .runner import HI_MIN
-from .transit import CHECK_MAX_MIN, MIN_ANCHORS
+from .transit import CHECK_MAX_MIN, MIN_ANCHORS, unseen_text
 
 ESTIMATE_PAIR = {"port_number": "240202", "direction": "north"}   # the pair `camera estimate`
                                                                   # measures (pairs.json)
@@ -563,7 +563,9 @@ def _anchoring_view(a: dict | None, stopped: bool = False) -> dict | None:
     """A method's anchoring bar (transit.anchoring, carried by the camera record): its state,
     the percent it fills (100 only once anchored) and one line saying what it is. Minutes are
     rounded down and the needed ones up, so it never shows more than there is. `stopped`: the
-    card's YOLOX stopped at a camera (_device_view), so a broken bar stays broken this run."""
+    card's YOLOX stopped at a camera (_device_view), so a broken bar stays broken this run.
+    Otherwise a broken bar names the line unseen now and why (transit.unseen_text), and a
+    record from before `unseen` keeps the general "a line is unseen now"."""
     if not a:
         return None
     state = a.get("state")
@@ -571,8 +573,9 @@ def _anchoring_view(a: dict | None, stopped: bool = False) -> dict | None:
         text = ("Anchoring broken for the rest of this run: YOLOX stopped (flagged below), so "
                 "its line stays unseen.")
     elif state == "broken":
-        text = ("Anchoring broken: a line is unseen now (a gap at A or B); the unbroken stretch "
-                "starts again once both are seen.")
+        which = unseen_text(a) or "a line is unseen now (a gap at A or B)"
+        text = (f"Anchoring broken: {which}; the unbroken stretch starts again once both are "
+                "seen.")
     elif state == "anchored" and a["enclosed"] < a["min_anchors"]:
         # transit._epoch: anchors that follow a carried count confirm it, enclosed or not
         text = ("Anchored: 100 % · the count carried in (across a gap, or from the measurement "

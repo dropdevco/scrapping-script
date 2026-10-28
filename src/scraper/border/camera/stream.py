@@ -30,11 +30,11 @@ import cv2
 import numpy as np
 
 FORMAT = "bestvideo[height<=480]/bestvideo"   # 480p is plenty for metres of queue; less to pull
-FROZEN_SECONDS = 20       # an unchanging picture this long is a stalled encoder, not a quiet road
-FROZEN_DIFF = 1.0         # mean grey-level change below which two frames are "the same picture"
+FROZEN_SECONDS = 20       # the window each frozen rule judges, and what a StreamFrozen takes back
+FROZEN_DIFF = 1.0         # the clock region changed less than this: the clock did not tick
 FROZEN_DIFF_SCENE = 0.3   # a whole scene (no clock) that changed this much moved (frozen_check)
 BLACK_LEVEL = 12          # mean grey below this is an encoder sending black, not a dark road
-FROZEN_CHANGED = 0.1      # frozen when at most this share of a window's frames changed: keyframes
+FROZEN_CHANGED = 0.1      # with a clock: frozen when at most this share of pairs ticked: keyframes
 FROZEN_SAME_SHARE = 1 / 3  # a whole scene is frozen when this share of its pairs repeat exactly
 SCENE_MAX_FPS = 2.0       # a whole scene is read no faster: that rule's margin (frozen_check)
 LISTING_TTL = 600         # a channel's stream list is re-read at most every ten minutes
@@ -162,10 +162,11 @@ def frames(url: str, fps: float, seconds: float,
 
     `live_region` (x, y, w, h as fractions of the frame) is where the picture must keep
     changing while the stream is alive: the burned-in clock on the bridge cameras. A frozen
-    encoder re-sends the same picture, but never byte for byte (it is re-encoded), and an
+    encoder's picture still changes a little at each keyframe (it is re-encoded), and an
     empty road at night barely changes either, so "the clock stopped" is the test, measured
     as mean grey-level change. Without a region the whole frame is compared, and frozen means
-    the picture repeats exactly; that needs `fps` of SCENE_MAX_FPS or less (frozen_check)."""
+    the picture repeats exactly between keyframes (ASSUMPTION, ADR-0016); that needs `fps` of
+    SCENE_MAX_FPS or less (frozen_check)."""
     check = frozen_check(fps, live_region)       # refuses a whole scene read too fast
     cap = cv2.VideoCapture(url)
     if not cap.isOpened():
@@ -220,10 +221,12 @@ def frozen_check(fps: float, live_region: tuple[float, float, float, float] | No
     # 2362 pairs at 2 fps were bit-identical (the smallest change was 0.0095 grey). At the
     # native rate 33.5 % of frames repeated the one before, but the picture changed at least
     # every 0.42 s, and these pairs are at least 0.48 s apart (hls.Decoder picks frames
-    # 1/fps - 0.02 s apart): that margin is SCENE_MAX_FPS. An encoder fed one unchanging
-    # picture, or black, is expected to repeat it exactly between keyframes (ASSUMPTION from how
-    # H.264 codes an unchanged picture; no City freeze has been sampled). A third, not all,
-    # leaves room for the pairs each keyframe changes; the share is a judgement (ASSUMPTION).
+    # 1/fps - 0.02 s apart): that margin is SCENE_MAX_FPS. It was one night: that the margin
+    # holds at dusk and by day is an ASSUMPTION until the runs of Q-32. An encoder fed one
+    # unchanging picture, or black, is expected to repeat it exactly between keyframes
+    # (ASSUMPTION from how H.264 codes an unchanged picture; no City freeze has been sampled).
+    # A third, not all, leaves room for the pairs each keyframe changes; the share is a
+    # judgement (ASSUMPTION).
     # The trade-off: a freeze re-encoded with noise, so that no two frames match, is no longer
     # caught here, where the first rule caught it in 20-30 s. The runner's no-motion gap takes
     # such a stretch back instead, from the last frame that moved (hls.Stamped.moved), on its
@@ -249,8 +252,13 @@ def frozen_check(fps: float, live_region: tuple[float, float, float, float] | No
         if stopped:
             # Seen live: Zaragoza (Av. Waterfill) came back at 10:16 UTC on 2026-10-19
             # serving solid black for 20 s, then dropped again. Say which it is.
-            what = "is black" if float(frame.mean()) < BLACK_LEVEL else "has not changed"
-            raise StreamFrozen(f"the picture {what} for {FROZEN_SECONDS}s", FROZEN_SECONDS)
+            if float(frame.mean()) < BLACK_LEVEL:
+                what = f"is black for {FROZEN_SECONDS}s"
+            elif live_region:
+                what = f"has not changed for {FROZEN_SECONDS}s"
+            else:   # say what was counted: the share that calls it frozen is a judgement
+                what = f"repeated exactly in {sum(same)} of the last {limit} pairs"
+            raise StreamFrozen(f"the picture {what}", FROZEN_SECONDS)
         return moved
 
     return check

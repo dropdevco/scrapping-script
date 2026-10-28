@@ -239,6 +239,15 @@ class FrozenWholeScene(unittest.TestCase):
         moved = feed(check, quiet(600))                       # 300 s at 2 fps
         self.assertFalse(any(moved))
 
+    def test_a_road_that_changes_by_one_pixel_a_pair_is_never_frozen(self):
+        # Compared at 320x180, not 64x16: averaged down, a change this small rounds away and
+        # every pair reads as a repeat.
+        frames = [picture() for _ in range(120)]              # 60 s at 2 fps
+        for i, f in enumerate(frames):
+            f[i % 180, (7 * i) % 320] += 1                    # one grey level, one pixel
+        check = stream.frozen_check(2.0, None)
+        self.assertFalse(any(feed(check, frames)))
+
     def test_a_third_of_20_s_of_pairs_repeating_exactly_is_frozen(self):
         check = stream.frozen_check(2.0, None)
         fresh = iter(quiet(41))
@@ -250,7 +259,7 @@ class FrozenWholeScene(unittest.TestCase):
             check(frames[-1])                                 # 14 of 40 is
         self.assertEqual(caught.exception.seconds, stream.FROZEN_SECONDS)
         self.assertEqual(caught.exception.seconds, 20)
-        self.assertIn("has not changed", str(caught.exception))
+        self.assertIn("repeated exactly in 14 of the last 40 pairs", str(caught.exception))
 
     def test_a_black_picture_still_says_it_is_black(self):
         check = stream.frozen_check(2.0, None)
@@ -266,9 +275,20 @@ class FrozenWholeScene(unittest.TestCase):
         self.assertEqual(feed(check, [still, nudged, brighter, brighter, still]),
                          [False, False, True, False, True])
 
+    def test_half_a_grey_level_over_the_whole_scene_moved_and_a_fifth_did_not(self):
+        # The runner's no-motion hold (QUIET_S) was measured with FROZEN_DIFF_SCENE at 0.3. On
+        # the night of 2026-10-27 UTC any bar from 0.2 to 0.5 gave the same lag between moving
+        # pairs (p99 8.4 s); at 1.0 it was 37 s, at 4.0 201 s.
+        check = stream.frozen_check(2.0, None)
+        half, fifth = picture(), picture()
+        half[:90] += 1                                        # half its pixels 1 grey level up
+        fifth[:36] += 1                                       # a fifth of them
+        self.assertEqual(feed(check, [picture(), half, picture(), fifth]),
+                         [False, True, True, False])
+
     def test_a_whole_scene_read_faster_than_2_fps_is_refused(self):
-        # Native frames changed at least every 0.42 s; pairs closer than that can repeat
-        # exactly on a live picture.
+        # On one night native frames changed at least every 0.42 s (dusk and day: Q-32); pairs
+        # closer than that can repeat exactly on a live picture.
         with self.assertRaises(ValueError):
             stream.frozen_check(2.5, None)
         stream.frozen_check(stream.SCENE_MAX_FPS, None)

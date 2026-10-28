@@ -246,6 +246,20 @@ class NotMeasuredTest(StateDir):
         # The run's not_measured goes with each transit record, for a later replay.
         self.assertEqual([r["not_measured"] for r in records], [{"loop": {"sentri": why}}])
 
+    def test_a_run_that_measures_some_groups_waits_for_line_b_not_stops(self):
+        """cameras.json as it is: the loop measures NORMAL but not SENTRI. Before line B is seen,
+        the page and the status say nothing is measured yet, not that the run measures nothing
+        (and do not fail looking up a reason NORMAL does not have)."""
+        est = self.open(cams=REAL_CAMS)
+        self.feed(est, 0, 1)
+        est.runner.last_at.pop("city-pdn-north")     # line B not seen yet
+        est.runner.first_at.pop("city-pdn-north")
+        self.assertIsNone(estimate.measures_nothing(est.runner))
+        status = est.step(now=T0 + timedelta(minutes=1))
+        shown = viewer.estimate_view(est.live.snapshot())
+        self.assertEqual((shown["stopped"], shown["message"]), (None, viewer.NOTHING_YET))
+        self.assertIn("camera wait: nothing measured yet", status)
+
     def test_a_run_that_measures_no_group_says_so_not_that_nothing_is_measured_yet(self):
         """Every City zone counted by yolox only and a loop-only run: no (method, group) is
         measured, so no tick will ever make a camera record. The page and the status give the
@@ -579,6 +593,15 @@ class ReplayTest(StateDir):
         other --methods still gives back the live record."""
         live, again = self.live_and_replayed("loop", "yolox")
         self.assertIn("not_measured", live[0]["groups"]["sentri"]["methods"]["loop"])
+        self.assertEqual(again, live)
+
+    def test_a_replay_lists_nothing_not_measured_when_the_log_says_nothing_was(self):
+        """A yolox-only run measured every group, and its log says so (an empty not_measured):
+        a replay given loop as well adds no loop card."""
+        live, again = self.live_and_replayed("yolox", "loop,yolox")
+        self.assertEqual([r.get("not_measured") for r in lines(self.dir, "transit-*.jsonl")],
+                         [{}, {}])
+        self.assertEqual(list(live[0]["groups"]["sentri"]["methods"]), ["yolox"])
         self.assertEqual(again, live)
 
     def test_cmd_replay_rebuilds_not_measured_for_a_log_that_does_not_carry_it(self):

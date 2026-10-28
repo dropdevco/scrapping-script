@@ -600,13 +600,15 @@ class RecordTest(unittest.TestCase):
     def test_each_lines_gaps_are_written_as_they_cut_with_why(self):
         # So a run's records name the line and the cause of every cut. Each stretch is written
         # as the epochs were cut at it (padded, merged, clipped to the measured span), its start
-        # to the minute, and the order the gaps come in does not matter.
+        # to the minute, each reason once, and the order the gaps come in does not matter.
         sim = simulate(gap_b=GapTest.GAP)
         frozen = T0 + timedelta(minutes=100, seconds=37.25)
         end = T0 + timedelta(minutes=300)
         gaps_a = [Gap(frozen + timedelta(seconds=10), 40.0, "stream down or reconnecting"),
                   Gap(frozen, 20.0, "picture frozen or black"),            # merges with the first
+                  Gap(frozen + timedelta(seconds=30), 10.0, "stream down or reconnecting"),
                   Gap(end - timedelta(seconds=10), 60.0, "segment expired"),   # runs past the end
+                  Gap(end - timedelta(seconds=10), 5.0, "frames +5.0 s apart"),  # same start
                   Gap(T0 - timedelta(minutes=2), 30.0, "before the start"),    # cuts nothing
                   Gap(None, 30.0, "before the first frame")]                   # cuts nothing
         records = []
@@ -619,7 +621,7 @@ class RecordTest(unittest.TestCase):
             {"start": "2026-10-24T15:40:00+00:00", "seconds": 55.0,
              "reasons": ["picture frozen or black", "stream down or reconnecting"]},
             {"start": "2026-10-24T18:59:00+00:00", "seconds": 10.0,
-             "reasons": ["segment expired"]}])
+             "reasons": ["frames +5.0 s apart", "segment expired"]}])
         self.assertEqual(rec["gaps_b"], [{"start": "2026-10-24T17:20:00+00:00",
                                           "seconds": GapTest.GAP[1] + GAP_PAD_S,
                                           "reasons": ["test"]}])

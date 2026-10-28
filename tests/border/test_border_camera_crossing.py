@@ -74,6 +74,23 @@ class MethodsAndMetres(unittest.TestCase):
             with self.subTest(metres=bad), self.assertRaisesRegex(ValueError, "cam zone e: "):
                 zones_from_raw("cam", [{"line": "B", "lane": "e", "quad": QUAD, "metres": bad}])
 
+    def test_bad_quads_are_refused(self):
+        # float() would read "12" as (1, 2); a NaN, a bool or a third value would reach the
+        # counters, which fail with no zone named.
+        for bad in (None, 5, "abcd", QUAD[:3], [*QUAD, [0, 0]], ["12", "34", "56", "78"],
+                    [[0, 10, 7], *QUAD[1:]], [[0], *QUAD[1:]], [[math.nan, 10], *QUAD[1:]],
+                    [[math.inf, 10], *QUAD[1:]], [[True, False], *QUAD[1:]]):
+            with self.subTest(quad=bad), self.assertRaisesRegex(ValueError, "cam zone e: "):
+                zones_from_raw("cam", [{"line": "B", "lane": "e", "quad": bad}])
+
+    def test_a_zone_without_a_line_is_refused_by_name(self):
+        with self.assertRaisesRegex(ValueError, "cam zone e: a zone needs a line and a lane"):
+            zones_from_raw("cam", [{"lane": "e", "quad": QUAD}])
+
+    def test_tuple_quads_are_read_as_floats(self):
+        z, = zones_from_raw("cam", [{"line": "B", "lane": "e", "quad": tuple(map(tuple, QUAD))}])
+        self.assertEqual(z.quad, ((0.0, 10.0), (10.0, 10.0), (10.0, 0.0), (0.0, 0.0)))
+
 
 class RealZones(unittest.TestCase):
     """cameras.json as committed."""

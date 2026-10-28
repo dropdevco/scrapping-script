@@ -613,6 +613,17 @@ class RestartedStream(unittest.TestCase):
             list(reader.frames(None))
         self.assertIn("ch", stream._listing)
 
+    def test_a_transient_failure_leaves_the_listing_alone(self):
+        def busy(url):
+            raise StreamLost(f"HTTP 503 for {url}")          # not Gone: the stream may still be up
+
+        with mock.patch.object(self.reader, "_get", side_effect=busy) as get, \
+                self.assertRaisesRegex(StreamLost, "HTTP 503"):
+            list(self.reader.frames(None))
+        self.assertEqual(get.call_count, 2)                 # retried once, on a fresh resolve
+        stream.resolve("ch", "Zaragoza (Sur)")
+        self.assertEqual(self.listings, 1)
+
 
 class LiveFrames(unittest.TestCase):
     """How a camera's live stream is opened: its own URL and clock, our honest User-Agent."""

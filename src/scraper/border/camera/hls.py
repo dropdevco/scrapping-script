@@ -343,9 +343,10 @@ class HlsReader:
 
     Without a `live_region` (a whole scene, the City cameras) `fps` must be
     stream.SCENE_MAX_FPS (2) or less: the frozen check there takes frames that repeat exactly
-    for a stalled encoder, and on a live City picture the native frames changed at least every
-    0.42 s, against these frames picked at least 0.48 s apart. A faster read is refused before
-    anything is fetched."""
+    for a stalled encoder, and in one 20-min night at line B (21:32-21:52 local, 2026-10-26)
+    the City's native frames changed at least every 0.42 s, against these frames picked at
+    least 0.48 s apart. That it holds at dusk and by day is an ASSUMPTION until the runs of
+    Q-32. A faster read is refused before anything is fetched."""
 
     def __init__(self, playlist_url: Callable[[], str], clock: str, size: tuple[int, int],
                  fps: float, user_agent: str,

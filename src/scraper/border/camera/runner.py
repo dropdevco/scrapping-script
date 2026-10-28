@@ -26,8 +26,9 @@ A line is not seen while:
   judged (StreamFrozen.seconds) before the stream is opened again. After StreamFrozen after
   StreamFrozen the wait before opening it again doubles, from RECONNECT_S up to
   RECONNECT_MAX_S, until a read gives RESET_AFTER_S of frames;
-- nothing moved there for more than QUIET_S: no frame whose picture moved (hls.Stamped.moved:
-  the clock ticked, or the whole scene changed) and no car counted at the line;
+- nothing moved there for more than QUIET_S, or since before a StreamFrozen: no frame whose
+  picture moved (hls.Stamped.moved: the clock ticked, or the whole scene changed) and no car
+  counted at the line;
 - for the loop method, any of its zones is still learning the empty road.
 
 Those times are gaps at that line, never "no cars". Gaps cut the transit measurement into
@@ -41,14 +42,16 @@ car (`moved_at`), not up to its latest frame (seen_until): measured to its lates
 freeze would read as an empty road while it lasted, and a record once written is not corrected.
 When something moves again after more than QUIET_S, the stretch since `moved_at` becomes a gap,
 "nothing moved for N s", before that frame reaches the counters, so the cars in it are cut out as
-at any gap; a shorter stretch is seen again, as a quiet road. `moved_at` is the runner's own, not
-the reader's, so a freeze broken by reopened streams is still judged from its last moving frame.
+at any gap; a shorter stretch is seen again, as a quiet road, unless a StreamFrozen was taken in
+it (a fresh read's check raises only on a full window, so the end of a freeze read after a reopen
+was never taken back). `moved_at` is the runner's own, not the reader's, so a freeze broken by
+reopened streams is still judged from its last moving frame.
 The hold is a lag. At line B (the City's whole scene) on 2026-10-27 03:32-03:52 UTC, at 21:30
 local traffic, the time from one moving 2-fps pair to the next was p50 0.52 s, p99 8.4 s and at
 most 16.5 s (930 intervals). With that night's motion bursts thinned to a half or a quarter
 (ASSUMPTION: bursts scale with traffic) p99 was 49 s and 112 s, the longest 216 s and 407 s.
-Where nothing at a line moves for minutes, as in a standing queue, the line stays that far
-behind: stale, never an empty road.
+Where nothing at a line moves for minutes, as may happen in a standing queue (ASSUMPTION, not
+measured), the line stays that far behind: stale, never an empty road.
 
 Lane types (QUESTIONS.md Q-22). The k-th car at A is the (offset + k)-th at B only among cars of
 one lane type, so each lane type that zones at both lines carry is a group, measured from its
@@ -130,7 +133,9 @@ RESET_AFTER_S = 60.0
 # (2026-10-27 03:32-03:52 UTC) with its motion bursts thinned (bursts assumed to scale with
 # traffic): at 300 s such gaps came 0 an hour at that night's traffic and at half of it, and 0.13
 # an hour at a quarter; at 120 s, 0, 0.8 and 5.8. The trade-off: a picture frozen with noise for
-# less than this reads as a quiet road.
+# less than this reads as a quiet road, and so does a longer one with a car counted in it at least
+# this often, since a car counted moves `moved_at` on (ADR-0016; a false count on a frozen picture,
+# how often is not measured, ASSUMPTION).
 QUIET_S = 300.0
 SAVE_EVERY_S = 600       # how often the loop counters' learnt roads are saved
 MIXED = "mixed"          # the one group of a pair whose lines share no lane type: every lane
@@ -173,6 +178,9 @@ class TransitRunner:
         # camera -> its last frame that moved or counted a car (or its first frame): kept across
         # reconnects, so a line is seen up to here and no further (seen_until)
         self.moved_at: dict[str, datetime] = {}
+        # camera -> its last frame before its latest StreamFrozen: a still stretch since
+        # `moved_at` that holds one is a freeze throughout (_quiet)
+        self.frozen_at: dict[str, datetime] = {}
         self.seen_mono: dict[str, float] = {}   # camera -> time.monotonic() of its latest frame
         self.reconnects: dict[str, int] = {cam.id: 0 for cam in self.cams}   # reads retried
         # (method, group) -> the last measurement, and the prior it was opened with
@@ -267,6 +275,7 @@ class TransitRunner:
                     since = max(last - timedelta(seconds=exc.seconds), self.first_at[cam.id])
                     self._gap(cam, Gap(since, (last - since).total_seconds(),
                                        "picture frozen or black"))
+                    self.frozen_at[cam.id] = last
                 why, stalled = exc, True
             except StreamError as exc:
                 self.errors[cam.id] = f"{type(exc).__name__}: {exc}"
@@ -329,9 +338,13 @@ class TransitRunner:
     def _quiet(self, cam: Camera, at: datetime) -> None:
         """Something moved at `at`. If nothing had at the line for more than QUIET_S, that
         stretch could have been a picture frozen with noise as well as a quiet road: it becomes
-        a gap, through to `at` (a frame's crossings carry its time, so this frame's are in it)."""
+        a gap, through to `at` (a frame's crossings carry its time, so this frame's are in it).
+        So does a shorter one that held a StreamFrozen: a fresh read's check raises only on a
+        full window, so the end of that freeze, read after a reopen, was never taken back."""
         since = self.moved_at.get(cam.id)
-        if since is not None and (at - since).total_seconds() > QUIET_S:
+        frozen = self.frozen_at.get(cam.id)
+        if since is not None and ((at - since).total_seconds() > QUIET_S
+                                  or frozen is not None and frozen >= since):
             seconds = (at - since).total_seconds()
             self._gap(cam, Gap(since, seconds, f"nothing moved for {seconds:.0f} s"))
 

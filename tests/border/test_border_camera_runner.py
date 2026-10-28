@@ -124,6 +124,23 @@ class Runner(RunnerSetUp):
         self.feed(self.a, T0 + timedelta(minutes=4))
         self.assertEqual([round(g.seconds) for g in self.run_.gaps[("loop", "A")]], [240])
 
+    def test_learning_begun_after_the_held_back_end_is_no_gap_yet(self):
+        # A last moved at 10 s, so both lines are seen only to there (seen_until); its loop
+        # zones began learning at 50 s, after that: nothing is open before the end, and the
+        # stretch seen stays one epoch. (The loop counter learns only from its first frame
+        # today; this holds the guard for one that learns again.)
+        for s in range(101):
+            at = T0 + timedelta(seconds=s)
+            self.ca.learning = s >= 50
+            self.run_._frame(self.a, "A", frame(at, s <= 10))
+            self.run_._frame(self.b, "B", frame(at))
+        end = T0 + timedelta(seconds=10)
+        self.assertEqual(self.run_.seen_until(), end)
+        self.assertEqual(self.run_._gaps_for("loop", "A", end), [])
+        m, _ = self.run_.measure()[LOOP]
+        self.assertEqual(m.gaps_a, ())
+        self.assertEqual([(e.start, e.end) for e in m.epochs], [(T0, end)])
+
     def test_a_stream_gap_reaches_the_counters_and_the_line(self):
         gap = Gap(T0, 12.0, "segment expired")
         self.run_._gap(self.a, gap)
@@ -338,9 +355,9 @@ class Feeding(RunnerSetUp):
         # neither doubles the wait nor resets it: a StreamLost from the same stalled source would
         # otherwise keep it at RECONNECT_S.
         script = [(30, StreamFrozen("x")), (20, StreamFrozen("x")), (20, StreamFrozen("x")),
-                  (10, StreamLost("dropped")),
+                  (59, StreamLost("dropped")),                  # 59 s of frames: still too short
                   *[(20, StreamFrozen("x"))] * 4,
-                  (70, StreamLost("dropped")),                  # 70 s of frames: a stream that works
+                  (60, StreamLost("dropped")),                  # 60 s of frames: the stream works
                   (70, StreamFrozen("x")), (20, StreamFrozen("x"))]
         readers, t = [], 0
         for seconds, end in script:
@@ -368,6 +385,34 @@ class Feeding(RunnerSetUp):
             [(T0 + timedelta(seconds=199), 11.0, "stream down or reconnecting"),
              (T0 + timedelta(seconds=50), 301.0, "nothing moved for 301 s")])
         self.assertEqual(self.run_.moved_at["cam-a"], T0 + timedelta(seconds=351))
+
+    def test_the_end_of_a_freeze_read_after_a_reopen_is_cut_with_it(self):
+        # A fresh read's check raises only on a full window, so a freeze that ends early in the
+        # read after a reopen is not taken back by StreamFrozen. The still stretch since the last
+        # frame that moved held a freeze: it is a gap once something moves, however short.
+        first = [T0 + timedelta(seconds=s) for s in range(60)]
+        again = [T0 + timedelta(seconds=s) for s in range(70, 200)]
+        self.feed_script(self.a, [
+            ScriptedReader(first, StreamFrozen("has not changed"),
+                           moved=[0 < s < 45 for s in range(60)]),
+            ScriptedReader(again, StreamLost("dropped"), moved=[s >= 80 for s in range(70, 200)])])
+        self.assertEqual(
+            [(g.after, g.seconds, g.reason) for g in self.run_.gaps[("loop", "A")]],
+            [(T0 + timedelta(seconds=39), 20.0, "picture frozen or black"),
+             (T0 + timedelta(seconds=59), 11.0, "stream down or reconnecting"),
+             (T0 + timedelta(seconds=44), 36.0, "nothing moved for 36 s")])
+
+    def test_a_freeze_read_up_to_a_frame_that_moved_is_cut_from_that_frame(self):
+        # The frozen check can pass a frame that moved before the one it raises on: the line
+        # last moved at the read's last frame, and the end of the freeze still follows it.
+        first = [T0 + timedelta(seconds=s) for s in range(60)]
+        again = [T0 + timedelta(seconds=s) for s in range(70, 100)]
+        self.feed_script(self.a, [
+            ScriptedReader(first, StreamFrozen("has not changed"),
+                           moved=[0 < s < 45 or s == 59 for s in range(60)]),
+            ScriptedReader(again, StreamLost("dropped"), moved=[s >= 80 for s in range(70, 100)])])
+        self.assertEqual(self.run_.gaps[("loop", "A")][-1],
+                         Gap(T0 + timedelta(seconds=59), 21.0, "nothing moved for 21 s"))
 
     def test_a_city_camera_that_blocks_us_is_not_read_again(self):
         city = camera_from_dict("city", {
@@ -483,6 +528,22 @@ class NoMotion(RunnerSetUp):
         self.run_._frame(self.a, "A", frame(T0 + timedelta(seconds=61), True))
         self.assertEqual(self.run_.seen_until(), T0 + timedelta(seconds=60))   # now B's latest
         self.assertEqual(self.run_.gaps[("loop", "A")], [])       # 51 s still: a quiet road
+        self.assertNotIn("nothing moved", self.run_.status({}).splitlines()[0])
+        for s in range(62, 72):                       # A still again: held back 9 s, then 10
+            self.run_._frame(self.a, "A", frame(T0 + timedelta(seconds=s), False))
+            if s == 70:
+                self.assertNotIn("nothing moved", self.run_.status({}).splitlines()[0])
+        self.assertIn("nothing moved for 10 s", self.run_.status({}).splitlines()[0])
+
+    def test_a_line_still_from_its_first_frame_is_held_there_and_gapped(self):
+        # A read's first frame says False (it has nothing to compare with), and a picture frozen
+        # with noise at start-up says False after it: the line is seen up to its first frame, not
+        # its latest, and once something moves the whole stretch is a gap.
+        self.play(400, lambda s: False)
+        self.assertEqual(self.run_.seen_until(), T0)
+        self.run_._frame(self.a, "A", frame(T0 + timedelta(seconds=401), True))
+        self.assertEqual(self.run_.gaps[("loop", "A")],
+                         [Gap(T0, 401.0, "nothing moved for 401 s")])
 
 
 class Replay:

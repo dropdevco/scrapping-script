@@ -118,9 +118,18 @@ class Counter(Protocol):
 def zones_from_raw(camera_id: str, raw: list[dict]) -> tuple[Zone, ...]:
     zones = []
     for z in raw:
-        quad = tuple(tuple(float(v) for v in p) for p in z["quad"])
-        if len(quad) != 4:
-            raise ValueError(f"{camera_id} zone {z.get('lane')}: a zone needs exactly four points")
+        # Each point a pair of finite numbers, or float() reads "12" as (1, 2) and a NaN or a
+        # third value fails in the counters with no zone named.
+        quad = z.get("quad")
+        if not isinstance(quad, list | tuple) or len(quad) != 4 or not all(
+                isinstance(p, list | tuple) and len(p) == 2
+                and all(isinstance(v, int | float) and not isinstance(v, bool) and math.isfinite(v)
+                        for v in p) for p in quad):
+            raise ValueError(f"{camera_id} zone {z.get('lane')}: a zone needs exactly four points, "
+                             f"each [x, y]")
+        quad = tuple((float(x), float(y)) for x, y in quad)
+        if z.get("line") is None or z.get("lane") is None:
+            raise ValueError(f"{camera_id} zone {z.get('lane')}: a zone needs a line and a lane")
         if z.get("lane_type") not in (None, *LANE_TYPES):
             raise ValueError(f"{camera_id} zone {z.get('lane')}: unknown lane_type")
         # A list, or the checks below raise a bare TypeError (a number) or read a dict's keys.

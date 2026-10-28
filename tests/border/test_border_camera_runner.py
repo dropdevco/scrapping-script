@@ -810,7 +810,8 @@ class LaneTypeGroups(unittest.TestCase):
         self.assertEqual(len(m.b_times), sum(1 for c in b if c.lane == "col-1"))
 
     def test_pdn_norths_pair_is_measured_as_sentri_and_normal(self):
-        # Q-22: SENTRI is A's lane-5 and B's column E; every other lane and column is normal.
+        # Q-22: SENTRI is A's lane-4 and lane-5 (one SENTRI lane, split by barrels near the
+        # camera; owner, 2026-10-27) and B's column E; every other lane and column is normal.
         # Every lane is in a group. The one warning is that the loop does not measure SENTRI
         # (the next test says why).
         cameras = load_cameras()
@@ -821,7 +822,7 @@ class LaneTypeGroups(unittest.TestCase):
         self.assertIn("loop sentri (city-pdn-north col-e", logs.output[0])
         self.assertEqual(run.groups, ("normal", "sentri"))
         self.assertEqual(list(run.not_measured), [("loop", "sentri")])
-        for line, sentri in (("A", {"lane-5"}), ("B", {"col-e"})):
+        for line, sentri in (("A", {"lane-4", "lane-5"}), ("B", {"col-e"})):
             self.assertEqual({lane for lane, t in run.types[line].items() if t == "sentri"},
                              sentri)
             self.assertEqual(set(run.types[line].values()), {"normal", "sentri"})
@@ -853,10 +854,12 @@ class LaneTypeGroups(unittest.TestCase):
         self.assertEqual(zone_lanes(city), ["col-1", "col-2", "col-3", "col-4"])
         self.assertEqual([(zone_lanes(city)[i], zone_lanes(city)[j]) for i, j in city._beside],
                          [("col-1", "col-2"), ("col-2", "col-3"), ("col-3", "col-4")])
-        # lane-5 stays in A's loop: a car across lane-4 and lane-5 is still judged by both.
+        # lane-4 and lane-5 (SENTRI) stay in A's loop: a car across lane-3 and lane-4, or across
+        # lane-4 and lane-5, is still judged by both.
         self.assertEqual(zone_lanes(pdn), [f"lane-{i}" for i in range(1, 6)])
-        self.assertIn(("lane-4", "lane-5"),
-                      [(zone_lanes(pdn)[i], zone_lanes(pdn)[j]) for i, j in pdn._beside])
+        beside = [(zone_lanes(pdn)[i], zone_lanes(pdn)[j]) for i, j in pdn._beside]
+        self.assertIn(("lane-3", "lane-4"), beside)
+        self.assertIn(("lane-4", "lane-5"), beside)
         self.assertEqual(list(run.not_measured), [("loop", "sentri")])
 
     def test_a_group_with_a_zone_its_method_does_not_count_is_not_measured_by_it(self):

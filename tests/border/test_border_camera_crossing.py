@@ -100,16 +100,38 @@ class RealZones(unittest.TestCase):
         cls.cams = load_cameras()
 
     def test_pdn_north_line_a_is_typed_per_q22(self):
-        # Lane 5, past the orange barrels, is SENTRI; lanes 1-4 are normal.
+        # Owner, 2026-10-27: lane-4 (white posts to orange barrels) and lane-5 (barrels to the
+        # right curb) are both the one SENTRI lane; lanes 1-3 are the normal lanes.
         types = {z.lane: z.lane_type for z in self.cams["pdn-north"].count_zones}
         self.assertEqual(types, {"lane-1": "normal", "lane-2": "normal", "lane-3": "normal",
-                                 "lane-4": "normal", "lane-5": "sentri"})
+                                 "lane-4": "sentri", "lane-5": "sentri"})
+
+    def test_pdn_north_line_a_has_three_normal_zones_and_two_sentri_zones_on_the_right(self):
+        # The road has 4 car lanes, 3 normal and 1 SENTRI on the very right (owner, 2026-10-27).
+        # The SENTRI lane keeps two zones, one each side of the barrels: one zone over both would
+        # be ~9 m wide, and the loop reads two cars abreast in one zone as one. The two still
+        # share a side, so a car across the barrel line is judged by both (loop._beside).
+        zones = [z for z in self.cams["pdn-north"].count_zones if z.line == "A"]
+        self.assertEqual(sorted(z.lane_type for z in zones), ["normal"] * 3 + ["sentri"] * 2)
+        normal = [z for z in zones if z.lane_type == "normal"]
+        lane_4, lane_5 = sorted((z for z in zones if z.lane_type == "sentri"), key=_centre_x)
+        self.assertLess(max(map(_centre_x, normal)), _centre_x(lane_4))
+        self.assertEqual((lane_4.lane, lane_5.lane), ("lane-4", "lane-5"))
+        # lane-4's near-right and far-right corners on lane-5's near-left and far-left ones
+        for right, left in ((1, 0), (2, 3)):
+            self.assertLessEqual(math.dist(lane_4.quad[right], lane_5.quad[left]), BESIDE_PX)
+
+    def test_pdn_north_drives_north_away_from_the_camera_as_the_owner_confirmed(self):
+        # Owner, 2026-10-27: cars drive away from this camera, northbound.
+        cam = self.cams["pdn-north"]
+        self.assertEqual((cam.direction, cam.direction_verified), ("north", True))
 
     def test_no_pdn_north_strip_names_a_cbp_lane(self):
         # The lane type lives on the count zones, which the runner and combine measure by. A
         # strip's number is the queue reader's (D+L)/v, which ADR-0015 rejects as a wait and
-        # which under-reads at lane-5: naming car_sentri on it would print it on the card as
-        # "SENTRI" beside the camera wait, and file it as a verified car_sentri signal.
+        # which under-reads at lane-5: naming car_sentri on lane-4 or lane-5 would print it on
+        # the card as "SENTRI" beside the camera wait, and file it as a verified car_sentri
+        # signal.
         lanes = {lane.lane: lane.cbp_lane for lane in self.cams["pdn-north"].lanes}
         self.assertEqual(lanes, dict.fromkeys(("lane-1", "lane-2", "lane-3", "lane-4", "lane-5")))
         self.assertFalse(any(lane.lane_verified for lane in self.cams["pdn-north"].lanes))
@@ -156,8 +178,9 @@ class RealZones(unittest.TestCase):
                         self.assertLessEqual(area / longest, BESIDE_PX)
 
     def test_pdn_north_geometry_is_unchanged_since_1221c9f(self):
-        # Its saved loop roads are keyed by zone and camera geometry: this change gave the
-        # zones and strips lane types only. A deliberate redraw of line A (the owner task in
+        # Its saved loop roads are keyed by zone and camera geometry: since then the zones were
+        # given lane types (lane-4 retyped sentri on 2026-10-27) and the camera its confirmed
+        # direction, and nothing else. A deliberate redraw of line A (the owner task in
         # pdn-north's notes) replaces this test.
         git = shutil.which("git")
         if git is None:
@@ -181,10 +204,15 @@ def _convex(quad) -> bool:
     return all(t > 0 for t in turns) or all(t < 0 for t in turns)
 
 
+def _centre_x(zone) -> float:
+    """The mean x of a zone's corners: which zone is further right in the picture."""
+    return sum(x for x, _ in zone.quad) / 4
+
+
 def _geometry(raw: dict) -> dict:
-    """A camera's entry without what may change without moving a pixel: the notes, the zones'
-    lane types and the strips' CBP lanes."""
-    out = {k: v for k, v in raw.items() if k != "notes"}
+    """A camera's entry without what may change without moving a pixel: the notes, whether
+    the direction is confirmed, the zones' lane types and the strips' CBP lanes."""
+    out = {k: v for k, v in raw.items() if k not in ("notes", "direction_verified")}
     out["count_zones"] = [{k: v for k, v in z.items() if k != "lane_type"}
                           for z in raw.get("count_zones", [])]
     out["lanes"] = [{k: v for k, v in lane.items() if k != "cbp_lane"}

@@ -31,7 +31,7 @@ from scraper.border.camera.hls import Gap
 from scraper.border.camera.runner import HI_MIN, LO_MIN
 
 PAIRS = Path(combine.__file__).with_name("pairs.json")
-A_LANES = {"lane-1": "normal", "lane-2": "normal", "lane-3": "normal", "lane-4": "normal",
+A_LANES = {"lane-1": "normal", "lane-2": "normal", "lane-3": "normal", "lane-4": "sentri",
            "lane-5": "sentri"}                    # pdn-north's count zones (cameras.json, Q-22)
 A_M, R_M = 66.0, 9.3      # line A from the strips' booth end, and the run-up below it: the
                           # design's nominal values (estimate.load_pair computes them at load)
@@ -102,6 +102,14 @@ def signals(camera: str, lane: str, end, *, state: str = "queue", queue_m: float
                          "detail": {"queue_head_m": head,
                                     "quarter_speeds": None if speed is None else [speed] * 4}}})
     return out
+
+
+def sentri_signals(end, **reading) -> list[dict]:
+    """signals() for pdn-north's two SENTRI strips, read alike: lane-4 and lane-5 are the one
+    SENTRI lane, split by barrels near the camera (owner, 2026-10-27), and a group's tail is
+    timed by the median of its strips."""
+    return [s for lane in A_LANES if A_LANES[lane] == "sentri"
+            for s in signals("pdn-north", lane, end, **reading)]
 
 
 def single_file_speed(rate: float = RATE) -> float:
@@ -178,7 +186,7 @@ class WholeWaitTest(unittest.TestCase):
         self.assertGreater(truth.before_a, 10)
         v = single_file_speed()
         gap = pair()["gap_street_a_m"]["value"]
-        queue = (signals("pdn-north", "lane-5", end, queue_m=75.0, speed=v, beyond=True)
+        queue = (sentri_signals(end, queue_m=75.0, speed=v, beyond=True)
                  + signals("pdn-south-street", "left-column", end,
                            queue_m=before * SPACING_M - R_M - gap, speed=v)
                  + signals("pdn-south-street", "right-column", end, state="no_queue"))
@@ -573,8 +581,7 @@ class TailTest(unittest.TestCase):
         self.assertEqual((seg.minutes, seg.low, seg.high, seg.known), (0.0, 0.0, 0.0, True))
 
     def test_a_strip_not_read_lately_is_not_known(self):
-        old = signals("pdn-north", "lane-5", self.end - timedelta(minutes=10), queue_m=40.0,
-                      speed=self.v)
+        old = sentri_signals(self.end - timedelta(minutes=10), queue_m=40.0, speed=self.v)
         seg = self.tail(old)
         self.assertFalse(seg.known)
         self.assertEqual(seg.low, 0.0)
@@ -587,12 +594,11 @@ class TailTest(unittest.TestCase):
         self.assertEqual(self.tail(queue).minutes, 0.0)
         normal = self.tail(queue, "normal")
         self.assertTrue(normal.known)
-        self.assertEqual(normal.minutes, 0.0)         # the median of lanes 1-4
+        self.assertEqual(normal.minutes, 0.0)         # the median of lanes 1-3
         self.assertAlmostEqual(normal.high, 7.0 / self.v / 60)
 
     def test_a_line_past_the_street_view_is_a_floor(self):
-        queue = (signals("pdn-north", "lane-5", self.end, queue_m=75.0, speed=self.v,
-                         beyond=True)
+        queue = (sentri_signals(self.end, queue_m=75.0, speed=self.v, beyond=True)
                  + signals("pdn-south-street", "left-column", self.end, queue_m=48.0,
                            speed=self.v, beyond=True))
         seg = self.tail(queue)
@@ -601,8 +607,7 @@ class TailTest(unittest.TestCase):
         self.assertIn("past the street's view", seg.why)
 
     def test_a_line_past_the_near_edge_ending_between_the_views_is_a_floor(self):
-        queue = (signals("pdn-north", "lane-5", self.end, queue_m=75.0, speed=self.v,
-                         beyond=True)
+        queue = (sentri_signals(self.end, queue_m=75.0, speed=self.v, beyond=True)
                  + signals("pdn-south-street", "left-column", self.end, state="no_queue"))
         seg = self.tail(queue)
         self.assertFalse(seg.known)
@@ -616,8 +621,8 @@ class TailTest(unittest.TestCase):
         """The tail at `at` rests on readings up to `at` only, the window estimate.within hands
         over, so a replay gives what the live tick gave. A queue reader ahead of the counting
         line changes nothing."""
-        ahead = signals("pdn-north", "lane-5", self.end + timedelta(minutes=4),
-                        queue_m=A_M + 7.0, speed=self.v, minutes=4)
+        ahead = sentri_signals(self.end + timedelta(minutes=4), queue_m=A_M + 7.0,
+                               speed=self.v, minutes=4)
         seg = self.tail(no_line_at_a(self.end) + ahead)
         self.assertEqual((seg.minutes, seg.known), (0.0, True))
         seg = self.tail(ahead)
@@ -625,17 +630,18 @@ class TailTest(unittest.TestCase):
         self.assertIn("lane-5 not read", seg.why)
 
     def lanes(self, normal: dict, sentri: dict, street: dict) -> list[dict]:
-        """Lanes 1-4 read as `normal`, lane-5 as `sentri`, and both street columns as `street`."""
+        """Lanes 1-3 read as `normal`, lanes 4-5 as `sentri`, and both street columns as
+        `street`."""
         out = []
-        for lane in ("lane-1", "lane-2", "lane-3", "lane-4"):
+        for lane in ("lane-1", "lane-2", "lane-3"):
             out += signals("pdn-north", lane, self.end, **normal)
-        out += signals("pdn-north", "lane-5", self.end, **sentri)
+        out += sentri_signals(self.end, **sentri)
         for column in ("left-column", "right-column"):
             out += signals("pdn-south-street", column, self.end, **street)
         return out
 
     def test_one_types_line_on_the_street_is_not_anothers_metered_line(self):
-        """Lanes 1-4 run past pdn-north's near edge onto the street, and lane-5 does not reach
+        """Lanes 1-3 run past pdn-north's near edge onto the street, and lanes 4-5 do not reach
         A. The street's line is the normal lanes' own, not a line metered before A, so it is not
         SENTRI's tail; whether SENTRI cars queue in it is the owner's to say, so SENTRI's tail
         is not known, with a floor of 0. The mirror case is the same for normal."""

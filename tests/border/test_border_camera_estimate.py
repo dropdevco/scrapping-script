@@ -692,7 +692,7 @@ class QueueLogTest(StateDir):
         far edge 66 m from the strips' booth end, 9 m before the last metre they see (the
         design's nominal 66 and 9.3 m)."""
         self.assertEqual(self.pair["a_lanes"], {"lane-1": "normal", "lane-2": "normal",
-                                                "lane-3": "normal", "lane-4": "normal",
+                                                "lane-3": "normal", "lane-4": "sentri",
                                                 "lane-5": "sentri"})
         self.assertEqual(self.pair["a_m"], dict.fromkeys(A_LANES, 66.0))
         self.assertEqual(self.pair["r_m"], dict.fromkeys(A_LANES, 9.0))

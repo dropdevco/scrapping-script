@@ -2,7 +2,8 @@
 
 - **Status:** Accepted in part. Decision 2 (display on the owner's PC) was accepted on 2026-10-26 by the
   product owner. Decisions 1, 3 and 4 are **Proposed**. Decision 1 is what the code computes today,
-  but the owner has not signed the formula off.
+  but the owner has not signed the formula off. The consequence "A method that is not measured"
+  (2026-10-27) is **Proposed** too: each part is built as its default, and Q-33 asks the owner.
 - **Date:** 2026-10-26
 - **Builds on:** [ADR-0014](0014-crossing-time-from-two-cameras.md). Its decisions 2 (two methods, never
   mixed) and 6 (transits become a live signal only through a later decision) stand; decision 3 here is
@@ -161,7 +162,7 @@ Four facts shaped the decision:
   yolox sentri. A pair pools its lanes
   as "mixed" only when its lines share no type. ADR-0014's consequence "One lane type per pair"
   describes the state before this. It is not edited here, because it is an accepted record.
-- **A method that is not measured (2026-10-27, after review).**
+- **A method that is not measured (Proposed, 2026-10-27, after review; the owner chooses in Q-33).**
   - `camera estimate` writes the run's `not_measured` into every transit record, and `--replay` uses
     it. Rejected: logging only `--methods`, which still drifts when `cameras.json` `"methods"` change
     (as when col-e is lifted after its hand count); documenting the difference only.

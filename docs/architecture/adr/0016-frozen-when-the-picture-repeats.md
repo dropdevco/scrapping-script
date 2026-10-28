@@ -24,13 +24,16 @@ scene. Two runs on 2026-10-26 (local time) showed that test firing on a live pic
 
 | Run | Local time | Cuts at B | Rate | B unseen |
 |---|---|---|---|---|
-| The owner's `camera transit` | 17:30-19:07 (97.5 min) | 17, all at B | 10.5 an hour | 476 s, 8.2 % |
+| The owner's `camera transit` | 17:30-19:07 (97.5 min) | 17, all at B | 10.5 an hour | 476 s, 8.1 % |
 | A live check at `b173bc4` | 21:32-21:52 (20.2 min) | 17 `StreamFrozen`, merged into 12 cuts | 50.4 an hour (35.6 cuts) | 398 s for yolox, 32.8 % |
 
-- **Every cut came from it.** Each of the owner's cuts matched a jump in B's unseen time the size of a
-  frozen gap: 15 of 17 were 25.0-26.5 s (the 20-s take-back, the 5-s pad, about 1 s to reopen). None came
-  from line A. In the 117.7 min of the two runs no other cut path fired: no StreamLost, expired segment,
-  timeline cut, counter gap, or clock rule at A.
+- **Every cut came from it: logged at night, inferred in the evening.** The live check logged each event:
+  all 17 were `StreamFrozen` at B, and no StreamLost, expired segment, timeline cut, counter gap (past
+  each line's start-up learning), or clock rule at A fired. The owner's records then carried no gap
+  reason, so the evening's cause is read from B's unseen time. Every cut matched a jump in it, so none
+  came from line A. 15 of 17 were 25.0-26.5 s, the size of one frozen gap (the 20-s take-back, the 5-s
+  pad, about 1 s to reopen), which no other path leaves. 2 were 42.6 s and 49.0 s: a second freeze soon
+  after reopening, or a slower reopen; the records cannot tell which.
 - **The evening's cuts were not only at night.** 4 cuts in the 47 min of sun (17:41-18:11); 6 in 7 min at
   18:16-18:22, ending at sunset (18:22, computed for PDN); 3 in the 25 min of civil twilight; 4 in the 20
   min after dusk. That the cluster is the camera switching to a night mode is an inference, not measured.
@@ -55,8 +58,8 @@ records), not kept in the repository. No picture was kept or looked at.
 
 1. **A still tier in the reader (`stream.frozen_check`).** A camera without a clock region is frozen when
    at least 14 of the last 40 frame pairs are bit-identical at 320×180 (`FROZEN_SAME_SHARE`, a third of
-   `FROZEN_SECONDS` = 20 s at 2 fps). It raises `StreamFrozen` as before ("is black" or "has not
-   changed"), and the stream is opened again.
+   `FROZEN_SECONDS` = 20 s at 2 fps). It raises `StreamFrozen` ("is black", or "repeated exactly in N of
+   the last 40 pairs", so the log shows how far past the share it was), and the stream is opened again.
    - **Why it fits a freeze.** An encoder fed one unchanging picture, or black, is expected to repeat it
      exactly between keyframes (ASSUMPTION from how H.264 codes an unchanged picture; no City freeze has
      been sampled). The chain does turn a repeated picture into identical frames: at the native rate,
@@ -100,7 +103,7 @@ records), not kept in the repository. No picture was kept or looked at.
 
 | Alternative | Why not |
 |---|---|
-| Keep the 20-s share rule | It fired 50.4 times an hour at night and 10.5 in the evening on a live picture, and made every cut seen. At the evening rate, the 174 min an anchor needs comes uncut with a probability of about 6 × 10⁻¹⁴ |
+| Keep the 20-s share rule | At night it fired 50.4 times an hour on a picture measured live, and made every cut. In the evening it made 10.5 cuts an hour, attributed to it by their size (the records then gave no reason; that the picture was live is an ASSUMPTION). At that rate, the 174 min an anchor needs comes uncut with a probability of about 6 × 10⁻¹⁴ |
 | The same rule with a lower bar (0.01 grey) | One live pair was already below 0.01, and 69 below 0.02 |
 | A 300-s share tier in the reader: frozen when at most 10 % of 600 pairs move (the first proposal) | `frozen_check` starts afresh with each read, so a reopen restarts its window. With a reopen r s into a freeze, r − 10 s of it is never taken back (20-280 s for r from 30 to 290 s). Its 300-s take-back covers the freeze's start only when nothing reopens. Records are appended, never corrected, so what it misses stays written as empty road |
 | A long window only, with no still tier | A freeze that repeats exactly would go unseen for 5 min |

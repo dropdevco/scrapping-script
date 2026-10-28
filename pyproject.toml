@@ -37,6 +37,12 @@ kb = ["gspread>=6.0", "google-auth>=2.0"]
 # and open the bridges' live streams. Headless OpenCV: the worker never opens a window. Its
 # own extra because it is heavy and only the always-on camera machine needs it.
 camera = ["opencv-python-headless>=4.9", "numpy>=1.26", "yt-dlp>=2024.10.0"]
+# YOLOX-S on the NVIDIA GPU (src/scraper/border/camera/gpu.py), on top of [camera]: ONNX
+# Runtime's DirectML build, pinned to the version its GPU-vs-CPU check was measured on; gpu.py
+# refuses any other. Windows only. Without it the model runs on the CPU, as before. Running the
+# model needs only numpy of its dependencies; the measured install used `pip install --no-deps
+# onnxruntime-directml==1.24.4`, where this extra also brings flatbuffers, protobuf and sympy.
+gpu = ["onnxruntime-directml==1.24.4; sys_platform == 'win32'"]
 
 [project.scripts]
 scraper-mcp = "scraper.mcp_server:main"

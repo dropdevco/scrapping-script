@@ -690,12 +690,56 @@ class ModelFile(unittest.TestCase):
                 detect.read_model(Path(tmp) / "absent.onnx")
             self.assertIn("Nothing is downloaded", str(err.exception))
 
+    def test_the_pin_is_checked_before_any_device_is_tried(self):
+        from scraper.border.camera import gpu
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / detect.MODEL_FILE
+            fake.write_bytes(b"not yolox" * 1000)
+            with unittest.mock.patch.object(gpu, "import_onnxruntime") as ort:
+                for device in ("gpu", "auto", "cpu"):
+                    with self.assertRaises(ModelRefused):
+                        Yolox.load(fake, device=device)
+            ort.assert_not_called()
+
+
+class Device(unittest.TestCase):
+    """Which path a counter's boxes came from, for its records (gpu.py has the GPU's own)."""
+
+    def test_a_plain_detector_is_the_cpu_path(self):
+        self.assertEqual(Yolox(BrightBoxes()).record(), {"device": "cpu"})
+        counter = DetectorCounter(cam(), detector=Yolox(BrightBoxes()))
+        self.assertEqual((counter.device, counter.device_record()), ("cpu", {"device": "cpu"}))
+
+    def test_a_stand_in_without_a_record_reads_as_the_cpu_path(self):
+        counter = DetectorCounter(cam(), detector=Scripted([]))
+        self.assertEqual(counter.device_record(), {"device": "cpu"})
+
+    def test_the_detectors_record_is_passed_on_as_a_copy(self):
+        class OnTheGpu(Scripted):
+            def record(self):
+                return {"device": "gpu:Test", "cpu_checked": 2, "cpu_differed": 0}
+
+        counter = DetectorCounter(cam(), detector=OnTheGpu([]))
+        record = counter.device_record()
+        record["device"] = "changed"
+        self.assertEqual(counter.device, "gpu:Test")
+        self.assertEqual(counter.device_record()["cpu_checked"], 2)
+
+    def test_a_counter_that_loads_its_own_detector_passes_the_device_and_the_camera(self):
+        with unittest.mock.patch.object(Yolox, "load", return_value=Scripted([])) as load:
+            DetectorCounter(cam(), device="cpu")
+        load.assert_called_once_with(device="cpu", name="cam")
+
 
 @unittest.skipUnless(detect.default_model_path().is_file(), "the pinned model is not installed")
 class Model(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.yolo = Yolox.load()
+        cls.yolo = Yolox.load(device="cpu")     # OpenCV's; the GPU's is test_border_camera_gpu's
+
+    def test_the_cpu_path_is_opencv_and_says_so(self):
+        self.assertIsInstance(self.yolo.net, cv2.dnn.Net)
+        self.assertEqual(self.yolo.device, "cpu")
 
     def test_the_pinned_model_loads_and_writes_8400_anchors(self):
         blob, _ = preprocess(np.full((360, 640, 3), 90, np.uint8))

@@ -12,6 +12,13 @@ this machine (i7-13620H), one 640x640 pass took 305 ms on 1 thread, 108 ms on 4 
 threads waiting. The output was bit-identical across OpenCV's two DNN engines and across 1-16
 threads.
 
+By the owner's decision of 2026-10-27 the same model runs by default on the NVIDIA GPU, through
+ONNX Runtime's DirectML provider, wherever that path is installed and passes its checks (gpu.py:
+5.4 ms and 0.006 CPU-s a pass), and on the CPU otherwise, or when asked ($CHISME_YOLOX_DEVICE).
+The two paths gave the same boxes on every frame measured, but their raw outputs are not
+bit-identical, so a box on a threshold can differ: `Yolox.device` says which path made a count,
+and records of the two are never graded together.
+
 Which preprocessing these weights need was settled by measurement, not by the tag's name. The
 source tagged 0.1.1rc0 feeds the model RGB, divided by 255, with the ImageNet mean taken off and
 divided by the std. On 2 x 28 live bridgepdn1 frames (2026-10-24, evening) that gave no box
@@ -159,10 +166,15 @@ def read_model(path: Path | None = None) -> bytes:
     return data
 
 
+def cpu_net(model: bytes):
+    """The model's bytes, as read_model gave them, as an OpenCV DNN network: the CPU path.
+    OpenCV runs it on the CPU by default, and its new engine has no other target."""
+    return cv2.dnn.readNetFromONNX(np.frombuffer(model, np.uint8))
+
+
 def load_net(path: Path | None = None):
-    """The pinned model as an OpenCV DNN network. OpenCV runs it on the CPU by default, and its
-    new engine has no other target; the GPU is never asked for."""
-    return cv2.dnn.readNetFromONNX(np.frombuffer(read_model(path), np.uint8))
+    """The pinned model as an OpenCV DNN network, on the CPU. The GPU path is gpu.py's."""
+    return cpu_net(read_model(path))
 
 
 # --- preprocessing and decoding, as YOLOX's ONNX demo does them ------------------------------
@@ -319,14 +331,25 @@ def plan_tiles(quads: Sequence[np.ndarray], image_size: tuple[int, int]) -> list
 
 
 class Yolox:
-    """The detector: a network with setInput/forward (OpenCV DNN, or a stand-in in tests)."""
+    """The detector: a network with setInput/forward (OpenCV DNN, gpu.DmlNet, or a stand-in in
+    tests). `device` names the path its boxes come from; gpu.GpuYolox sets "gpu:<adapter>"."""
+
+    device = "cpu"
 
     def __init__(self, net):
         self.net = net
 
     @classmethod
-    def load(cls, path: Path | None = None) -> Yolox:
-        return cls(load_net(path))
+    def load(cls, path: Path | None = None, device: str | None = None,
+             name: str = "yolox") -> Yolox:
+        """The pinned model on the path gpu.select_device chooses for `device` ("auto", "gpu"
+        or "cpu"; None reads $CHISME_YOLOX_DEVICE, else "auto"). `name` labels the log."""
+        from .gpu import load_yolox  # here, not above: gpu.py imports this module
+        return load_yolox(path, device, name)
+
+    def record(self) -> dict:
+        """What a record says about where the boxes came from."""
+        return {"device": self.device}
 
     def infer(self, image: np.ndarray) -> list[Detection]:
         """Vehicles in one image, in its own pixels."""
@@ -762,7 +785,7 @@ class DetectorCounter:
     method = "yolox"
 
     def __init__(self, camera: Camera, detector: Yolox | None = None,
-                 zones: Sequence[Zone] | None = None):
+                 zones: Sequence[Zone] | None = None, device: str | None = None):
         self.camera = camera
         self.zones = tuple(zones if zones is not None else camera.count_zones)
         w, h = camera.frame_size
@@ -772,7 +795,10 @@ class DetectorCounter:
             if not all(0 <= x <= w and 0 <= y <= h for x, y in z.quad):
                 raise ValueError(f"{camera.id} zone {z.line}/{z.lane}: its near and far edges "
                                  f"are not inside the {w}x{h} frame")
-        self.detector = detector if detector is not None else Yolox.load()
+        # `device` ("auto" | "gpu" | "cpu", None for $CHISME_YOLOX_DEVICE) is used only when
+        # the detector is loaded here
+        self.detector = (detector if detector is not None
+                         else Yolox.load(device=device, name=camera.id))
         self.tracker = Tracker(self._heading)
         self.tiles: list[Tile] = []
         self.geometry: list[ZoneGeometry] = []
@@ -780,6 +806,17 @@ class DetectorCounter:
         self._size: tuple[int, int] | None = None
         self._last_at: datetime | None = None
         self._gaps: list[Gap] = []
+
+    @property
+    def device(self) -> str:
+        """The path this counter's boxes come from: "cpu", or "gpu:<adapter>" (gpu.py)."""
+        return self.device_record()["device"]
+
+    def device_record(self) -> dict:
+        """What its records say about that path: {"device": ...}, and on the GPU how many
+        frames were also checked on the CPU and how many of those differed (gpu.GpuYolox)."""
+        record = getattr(self.detector, "record", None)
+        return dict(record()) if callable(record) else {"device": Yolox.device}
 
     def _setup(self, size: tuple[int, int]) -> None:
         quads = scaled_quads(self.zones, self.camera.frame_size, size)
@@ -866,5 +903,5 @@ class DetectorCounter:
 
 
 __all__ = ["CANDIDATE_SCORE", "MODEL_SHA256", "Detection", "DetectorCounter", "ModelRefused",
-           "Tile", "Track", "Tracker", "Yolox", "decode", "default_model_path", "load_net", "nms",
-           "plan_tiles", "preprocess", "read_model", "signature", "vehicles"]
+           "Tile", "Track", "Tracker", "Yolox", "cpu_net", "decode", "default_model_path",
+           "load_net", "nms", "plan_tiles", "preprocess", "read_model", "signature", "vehicles"]

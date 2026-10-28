@@ -54,6 +54,18 @@ most 16.5 s (930 intervals). With that night's motion bursts thinned to a half o
 Where nothing at a line moves for minutes, as may happen in a standing queue (ASSUMPTION, not
 measured), the line stays that far behind: stale, never an empty road.
 
+What the freeze rule and the hold rest on is logged with each record, per line, numbers only
+(QUESTIONS.md Q-32): `most_repeats_*`, the most frame pairs that repeated exactly in any window
+of the still tier (40 pairs at 2 fps; it calls 14 frozen) since the record before, whether or
+not a StreamFrozen was raised (None at a line with a clock); `native_repeat_s_*`, the longest
+the picture stayed bit-identical at the stream's own frame rate (the still tier's margin, once
+0.42 s live; None where not measured: a line with a clock); `darkest_grey_*`, the lowest mean
+grey of a frame, which the black test compares with stream.BLACK_LEVEL; and `hold_lag_s_*`,
+how far the line's latest frame was past where it is seen (`moved_at`) when measured: a
+duration, so not cut to the minute as `seen_until` is. They are read in each camera's own
+thread, frame by frame and from each StreamFrozen, and kept under the runner's lock until the
+records take them.
+
 Lane types (QUESTIONS.md Q-22). The k-th car at A is the (offset + k)-th at B only among cars of
 one lane type, so each lane type that zones at both lines carry is a group, measured from its
 own lanes' crossings only, with its own chain of measurements. At PDN that is SENTRI (A lanes 4-5,
@@ -203,6 +215,10 @@ class TransitRunner:
         self.frozen_at: dict[str, datetime] = {}
         self.seen_mono: dict[str, float] = {}   # camera -> time.monotonic() of its latest frame
         self.reconnects: dict[str, int] = {cam.id: 0 for cam in self.cams}   # reads retried
+        # camera -> what its frozen check judged since the last records (_judged), and how far
+        # its latest frame was past `moved_at` at the last measure: the records' Q-32 numbers
+        self.judged: dict[str, dict] = {cam.id: _unjudged() for cam in self.cams}
+        self.hold_lag: dict[str, float] = {}
         # (method, group) -> the last measurement, and the prior it was opened with
         self.previous: dict[tuple[str, str],
                             tuple[transit.Measurement, transit.Prior | None]] = {}
@@ -262,7 +278,10 @@ class TransitRunner:
                     last = self.last_at.get(cam.id)
                     if last is not None and frame.at <= last:
                         # A fresh reader starts at the playlist's oldest segment: these frames
-                        # were counted before the reconnect.
+                        # were counted before the reconnect. What its check judged still counts
+                        # (the native repeat it carries was measured by this read's decoder).
+                        with self._lock:
+                            self._judged(cam.id, frame)
                         continue
                     if resumed and last is not None:
                         # The stream was not read from the last frame before to this one.
@@ -291,6 +310,8 @@ class TransitRunner:
                 # stretch the reader's rule judged as a gap, so the line's count is not read as
                 # zero traffic.
                 self.errors[cam.id] = f"StreamFrozen: {exc}"
+                with self._lock:    # the frame it raised on never reaches _frame
+                    self._judged(cam.id, exc)
                 last = self.last_at.get(cam.id)
                 if last is not None:
                     since = max(last - timedelta(seconds=exc.seconds), self.first_at[cam.id])
@@ -362,6 +383,19 @@ class TransitRunner:
                 self.moved_at[cam.id] = frame.at
             self.last_at[cam.id] = frame.at
             self.seen_mono[cam.id] = time.monotonic()
+            self._judged(cam.id, frame)
+
+    def _judged(self, cid: str, source) -> None:
+        """Fold what the frozen check judged (a frame's, hls.Stamped, or a StreamFrozen's
+        `repeats`, `grey` and `native_repeat_s`; absent or None: not judged) into the camera's
+        numbers since the last records: the most repeats, the darkest grey, the longest native
+        repeat. Called with the lock held, from the camera's own thread."""
+        kept = self.judged.setdefault(cid, _unjudged())
+        for key, value, pick in (("repeats", getattr(source, "repeats", None), max),
+                                 ("grey", getattr(source, "grey", None), min),
+                                 ("native", getattr(source, "native_repeat_s", None), max)):
+            if value is not None:
+                kept[key] = value if kept[key] is None else pick(kept[key], value)
 
     def _yolox_failed(self, cam: Camera, counter, at: datetime, exc: GpuFailed) -> None:
         """YOLOX's GPU path stopped (gpu.GpuFailed) on this camera's frame at `at`. Its counter
@@ -432,6 +466,9 @@ class TransitRunner:
             for m in self.methods:
                 self._expire(m, cutoff)
             at = self.seen_until()
+            # The hold's lag at each line now, with `at`: its latest frame past `moved_at`
+            self.hold_lag = {cid: max(0.0, (last - self.moved_at.get(cid, last)).total_seconds())
+                             for cid, last in self.last_at.items()}
             if at is None or len(self.first_at) < 2:
                 return {}
             horizon = max(max(self.first_at.values()), cutoff)
@@ -535,7 +572,12 @@ class TransitRunner:
                                              seconds=g.seconds) >= cutoff]
 
     def records(self, measured: dict) -> list[dict]:
+        """One record per (method, group) measured. Each also carries each line's Q-32 numbers
+        (module docstring), the same in every record of one call: what the frozen checks judged
+        since the last call that made records, which these take, and the hold's lag at the
+        measure."""
         devices = self.devices()
+        line_numbers = self._numbers() if measured else {}
         out = []
         for (method, group), (m, current) in measured.items():
             rec = transit.record(m, transit.windows(m), current, lane_type=group)
@@ -550,10 +592,27 @@ class TransitRunner:
                         "reconnects_a": self.reconnects.get(self.cams[0].id, 0),
                         "reconnects_b": self.reconnects.get(self.cams[1].id, 0),
                         "anchoring": transit.anchoring(m)})
+            rec.update(line_numbers)
             if method == "yolox":
                 # where its boxes came from at each camera: a loop count touches no YOLOX path
                 rec["devices"] = {cid: dict(d) for cid, d in devices.items()}
             out.append(rec)
+        return out
+
+    def _numbers(self) -> dict:
+        """Each line's Q-32 numbers for the records (`*_a`, `*_b`), taken: the frozen checks'
+        start afresh for the next records. None where a line was not judged since the last."""
+        out = {}
+        with self._lock:
+            for cam, end in zip(self.cams, ("a", "b"), strict=True):
+                kept = self.judged.get(cam.id) or _unjudged()
+                self.judged[cam.id] = _unjudged()
+                lag = self.hold_lag.get(cam.id)
+                out.update({
+                    f"most_repeats_{end}": kept["repeats"],
+                    f"native_repeat_s_{end}": kept["native"],
+                    f"darkest_grey_{end}": None if kept["grey"] is None else round(kept["grey"], 1),
+                    f"hold_lag_s_{end}": None if lag is None else round(lag, 1)})
         return out
 
     def devices(self) -> dict[str, dict]:
@@ -686,6 +745,11 @@ def refused_text(exc: Exception) -> str:
     return (f"YOLOX on the GPU was asked for (--device gpu, or {DEVICE_ENV}=gpu) and refused: "
             f"{exc}. Nothing was started. --device auto runs YOLOX on the CPU when the GPU is "
             "refused; --device cpu runs it there always.")
+
+
+def _unjudged() -> dict:
+    """A camera's frozen-check numbers before any frame is judged (TransitRunner._judged)."""
+    return {"repeats": None, "grey": None, "native": None}
 
 
 def _one_line(cam: Camera) -> str:

@@ -321,6 +321,59 @@ class FrozenClock(unittest.TestCase):
         self.assertEqual(moved, [i > 0 and i % 8 == 0 for i in range(200)])
 
 
+class JudgedNumbers(unittest.TestCase):
+    """What the check judged each frame on, for the runner's records (Q-32): the still tier's
+    count of exact repeats and the frame's mean grey, with a StreamFrozen or without one."""
+
+    def test_the_repeat_count_and_grey_are_there_with_no_freeze(self):
+        check = stream.frozen_check(2.0, None)
+        self.assertEqual((check.repeats, check.grey), (None, None))
+        fresh = iter(quiet(61))
+        frames = [next(fresh)]
+        for pair in range(60):                                # 10 repeats in the last 40 pairs
+            frames.append(frames[-1] if pair % 4 == 1 and pair >= 20 else next(fresh))
+        counts = []
+        for f in frames:
+            check(f)                                          # never raises: 10 is under 14
+            counts.append(check.repeats)
+        self.assertIsNone(counts[0])                          # no pair yet
+        self.assertEqual(counts[20], 0)
+        self.assertEqual(counts[-1], 10)
+        self.assertEqual(max(c for c in counts if c is not None), 10)
+        self.assertAlmostEqual(check.grey, float(frames[-1].mean()))
+
+    def test_a_freeze_carries_the_count_and_grey_it_was_judged_on(self):
+        check = stream.frozen_check(2.0, None)
+        fresh = iter(quiet(41))
+        frames = [next(fresh)]
+        for pair in range(40):
+            frames.append(frames[-1] if pair % 3 == 1 else next(fresh))
+        feed(check, frames)
+        with self.assertRaises(stream.StreamFrozen) as caught:
+            check(frames[-1])
+        self.assertEqual(caught.exception.repeats, 14)
+        self.assertAlmostEqual(caught.exception.grey, float(frames[-1].mean()))
+        self.assertIsNone(caught.exception.native_repeat_s)  # only the HLS reader measures it
+
+    def test_black_says_how_dark_it_was(self):
+        check = stream.frozen_check(2.0, None)
+        with self.assertRaises(stream.StreamFrozen) as caught:
+            feed(check, [np.full((180, 320, 3), 3, np.uint8)] * 41)
+        self.assertEqual(caught.exception.grey, 3.0)
+        self.assertLess(caught.exception.grey, stream.BLACK_LEVEL)
+
+    def test_a_clock_camera_counts_no_repeats_but_reads_its_grey(self):
+        check = stream.frozen_check(2.0, CLOCK)
+        frames = ticking(10, every=2)
+        feed(check, frames)
+        self.assertIsNone(check.repeats)                      # its tier counts clock ticks
+        self.assertAlmostEqual(check.grey, float(frames[-1].mean()))
+        with self.assertRaises(stream.StreamFrozen) as caught:
+            feed(check, quiet(41))
+        self.assertIsNone(caught.exception.repeats)
+        self.assertIsNotNone(caught.exception.grey)
+
+
 class CalibrationFile(unittest.TestCase):
     def test_every_calibration_loads_and_sees_road(self):
         cameras = load_cameras()

@@ -633,8 +633,9 @@ def _segment(name: str, sensor: str, parts: Sequence[Part], info: tuple[str, ...
 def _readings(windows: Iterable[Mapping], camera: str | None,
               t_at: float) -> dict[str, list[tuple[float, LaneEstimate]]]:
     """camera's lane windows in the ROLLING_SECONDS up to `t_at`, never after it (the window
-    estimate.within hands over, so a replay gives what the live tick gave), as
-    `measure.rolling`'s history, oldest first."""
+    estimate.within hands over), as `measure.rolling`'s history, oldest first. Which windows
+    of `t_at`'s own minute a live tick had depends on when they reached it: a replay gives
+    what the tick gave only through the tick's logged `queue_seen` (estimate.upto)."""
     out: dict[str, list[tuple[float, LaneEstimate]]] = defaultdict(list)
     for w in windows:
         ev = w.get("evidence")

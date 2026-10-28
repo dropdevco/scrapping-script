@@ -24,14 +24,28 @@ Every `--every` seconds a tick measures the counts (`runner.measure`), appends t
 records to transit-<date>.jsonl as `camera transit` does, combines them with the queue
 reader's recent lane signals into one camera record (`combine.combine`), appends that to
 camera-<date>.jsonl, and prints a status. Every lane signal the Worker emits is appended to
-queue-<date>.jsonl. Files hold derived numbers only, and every time in them is cut to the
-minute; no frame and no per-vehicle datum is written.
+queue-<date>.jsonl, an error line with the minute it came (`failed_at`). Files hold derived
+numbers only, and every time in them is cut to the minute; no frame and no per-vehicle datum is
+written.
 
 A record's `at` is its transit records' `seen_until`, and the queue readings it uses are those
-whose observed_at, cut to the minute, is not after `at`. `--replay` applies the same rule to
-the logged files, so it grades a formula change on every past run. It can differ from what a
-live tick wrote where a reading reached the log after that tick, after a restart (the new
-process starts with no readings in memory), or across a UTC midnight (one --queue file).
+in memory whose observed_at, cut to the minute, is not after `at`. Which readings were in memory
+the tick logs, in its transit records and its camera record: `queue_seen`, per camera and lane
+the newest reading's observed_at (a minute; no reading's numbers). The Worker reads the camera
+once a cycle and emits one reading per lane, about a cycle apart, so the readings of a lane up
+to that minute are the ones the tick had, even where a reading of the tick's own minute reached
+the log after the tick (the Worker's 120-s cycle runs from process start, so its phase in the
+minute drifts against the ticks'). `--replay` applies the same rule to the logged files, and for
+a tick that logged `queue_seen` takes each lane's readings up to its minute, none of a lane it
+lacks (`upto`), so it grades a formula change on every past run. It can still differ from what
+a live tick wrote where a minute holds two readings of one lane (reads run back to back under a
+`--queue-every` shorter than a read, and one that starts on the playlist's older segments ends
+under 60 s after the last; or a stream clock that went back: `upto` warns), after a restart
+(the new process starts with no readings in memory), where a line ran more than KEEP_S -
+ROLLING_SECONDS behind the reader (the tick had dropped readings the replay keeps), or across a
+UTC midnight (one --queue file). A record without `queue_seen` (written before it was logged)
+is replayed with every reading not after `at`, so it also differs where a reading reached the
+log after its tick (15 of 209 camera records of the 3.5-h night run of 2026-10-28).
 Each transit record `camera estimate` writes names its tick (`run`, the process's start cut
 to the minute, and `tick`, a count), so a replay splits the log into the live ticks exactly.
 It also carries the run's `not_measured` (method -> group -> why), so a replay lists the same
@@ -82,6 +96,14 @@ THREADS = 4                  # OpenCV threads: detect.py's YOLOX timings were ta
 KEEP_S = ROLLING_SECONDS + 15 * 60   # queue signals kept in memory: the 15 min combine rolls
                              # over, plus 15 min for the counting lines to run behind the reader
 LAG_ALERT_S = 120            # ASSUMPTION: a line further behind live than this is worth an alert
+# The status shows a queue lane's newest reading with its age once it is older than the Worker's
+# cycle explains: one cycle (--queue-every, or a read's 60 s plus worker.OPEN_SECONDS where that
+# is longer) plus this, for the cut to the minute (up to 60 s), an open slower than the cycle
+# before's (up to OPEN_SECONDS, 15 s) and the stream's delay (5-19 s seen on YouTube; 45 s
+# allowed, ASSUMPTION). At the default 120-s cycle that is 240 s, which a reading passes only
+# when a cycle after it gave that lane none.
+QUEUE_LATE_S = 120
+QUEUE_CYCLE_S = 120          # --queue-every's default
 
 log = logging.getLogger(__name__)
 
@@ -141,20 +163,27 @@ def queue_cameras(cameras: Mapping[str, Camera], pair: Mapping) -> list[Camera]:
 class QueueLog:
     """Every lane signal the Worker emits (the dict `camera run` prints), appended to
     queue-<UTC date>.jsonl with its `observed_at` cut to the minute, and the last KEEP_S of
-    them kept in memory for combine. Error lines are written and not kept. The Worker emits
-    from several threads at once, hence the lock."""
+    them kept in memory for combine. An error line (a camera's cycle failed) is written with
+    the minute it came, `failed_at` (the Worker's, else this PC's clock on arrival), and is not
+    kept as a reading: only as that camera's last failure, until a reading of it follows, for
+    the status (`failed`). A lane's newest reading older than `late_s` is shown with its age
+    (QUEUE_LATE_S). The Worker emits from several threads at once, hence the lock."""
 
-    def __init__(self, keep_s: float = KEEP_S):
+    def __init__(self, keep_s: float = KEEP_S, late_s: float = QUEUE_CYCLE_S + QUEUE_LATE_S):
         self.keep_s = keep_s
+        self.late_s = late_s
         self._lock = threading.Lock()
         self._kept: deque[dict] = deque()
         self._newest: float | None = None
         self._failed = False
+        self._last_error: dict[str, tuple[str, str]] = {}   # camera -> (failed_at, error)
 
     def add(self, sig: Mapping) -> None:
         line = dict(sig)
         if line.get("observed_at"):
             line["observed_at"] = _minute(line["observed_at"])
+        if "error" in line:
+            line["failed_at"] = _minute(line.get("failed_at") or datetime.now(UTC).isoformat())
         with self._lock:
             try:
                 _append(state_dir() / f"queue-{datetime.now(UTC):%Y-%m-%d}.jsonl", [line])
@@ -165,7 +194,11 @@ class QueueLog:
             else:
                 self._failed = False
             if not _is_reading(line):
+                if "error" in line:
+                    self._last_error[str(line.get("camera"))] = (line["failed_at"],
+                                                                 str(line["error"]))
                 return
+            self._last_error.pop(str(line["evidence"].get("camera")), None)
             t = _parse(line["observed_at"]).timestamp()
             self._newest = t if self._newest is None else max(self._newest, t)
             self._kept.append(line)
@@ -177,8 +210,16 @@ class QueueLog:
         with self._lock:
             return within(list(self._kept), at)
 
-    def latest(self) -> dict[tuple[str, str], dict]:
-        """(camera, lane) -> the evidence of its newest reading, for the status line."""
+    def snapshot(self, at: datetime) -> tuple[list[dict], dict[str, dict[str, str]]]:
+        """What one tick uses, read under one lock so the two agree: the readings `within`
+        `at`, and `queue_seen` (`newest`) over every reading in memory, which a replay needs to
+        take exactly these (`upto`)."""
+        with self._lock:
+            kept = list(self._kept)
+        return within(kept, at), newest(kept)
+
+    def latest(self) -> dict[tuple[str, str], tuple[str, dict]]:
+        """(camera, lane) -> its newest reading's observed_at and evidence, for the status."""
         with self._lock:
             out: dict[tuple[str, str], tuple[str, dict]] = {}
             for sig in self._kept:
@@ -186,16 +227,70 @@ class QueueLog:
                 key = (ev.get("camera"), ev.get("lane"))
                 if key not in out or out[key][0] <= sig["observed_at"]:
                     out[key] = (sig["observed_at"], ev)
-            return {k: v[1] for k, v in sorted(out.items())}
+            return dict(sorted(out.items()))
+
+    def failed(self) -> dict[str, tuple[str, str]]:
+        """camera -> (failed_at, error) of its last cycle, where that cycle failed: an error
+        line with no reading of that camera after it."""
+        with self._lock:
+            return dict(sorted(self._last_error.items()))
 
 
 def within(signals: Iterable[Mapping], at: datetime) -> list[dict]:
     """The lane readings observed in the ROLLING_SECONDS up to `at`, not after it, to the
     minute (observed_at is cut to the minute when logged): the live tick may not have later
-    ones yet, and a replay should use only what the tick could have."""
+    ones yet. Of the readings of `at`'s own minute, the live tick has those that came before
+    it; a replay takes the same ones through the tick's `queue_seen` (`upto`), and without it
+    all of them."""
     t_at = at.timestamp()
     return [dict(s) for s in signals if _is_reading(s)
             and 0 <= t_at - _parse(s["observed_at"]).timestamp() <= ROLLING_SECONDS]
+
+
+def newest(signals: Iterable[Mapping]) -> dict[str, dict[str, str]]:
+    """`queue_seen`: camera -> lane -> the newest reading's observed_at (a minute) among
+    `signals`. A lane with no reading is not listed."""
+    out: dict[str, dict[str, str]] = {}
+    for s in signals:
+        if not _is_reading(s):
+            continue
+        lanes = out.setdefault(str(s["evidence"].get("camera")), {})
+        lane = str(s["evidence"].get("lane"))
+        if lane not in lanes or _parse(lanes[lane]) < _parse(s["observed_at"]):
+            lanes[lane] = s["observed_at"]
+    return {cam: dict(sorted(lanes.items())) for cam, lanes in sorted(out.items())}
+
+
+def upto(signals: Iterable[Mapping], seen: Mapping[str, Mapping[str, str]]) -> list[dict]:
+    """The readings a live tick had in memory, from the `queue_seen` it logged: each lane's up to
+    its newest minute there, and none of a lane not there.
+
+    Exact while a lane has one reading a minute. The Worker reads each camera once a cycle
+    (worker.Worker.cycle, `--queue-every` 120 s from the start of the one before) for 60 s of
+    stream, and emits one reading per lane, stamped with the read's last frame by the stream's
+    own clock (worker.Worker._read): two readings of a lane are about a cycle apart. In the
+    3.5-h night run of 2026-10-28, 712 readings, none shared a minute with another of its lane,
+    and each came 120 s after the one before, to the minute. Where a minute holds two (reads
+    back to back under a short `--queue-every`, a read starting on the playlist's older
+    segments, or a stream clock that went back), both are taken although the tick may have had
+    only the first, and a warning names the lane."""
+    out, at_last = [], {}
+    for s in signals:
+        if not _is_reading(s):
+            continue
+        key = (str(s["evidence"].get("camera")), str(s["evidence"].get("lane")))
+        last = (seen.get(key[0]) or {}).get(key[1])
+        if last is None or _parse(s["observed_at"]) > _parse(last):
+            continue
+        if _parse(s["observed_at"]) == _parse(last):
+            at_last[key] = at_last.get(key, 0) + 1
+        out.append(dict(s))
+    for (cam, lane), n in at_last.items():
+        if n > 1:
+            log.warning("%s %s: %d readings at %s, the newest minute its tick had; the replay "
+                        "takes them all, the tick may have had fewer", cam, lane, n,
+                        seen[cam][lane])
+    return out
 
 
 def _is_reading(sig: Mapping) -> bool:
@@ -210,7 +305,9 @@ def tick(runner, queue_log: QueueLog, pair: Mapping,
     camera record, appended to camera-<UTC date>.jsonl. Returns (measured, records, camera
     record or None). `name` ({"run", "tick"}) is written into each transit record, so a
     replay knows which records one tick wrote (`ticks`), and so is the runner's not_measured,
-    so a replay lists the methods this run did not measure (`replay`).
+    so a replay lists the methods this run did not measure (`replay`). So is `queue_seen`, the
+    queue readings in memory as the tick reads them (QueueLog.snapshot), also written into the
+    camera record, so a replay uses the same readings (`upto`).
 
     Once line B's camera has refused us it is never read again (ADR-0014 decision 5), and its
     count would only be re-measured over the same frozen stretch: then nothing is written and
@@ -223,14 +320,15 @@ def tick(runner, queue_log: QueueLog, pair: Mapping,
     skipped: dict[str, dict[str, str]] = {}
     for (m, g), why in runner.not_measured.items():
         skipped.setdefault(m, {})[g] = why
+    at = _parse(records[0]["seen_until"]) if records else None
+    readings, seen = queue_log.snapshot(at) if at is not None else ([], {})
     for rec in records:
-        rec.update(name or {}, not_measured=skipped)
+        rec.update(name or {}, not_measured=skipped, queue_seen=_copy(seen))
     runner.write(records)
     if not records:
         return measured, records, None
-    at = _parse(records[0]["seen_until"])
-    camera = combine.combine(records, queue_log.recent(at), pair, at,
-                             not_measured=runner.not_measured)
+    camera = combine.combine(records, readings, pair, at, not_measured=runner.not_measured)
+    camera["queue_seen"] = _copy(seen)
     _append(state_dir() / f"camera-{datetime.now(UTC):%Y-%m-%d}.jsonl", [camera])
     return measured, records, camera
 
@@ -311,7 +409,7 @@ class Alerts:
 
 def status_text(runner, records: Sequence[Mapping], camera: Mapping | None,
                 queue_log: QueueLog, pair: Mapping, cpu: str = "",
-                alerts: Sequence[str] = ()) -> str:
+                alerts: Sequence[str] = (), now: datetime | None = None) -> str:
     """The terminal status for one tick, in ASCII (a cp1252 console cannot print "≥").
 
     The runner's own status is printed without its measurements, so it never prints a
@@ -320,8 +418,13 @@ def status_text(runner, records: Sequence[Mapping], camera: Mapping | None,
     anchoring bar (transit.anchoring_text): stretch minutes and anchors, never a wait. The
     camera wait comes only through combine.status_text, under the display rule. `alerts` (this
     tick's Alerts.check) are printed last: without Telegram set up, the terminal is the only
-    place they show."""
-    lines = [f"[{datetime.now(UTC):%H:%M:%S} UTC]", runner.status({})]
+    place they show.
+
+    Each queue lane shows its newest reading, with the minute it was read and its age once that
+    is older than the Worker's cycle explains (QueueLog.late_s), and a camera whose last cycle
+    failed says so first, with the error and its minute: a newest reading is not a current one."""
+    now = now or datetime.now(UTC)
+    lines = [f"[{now:%H:%M:%S} UTC]", runner.status({})]
     for rec in records:
         epoch = (rec.get("epochs") or [{}])[-1]
         sd = epoch.get("offset_sd")
@@ -331,13 +434,24 @@ def status_text(runner, records: Sequence[Mapping], camera: Mapping | None,
         lines.append("  " + transit.anchoring_text(rec.get("method"), rec.get("lane_type"),
                                                    rec.get("anchoring"), stopped=stopped))
     a_m = pair.get("a_m") or {}
-    for (cid, lane), ev in queue_log.latest().items():
+    failed = queue_log.failed()
+
+    def failure(cid: str) -> str:
+        failed_at, error = failed.pop(cid)
+        return f"  queue {cid}: last cycle failed at {_parse(failed_at):%H:%M} UTC: {error}"
+    for (cid, lane), (seen_at, ev) in queue_log.latest().items():
+        if str(cid) in failed:
+            lines.append(failure(str(cid)))
         text = (f"  queue {cid} {lane}: {ev.get('state')} {float(ev.get('queue_m') or 0):.0f} m"
                 f"{'+' if ev.get('beyond_view') else ''}")
         if cid == pair.get("a") and lane in a_m:
             reaches = ev.get("beyond_view") or float(ev.get("queue_m") or 0) >= a_m[lane]
             text += ", reaches A" if reaches else ", short of A"
+        age = (now - _parse(seen_at)).total_seconds()
+        if age > queue_log.late_s:
+            text += f", read {_parse(seen_at):%H:%M} UTC, {age / 60:.0f} min ago"
         lines.append(text)
+    lines += [failure(cid) for cid in list(failed)]     # a camera with no reading kept
     if cpu:
         lines.append(f"  {cpu}")
     if pair["b"] in runner.blocked:
@@ -389,14 +503,16 @@ class Estimate:
         """`device` is where YOLOX runs (runner.TransitRunner): gpu.GpuRefused, when "gpu" is
         asked for and refused, lets go of both locks and goes up to the caller."""
         from .runner import TransitRunner
-        from .worker import Worker, hold_lock
+        from .worker import OPEN_SECONDS, Worker, hold_lock
 
         state_dir().mkdir(parents=True, exist_ok=True)
         self.pair = pair
         self.held = hold_lock(state_dir() / "transit.lock")    # AlreadyRunning: refused
         self.worker = None
         try:
-            self.queue_log = QueueLog()
+            # A cycle is --queue-every from the start of the one before, or its read when longer.
+            cycle = max(queue_every, WINDOW_SECONDS + OPEN_SECONDS)
+            self.queue_log = QueueLog(late_s=cycle + QUEUE_LATE_S)
             self.worker = Worker(queue_cameras(cameras, pair), seconds=WINDOW_SECONDS,
                                  every=queue_every, emit=self.queue_log.add, alert=alert,
                                  compare_cbp=True)
@@ -444,7 +560,8 @@ class Estimate:
         self.live.update(camera, stopped, now)
         alerts = self.alerts.check(self.runner, now)
         self.runner.maybe_save_refs()
-        return status_text(self.runner, records, camera, self.queue_log, self.pair, cpu, alerts)
+        return status_text(self.runner, records, camera, self.queue_log, self.pair, cpu, alerts,
+                           now)
 
     def close(self) -> None:
         self.stop_event.set()
@@ -520,9 +637,12 @@ def replay(records: Iterable[Mapping], signals: Iterable[Mapping], pair: Mapping
            device: str | None = None) -> list[dict]:
     """The camera records made again from the logged transit records (split into the live
     ticks by `ticks`) and queue signals, under the live rule: see the module docstring for
-    where they can differ from the records the live ticks wrote. A tick's not_measured is the
-    one its records carry; for records that carry none, `not_measured` (runner.unmeasured,
-    rebuilt from the cameras and the live run's methods), as `_not_measured` narrows it.
+    where they can differ from the records the live ticks wrote. A tick whose records carry
+    `queue_seen` uses each lane's readings up to the minute logged there (`upto`), and its
+    record carries the same `queue_seen`; one without it, every reading not after `at`. A
+    tick's not_measured is the one its records carry; for records that carry none,
+    `not_measured` (runner.unmeasured, rebuilt from the cameras and the live run's methods), as
+    `_not_measured` narrows it.
 
     Only the yolox records of one device are graded (`replay_device`, which picks it by
     `device` and refuses a log of several with none picked: ValueError). A yolox record of any
@@ -539,8 +659,14 @@ def replay(records: Iterable[Mapping], signals: Iterable[Mapping], pair: Mapping
             if counted is not None and counted != graded:
                 skipped[(rec.get("method"), rec.get("lane_type") or combine.MIXED)] = (
                     f"counted on {counted}; this replay grades {graded} only (--device)")
-        out.append(combine.combine(group, within(readings, at), pair, at,
-                                   not_measured=skipped))
+        seen = group[0].get("queue_seen")
+        used = within(readings, at)
+        if isinstance(seen, Mapping):
+            used = upto(used, seen)
+        camera = combine.combine(group, used, pair, at, not_measured=skipped)
+        if isinstance(seen, Mapping):
+            camera["queue_seen"] = _copy(seen)
+        out.append(camera)
     return out
 
 
@@ -677,6 +803,11 @@ def _append(path: Path, rows: Iterable[Mapping]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.writelines(json.dumps(row, ensure_ascii=False, default=str) + "\n" for row in rows)
+
+
+def _copy(seen: Mapping[str, Mapping[str, str]]) -> dict[str, dict[str, str]]:
+    """A `queue_seen` of its own for each record that carries one."""
+    return {cam: dict(lanes) for cam, lanes in seen.items()}
 
 
 def _parse(text: str) -> datetime:

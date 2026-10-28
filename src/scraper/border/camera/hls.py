@@ -83,6 +83,14 @@ class Stamped:
     # clock ticked, or a whole scene changed by FROZEN_DIFF_SCENE. False for a read's first
     # frame, which has nothing to compare with. None: this reader has no frozen check.
     moved: bool | None = None
+    # What the frozen check judged at this frame (stream.frozen_check), numbers only, for the
+    # runner's records (QUESTIONS.md Q-32): the pairs that repeated exactly in its window (the
+    # whole-scene still tier only), and the frame's mean grey, which the black test reads.
+    repeats: int | None = None
+    grey: float | None = None
+    # The longest the picture stayed bit-identical at the stream's native frame rate since the
+    # frame before, in seconds (Decoder's native measurement, whole scenes only), else None.
+    native_repeat_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -247,20 +255,76 @@ class Clock:
 
 SHOWINFO = re.compile(r"\bn:\s*(\d+)\s+pts:\s*(-?\d+)\s+pts_time:")
 TIME_BASE = re.compile(r"time_base:\s*(\d+)/(\d+)")
+NATIVE_TAG = "showinfo@native"     # the showinfo before `select`: every native frame
+NATIVE = re.compile(r"\bn:\s*\d+\s+pts:\s*(-?\d+)\s+pts_time:.*?\bchecksum:([0-9A-Fa-f]+)")
+
+
+class NativeRepeats:
+    """How long the picture stays bit-identical at the stream's own frame rate, from the
+    checksum ffmpeg's showinfo prints for every decoded frame (Decoder's `native`): the still
+    tier's margin, whose one live maximum was 0.42 s against pairs picked at least 0.48 s apart
+    (ADR-0016; QUESTIONS.md Q-32). Measured and logged, never judged.
+
+    A run is the frames of one picture, from the frame that brought it to the frame that changed
+    it. Lines come on ffmpeg's stderr thread and `take` is called on the reader's, hence the
+    lock."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._tb = 1 / CLOCK_HZ
+        self._frames = 0
+        self._run: tuple[str, int, int] | None = None   # (checksum, first PTS, latest PTS)
+        self._longest = 0               # PTS ticks: the longest run that ended since `take`
+
+    def line(self, line: str) -> None:
+        """One line of the native showinfo: its time base, or a frame and its checksum."""
+        tb = TIME_BASE.search(line)
+        if tb and int(tb.group(1)):
+            self._tb = int(tb.group(1)) / int(tb.group(2))
+            return
+        m = NATIVE.search(line)
+        if not m:
+            return
+        pts, checksum = int(m.group(1)), m.group(2)
+        with self._lock:
+            self._frames += 1
+            if self._run is not None and self._run[0] == checksum:
+                self._run = (checksum, self._run[1], pts)
+                return
+            if self._run is not None:
+                self._longest = max(self._longest, pts - self._run[1])
+            self._run = (checksum, pts, pts)
+
+    def take(self) -> float | None:
+        """The longest run since the last call, in seconds; for the picture still showing, to
+        its latest frame so far, so a freeze shows while it lasts, as a floor. None before two
+        native frames."""
+        with self._lock:
+            if self._run is None or self._frames < 2:
+                return None
+            ticks = max(self._longest, self._run[2] - self._run[1])
+            self._longest = 0
+        return round(ticks * self._tb, 3)
 
 
 class Decoder:
     """One ffmpeg process: MPEG-TS bytes in on stdin, raw BGR frames out on stdout, each
     frame's PTS on stderr (showinfo). Frames are picked about every 1/fps seconds of stream
-    time, keeping each picked frame's own PTS; no frame is duplicated to fill a rate."""
+    time, keeping each picked frame's own PTS; no frame is duplicated to fill a rate.
 
-    def __init__(self, size: tuple[int, int], fps: float):
+    With `native`, a first showinfo (NATIVE_TAG) prints every decoded frame's checksum before
+    any is picked, for `native_repeat` (NativeRepeats). On a local 720p 30-fps clip it cost
+    ffmpeg 0.19 s of CPU per 20 s of stream, about 1 % of a core (one run, 2026-10-28)."""
+
+    def __init__(self, size: tuple[int, int], fps: float, native: bool = False):
         if not shutil.which("ffmpeg"):
             raise StreamLost("ffmpeg is not on PATH; the HLS reader needs it")
         self.size = size
         w, h = size
         pick = max(0.0, 1.0 / fps - 0.02)
-        vf = f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{pick:.3f})',scale={w}:{h},showinfo"
+        select = f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{pick:.3f})'"
+        vf = (f"{NATIVE_TAG}," if native else "") + f"{select},scale={w}:{h},showinfo"
+        self.native = NativeRepeats() if native else None
         self.proc = subprocess.Popen(
             ["ffmpeg", "-hide_banner", "-loglevel", "info", "-copyts", "-f", "mpegts",
              "-i", "pipe:0", "-an", "-sn", "-vf", vf, "-fps_mode", "passthrough",
@@ -282,12 +346,20 @@ class Decoder:
             line = raw.decode("utf-8", "replace")
             if "showinfo" not in line:
                 continue
+            if NATIVE_TAG in line:          # every native frame: never a picked frame's PTS
+                if self.native is not None:
+                    self.native.line(line)
+                continue
             tb = TIME_BASE.search(line)
             if tb and int(tb.group(1)):
                 self.tb = int(tb.group(1)) / int(tb.group(2))
             m = SHOWINFO.search(line)
             if m:
                 self._pts.put(int(m.group(2)))
+
+    def native_repeat(self) -> float | None:
+        """NativeRepeats.take, or None without `native`."""
+        return None if self.native is None else self.native.take()
 
     def _read_frames(self) -> None:
         w, h = self.size
@@ -346,7 +418,9 @@ class HlsReader:
     for a stalled encoder, and in one 20-min night at line B (21:32-21:52 local, 2026-10-26)
     the City's native frames changed at least every 0.42 s, against these frames picked at
     least 0.48 s apart. That it holds at dusk and by day is an ASSUMPTION until the runs of
-    Q-32. A faster read is refused before anything is fetched."""
+    Q-32. A faster read is refused before anything is fetched. Such a read also measures how
+    long the native picture stays bit-identical (Decoder's `native`), and each frame carries
+    it (Stamped.native_repeat_s) with what the frozen check judged, for the runner's records."""
 
     def __init__(self, playlist_url: Callable[[], str], clock: str, size: tuple[int, int],
                  fps: float, user_agent: str,
@@ -419,7 +493,7 @@ class HlsReader:
         first: datetime | None = None
         stop = threading.Event()
         errors: list[BaseException] = []
-        decoder = Decoder(self.size, self.fps)
+        decoder = Decoder(self.size, self.fps, native=self.live_region is None)
 
         def pump() -> None:
             nonlocal url
@@ -526,10 +600,15 @@ class HlsReader:
                     if time.monotonic() - placed > STAMP_WATCHDOG_S:
                         raise StreamLost("no frame could be stamped for 30 s")
                     continue
-                moved = check(image)                 # raises StreamFrozen
+                try:
+                    moved = check(image)
+                except StreamFrozen as exc:          # with the native picture's numbers too
+                    exc.native_repeat_s = decoder.native_repeat()
+                    raise
                 self.last_at = at
                 first = first or at
-                yield Stamped(image, at, pts, moved)
+                yield Stamped(image, at, pts, moved, check.repeats, check.grey,
+                              decoder.native_repeat())
                 placed = time.monotonic()            # the consumer's own time does not count
                 if seconds is not None and (at - first).total_seconds() >= seconds:
                     return

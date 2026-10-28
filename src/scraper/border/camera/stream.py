@@ -52,11 +52,19 @@ class StreamFrozen(StreamError):
     """`seconds` is how far back from the last frame the rule that raised it looked, at its
     nominal fps: the stretch a caller takes back, because those frames were already read as a
     quiet road. Frames come a little more than 1/fps apart, so the window itself is longer: the
-    City's 40 pairs spanned p50 20.96 s, at most 21.38 s, on 2026-10-27."""
+    City's 40 pairs spanned p50 20.96 s, at most 21.38 s, on 2026-10-27.
 
-    def __init__(self, message: str, seconds: float = FROZEN_SECONDS):
+    It also carries the numbers its frame was judged on, for the records (QUESTIONS.md Q-32):
+    `repeats`, the pairs that repeated exactly in the window (None for the clock tier), `grey`,
+    the frame's mean grey that the black test compares with BLACK_LEVEL, and `native_repeat_s`,
+    set by hls.HlsReader where it measures the stream's native frames (None elsewhere)."""
+
+    def __init__(self, message: str, seconds: float = FROZEN_SECONDS,
+                 repeats: int | None = None, grey: float | None = None):
         super().__init__(message)
         self.seconds = seconds
+        self.repeats, self.grey = repeats, grey
+        self.native_repeat_s: float | None = None
 
 
 class StreamLost(StreamError):
@@ -206,7 +214,13 @@ def frozen_check(fps: float, live_region: tuple[float, float, float, float] | No
     With a `live_region`, frozen means the clock stopped: at most FROZEN_CHANGED of the pairs
     changed it. Without one, frozen means the picture repeats itself: at least
     FROZEN_SAME_SHARE of the pairs are bit-identical at the probe size, which holds only for a
-    whole scene read at SCENE_MAX_FPS or slower (refused otherwise)."""
+    whole scene read at SCENE_MAX_FPS or slower (refused otherwise).
+
+    After each frame the callable carries what it judged, for the runner's records (Q-32):
+    `repeats`, the pairs bit-identical among the last FROZEN_SECONDS of them (the still tier's
+    count; None with a `live_region`, whose tier counts clock ticks, and before the first pair),
+    and `grey`, the frame's mean grey, which the black test compares with BLACK_LEVEL. Both are
+    None before the first frame."""
     if not live_region and fps > SCENE_MAX_FPS:
         raise ValueError(f"a whole scene is read at {SCENE_MAX_FPS:g} fps or less, not {fps:g}: "
                          f"closer pairs can repeat exactly on a live picture")
@@ -245,6 +259,8 @@ def frozen_check(fps: float, live_region: tuple[float, float, float, float] | No
             changes.append(moved)
             same.append(diff == 0.0)
         last = probe
+        check.repeats = sum(same) if not live_region and same else None
+        check.grey = grey = float(frame.mean())
         if live_region:
             # Judged over the whole window, not a run of identical frames: a frozen stream is
             # still re-encoded, and every keyframe changes the picture a little.
@@ -254,15 +270,17 @@ def frozen_check(fps: float, live_region: tuple[float, float, float, float] | No
         if stopped:
             # Seen live: Zaragoza (Av. Waterfill) came back at 10:16 UTC on 2026-10-19
             # serving solid black for 20 s, then dropped again. Say which it is.
-            if float(frame.mean()) < BLACK_LEVEL:
+            if grey < BLACK_LEVEL:
                 what = f"is black for {FROZEN_SECONDS}s"
             elif live_region:
                 what = f"has not changed for {FROZEN_SECONDS}s"
             else:   # say what was counted: the share that calls it frozen is a judgement
                 what = f"repeated exactly in {sum(same)} of the last {limit} pairs"
-            raise StreamFrozen(f"the picture {what}", FROZEN_SECONDS)
+            raise StreamFrozen(f"the picture {what}", FROZEN_SECONDS, repeats=check.repeats,
+                               grey=grey)
         return moved
 
+    check.repeats = check.grey = None
     return check
 
 

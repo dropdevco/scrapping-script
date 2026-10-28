@@ -18,6 +18,7 @@ from email.utils import format_datetime
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from itertools import pairwise
+from types import SimpleNamespace
 from unittest import mock
 
 import httpx
@@ -153,11 +154,15 @@ class Quiet(SimpleHTTPRequestHandler):
 class EndToEnd(unittest.TestCase):
     """A 12 s stream at 10 fps in 2 s segments, its program time starting at a known instant."""
 
+    SOURCE = "testsrc=size=320x240:rate=10"
+    LOSSLESS = False
+
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir, True)
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-                        "testsrc=size=320x240:rate=10", "-t", "12", "-c:v", "libx264", "-g", "10",
+                        self.SOURCE, "-t", "12", "-c:v", "libx264", "-g", "10",
+                        *(["-qp", "0"] if self.LOSSLESS else []),
                         "-pix_fmt", "yuv420p", "-f", "hls", "-hls_time", "2",
                         "-hls_list_size", "0", os.path.join(self.dir, "live.m3u8")],
                        check=True, timeout=60)
@@ -540,10 +545,75 @@ class Motion(EndToEnd):
     test_a_jump_in_the_sequence_is_reported_as_a_gap = None
 
 
+def native_line(n: int, pts: int, checksum: str) -> str:
+    """One frame's line from the native showinfo, as ffmpeg 9 prints it."""
+    return (f"[showinfo@native @ 0000021c] n:{n:4d} pts:{pts:7d} pts_time:{pts / 90000:<7g}"
+            f" duration:   3000 duration_time:0.0333333 fmt:yuv420p cl:left sar:1/1 s:1280x720 "
+            f"i:P iskey:0 type:P checksum:{checksum} plane_checksum:[{checksum} 0 0] "
+            f"mean:[90 128 128] stdev:[40.1 2.0 2.0]\n")
+
+
+class NativeRepeatTimes(unittest.TestCase):
+    """How long the native picture stays bit-identical (the still tier's margin, Q-32), from the
+    checksum the native showinfo prints for every decoded frame."""
+
+    def test_a_run_lasts_from_the_frame_that_brought_a_picture_to_the_one_that_changed_it(self):
+        runs = hls.NativeRepeats()
+        runs.line("[showinfo@native @ 0] config in time_base: 1/90000, frame_rate: 30/1\n")
+        runs.line("[showinfo@native @ 0] config out time_base: 0/0, frame_rate: 0/0\n")
+        self.assertIsNone(runs.take())                        # no frame yet
+        for n, s in enumerate("AABCCCCD"):                    # C shows for 4 frames at 30 fps
+            runs.line(native_line(n, 3000 * n, s * 8))
+            runs.line("[showinfo@native @ 0] color_range:tv color_space:bt709\n")
+        self.assertEqual(runs.take(), round(4 * 3000 / 90000, 3))
+        self.assertEqual(runs.take(), 0.0)                    # since: D, one frame so far
+        for n in range(8, 38):                                # D for a second: a freeze
+            runs.line(native_line(n, 3000 * n, "D" * 8))
+        self.assertEqual(runs.take(), 1.0)                    # shown while it lasts, as a floor
+
+    def test_only_a_native_decoder_measures(self):
+        self.assertIsNone(Decoder.native_repeat(SimpleNamespace(native=None)))
+
+
+@unittest.skipUnless(FFMPEG, "needs the ffmpeg command-line tool")
+class NativeRepeatsRead(EndToEnd):
+    """A whole-scene read carries the longest native repeat and what the frozen check judged;
+    a read with a clock region measures no native repeat and counts no exact repeats."""
+
+    SOURCE = "testsrc=size=320x240:rate=2,fps=10"           # each picture for 5 frames: 0.5 s
+    # Lossless, so a repeated picture decodes bit-identical: at its default quality x264 kept
+    # refining one still picture, and no two of its first 55 frames matched (2026-10-28).
+    LOSSLESS = True
+
+    def test_a_whole_scene_read_carries_the_longest_native_repeat(self):
+        _, got = self._read(self._with_pdt(), "pdt", 6)
+        native = [f.native_repeat_s for f in got if f.native_repeat_s is not None]
+        self.assertGreater(len(native), len(got) // 2, native)
+        self.assertEqual(max(native), 0.5)
+        self.assertIsNone(got[0].repeats)                     # no pair yet
+        self.assertEqual({f.repeats for f in got[1:]}, {0})   # picked 0.5 s apart: no repeat
+        self.assertTrue(all(f.grey is not None for f in got))
+
+    def test_a_read_with_a_clock_region_measures_no_native_repeat(self):
+        url = self._with_pdt()
+        reader = HlsReader(lambda: url, "pdt", (160, 120), 2.0, "chisme-test",
+                           live_region=(0.0, 0.0, 0.25, 0.1))
+        self.addCleanup(reader.http.close)
+        got = list(reader.frames(4))
+        self.assertTrue(got)
+        self.assertEqual({(f.native_repeat_s, f.repeats) for f in got}, {(None, None)})
+        self.assertTrue(all(f.grey is not None for f in got))
+
+    test_frames_are_timed_by_the_program_date_time = None
+    test_without_program_time_last_modified_sets_the_clock = None
+    test_the_segment_timestamps_are_read_from_the_transport_stream = None
+    test_a_jump_in_the_sequence_is_reported_as_a_gap = None
+
+
 class EmptyDecoder:
     """Stands in for ffmpeg: decodes nothing, and its frames end when its input is closed."""
 
-    def __init__(self, size, fps):
+    def __init__(self, size, fps, native=False):
         self.frames: queue.Queue = queue.Queue()
         self.proc = mock.Mock()
         self.proc.stdin.close.side_effect = lambda: self.frames.put(None)

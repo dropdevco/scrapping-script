@@ -181,7 +181,8 @@ class TickTest(StateDir):
         self.feed(est, 0, 20)
         for sig in every_lane(T0 + timedelta(minutes=17, seconds=37)):
             est.queue_log.add(sig)
-        est.queue_log.add({"camera": "pdn-south-street", "error": "StreamLost: dropped"})
+        est.queue_log.add({"camera": "pdn-south-street", "error": "StreamLost: dropped",
+                           "failed_at": "2026-10-26T17:18:41.5+00:00"})
         _, records, camera = estimate.tick(est.runner, est.queue_log, est.pair)
 
         self.assertEqual([(r["method"], r["lane_type"]) for r in records],
@@ -192,7 +193,8 @@ class TickTest(StateDir):
         self.assertEqual(len(queue), 8)
         self.assertEqual({q["observed_at"] for q in queue if "observed_at" in q},
                          {"2026-10-26T17:17:00+00:00"})
-        self.assertIn({"camera": "pdn-south-street", "error": "StreamLost: dropped"}, queue)
+        self.assertIn({"camera": "pdn-south-street", "error": "StreamLost: dropped",
+                       "failed_at": "2026-10-26T17:18:00+00:00"}, queue)
 
         self.assertEqual(camera["at"], "2026-10-26T17:19:00+00:00")
         self.assertEqual(camera["at"], records[0]["seen_until"])
@@ -333,6 +335,46 @@ class StatusTest(StateDir):
         self.assertIn("  queue pdn-north lane-1: queue 70 m, reaches A", text)
         self.assertIn("  queue pdn-north lane-2: queue 40 m, short of A", text)
         self.assertIn("  queue pdn-south-street left-column: no_queue 0 m", text)
+
+    def test_an_old_reading_shows_its_age_and_a_failed_cycle_says_so(self):
+        """3b. On 2026-10-28 a TimelineCut on pdn-south-street left its 07:51 reading printed
+        as current for two status lines. A camera's failed cycle is now said at once, and a
+        reading older than the Worker's cycle explains shows its minute and age."""
+        est = self.est
+        self.assertEqual(est.queue_log.late_s, 240)           # a 120-s cycle plus QUEUE_LATE_S
+
+        def status(at):
+            return estimate.status_text(est.runner, [], None, est.queue_log, est.pair, now=at)
+        for sig in every_lane(T0 + timedelta(minutes=51, seconds=30)):
+            est.queue_log.add(sig)
+        quiet = status(T0 + timedelta(minutes=54, seconds=59))   # 239 s past 17:51
+        self.assertNotIn("min ago", quiet)
+        self.assertNotIn("failed", quiet)
+        est.queue_log.add({"camera": "pdn-south-street",
+                           "error": "TimelineCut: timestamps jumped +9.0 s at segment 7",
+                           "failed_at": (T0 + timedelta(minutes=54, seconds=2)).isoformat()})
+        for sig in every_lane(T0 + timedelta(minutes=53, seconds=30))[:5]:   # pdn-north read
+            est.queue_log.add(sig)
+        text = status(T0 + timedelta(minutes=55, seconds=10)).splitlines()
+        street = [ln for ln in text if "pdn-south-street" in ln]
+        self.assertEqual(street, [
+            ("  queue pdn-south-street: last cycle failed at 17:54 UTC: TimelineCut: timestamps "
+             "jumped +9.0 s at segment 7"),
+            "  queue pdn-south-street left-column: no_queue 0 m, read 17:51 UTC, 4 min ago",
+            "  queue pdn-south-street right-column: no_queue 0 m, read 17:51 UTC, 4 min ago"])
+        self.assertIn("  queue pdn-north lane-1: queue 40 m, short of A", text)
+        self.assertFalse([ln for ln in text if "pdn-north" in ln and "ago" in ln], text)
+        for sig in every_lane(T0 + timedelta(minutes=55, seconds=20))[5:]:   # the street reads
+            est.queue_log.add(sig)
+        self.assertNotIn("pdn-south-street: last cycle failed",
+                         status(T0 + timedelta(minutes=56)))
+
+    def test_a_camera_that_failed_before_any_reading_is_said_too(self):
+        self.est.queue_log.add({"camera": "pdn-north", "error": "StreamDown: offline",
+                                "failed_at": "2026-10-26T17:01:12+00:00"})
+        text = estimate.status_text(self.est.runner, [], None, self.est.queue_log, self.est.pair)
+        self.assertIn("  queue pdn-north: last cycle failed at 17:01 UTC: StreamDown: offline",
+                      text)
 
 
 class LockTest(StateDir):
@@ -512,27 +554,56 @@ class ReplayTest(StateDir):
         self.assertIn("self-check", out.getvalue())
         self.assertIn("3 camera records from 6 transit records", out.getvalue())
 
-    def test_a_reading_logged_after_its_tick_is_in_the_replay_and_not_the_live_record(self):
-        """The known difference (estimate.py's docstring): a reading from `at`'s own minute
-        that reaches the log after the tick is used by the replay, which cannot tell it came
-        late, and was not by the live tick."""
+    def late_reading(self) -> estimate.Estimate:
+        """One tick at seen_until 17:19, its lines 40 m (short of A, read at 17:14 and 17:16)
+        and the street's read at 17:19:05, before the tick. Then pdn-north's reading of the
+        tick's own minute (17:19:40, 90 m: past A) reaches the log after the tick, as on the
+        night of 2026-10-28, when the Worker's cycle ran a different phase of the minute."""
         est = self.open()
         self.feed(est, 0, 20)                                   # seen_until 17:19
         for back in (5, 3):                                     # 40 m: short of A
             for sig in every_lane(T0 + timedelta(minutes=19 - back, seconds=20)):
                 est.queue_log.add(sig)
+        for sig in every_lane(T0 + timedelta(minutes=19, seconds=5))[5:]:   # the street
+            est.queue_log.add(sig)
         est.step(now=T0 + timedelta(minutes=20))
-        for sig in every_lane(T0 + timedelta(minutes=19, seconds=40), 90.0, 90.0):
+        for sig in every_lane(T0 + timedelta(minutes=19, seconds=40), 90.0, 90.0)[:5]:
             est.queue_log.add(sig)                              # logged as 17:19, after the tick
-        live = lines(self.dir, "camera-*.jsonl")
-        again = estimate.replay(lines(self.dir, "transit-*.jsonl"),
-                                lines(self.dir, "queue-*.jsonl"), est.pair)
+        return est
 
-        def tail(rec):
-            return rec["groups"]["sentri"]["methods"]["loop"]["segments"][0]
+    @staticmethod
+    def tail(rec):
+        return rec["groups"]["sentri"]["methods"]["loop"]["segments"][0]
+
+    def test_a_reading_of_the_ticks_minute_logged_after_it_is_left_out_of_its_replay(self):
+        """6b. The tick logs which readings it had (`queue_seen`: per lane, the newest one's
+        minute), so the replay leaves out the reading that came after it, keeps the street's of
+        the same minute that came before, and equals the live record."""
+        est = self.late_reading()
+        live = lines(self.dir, "camera-*.jsonl")
+        logged = lines(self.dir, "transit-*.jsonl")
+        seen = {"pdn-north": dict.fromkeys(A_LANES, "2026-10-26T17:16:00+00:00"),
+                "pdn-south-street": dict.fromkeys(("left-column", "right-column"),
+                                                  "2026-10-26T17:19:00+00:00")}
         self.assertEqual(live[0]["at"], "2026-10-26T17:19:00+00:00")
-        self.assertEqual(tail(live[0])["minutes"], 0.0)
-        self.assertGreater(tail(again[0])["minutes"], 0.0)
+        self.assertEqual(live[0]["queue_seen"], seen)
+        self.assertEqual([r["queue_seen"] for r in logged], [seen] * len(logged))
+        self.assertEqual(self.tail(live[0])["minutes"], 0.0)
+        queue = lines(self.dir, "queue-*.jsonl")
+        self.assertIn("2026-10-26T17:19:00+00:00",
+                      {q["observed_at"] for q in queue if q["evidence"]["camera"] == "pdn-north"})
+        again = estimate.replay(logged, queue, est.pair)
+        self.assertEqual(json.loads(json.dumps(again, ensure_ascii=False, default=str)), live)
+
+    def test_a_record_without_queue_seen_replays_as_before(self):
+        """A log written before `queue_seen` keeps the old rule: every reading not after `at`,
+        so the late reading is used, as the live tick did not (estimate.py's docstring)."""
+        est = self.late_reading()
+        old = [{k: v for k, v in r.items() if k != "queue_seen"}
+               for r in lines(self.dir, "transit-*.jsonl")]
+        again = estimate.replay(old, lines(self.dir, "queue-*.jsonl"), est.pair)
+        self.assertNotIn("queue_seen", again[0])
+        self.assertGreater(self.tail(again[0])["minutes"], 0.0)
 
     def test_two_ticks_at_one_seen_until_replay_apart_when_the_first_lacks_a_group(self):
         """Line B frozen, so two ticks share a seen_until, and the first lost its normal group
@@ -918,6 +989,55 @@ class QueueLogTest(StateDir):
         # readings. What is left is cut to the minute.
         self.assertEqual(got, ["2026-10-26T17:00:00+00:00", "2026-10-26T17:10:00+00:00"])
         self.assertEqual(len(lines(self.dir, "queue-*.jsonl")), 5)
+
+    def test_an_error_line_has_the_minute_it_came_and_marks_its_cameras_last_cycle(self):
+        log_ = estimate.QueueLog()
+        before = datetime.now(UTC).replace(second=0, microsecond=0)
+        log_.add({"camera": "pdn-north", "error": "StreamLost: dropped"})    # no time given
+        log_.add({"camera": "pdn-south-street", "error": "TimelineCut: timestamps jumped",
+                  "failed_at": "2026-10-28T07:54:31.250000+00:00"})        # the Worker's
+        written = lines(self.dir, "queue-*.jsonl")
+        stamped = datetime.fromisoformat(written[0]["failed_at"])
+        self.assertEqual((stamped.second, stamped.microsecond), (0, 0))
+        self.assertTrue(before <= stamped <= datetime.now(UTC), stamped)
+        self.assertEqual(written[1], {"camera": "pdn-south-street",
+                                      "error": "TimelineCut: timestamps jumped",
+                                      "failed_at": "2026-10-28T07:54:00+00:00"})
+        self.assertEqual(log_.failed()["pdn-south-street"],
+                         ("2026-10-28T07:54:00+00:00", "TimelineCut: timestamps jumped"))
+        self.assertEqual(log_.recent(T0), [])                 # never a reading
+        log_.add(signal("pdn-south-street", "left-column", T0))   # its next cycle read
+        self.assertEqual(sorted(log_.failed()), ["pdn-north"])
+
+    def test_the_worker_times_a_failed_cycle(self):
+        sent = []
+        worker = SimpleNamespace(_set=lambda *a, **k: None, _notify=sent.append,
+                                 _emit=sent.append)
+        cam = SimpleNamespace(id="pdn-south-street")
+        Worker._fail(worker, cam, "down", RuntimeError("x"), was_failing=True)
+        self.assertEqual(sent[0]["camera"], "pdn-south-street")
+        self.assertLess(abs((datetime.fromisoformat(sent[0]["failed_at"])
+                             - datetime.now(UTC)).total_seconds()), 60)
+
+    def test_upto_takes_each_lanes_readings_up_to_its_logged_minute(self):
+        logged = [{**s, "observed_at": estimate._minute(s["observed_at"])} for s in (
+            *[signal("pdn-north", "lane-1", T0 + timedelta(minutes=m, seconds=10))
+              for m in (0, 2, 4)],
+            *[signal("pdn-north", "lane-2", T0 + timedelta(minutes=m, seconds=50))
+              for m in (0, 2)],
+            signal("pdn-south-street", "left-column", T0))]
+        seen = {"pdn-north": {"lane-1": "2026-10-26T17:02:00+00:00",
+                              "lane-2": "2026-10-26T17:02:00+00:00"}}
+        got = [(s["evidence"]["lane"], s["observed_at"][11:16])
+               for s in estimate.upto(logged, seen)]
+        # lane-1's 17:04 came after the tick; the street had no reading by then
+        self.assertEqual(got, [("lane-1", "17:00"), ("lane-1", "17:02"), ("lane-2", "17:00"),
+                               ("lane-2", "17:02")])
+        # Two readings of one lane in its logged minute: both are taken, and that is said.
+        with self.assertLogs(estimate.log, "WARNING") as said:
+            self.assertEqual(len(estimate.upto([*logged, dict(logged[1])], seen)), 5)
+        self.assertIn("pdn-north lane-1: 2 readings at 2026-10-26T17:02:00+00:00",
+                      said.output[0])
 
     def test_line_a_lies_where_the_strips_and_zones_put_it(self):
         """a_m and r_m come from cameras.json through the strips' ground homography: line A's

@@ -166,6 +166,17 @@ records), not kept in the repository. No picture was kept or looked at.
 - **Verification is owed** (Q-32): runs at dusk straddling sunset, deep night, peak, and one under
   `camera estimate`, with numbers-only logging. Until then the still tier's margin, `QUIET_S` and the lag
   rest on one 20-min night sample at line B.
+  - **Logged since 2026-10-28** in every transit record, per line (`_a`, `_b`; see
+    `docs/components/border-camera-reader.md`): `most_repeats_*`, the most pairs that repeated exactly
+    in any 40 since the records before, with or without a `StreamFrozen` (`null` at a clock camera);
+    `native_repeat_s_*`, the longest the picture stayed bit-identical at the native rate (`null` at a
+    clock camera); `darkest_grey_*`, the lowest frame mean grey, which the black test compares with
+    12; and `hold_lag_s_*`, the latest frame past `moved_at` at the measure, in seconds. "Nothing
+    moved" gaps, reopens and reasons were already in `gaps_*` and `reconnects_*`.
+  - **The native repeat is measured, not judged.** It takes the checksum ffmpeg's `showinfo` prints
+    for every decoded frame, before `select`, at whole-scene cameras only: the deferred
+    native-checksum alternative's measurement, without its rule. On a local 720p 30-fps test clip it
+    cost ffmpeg about 1 % of a core.
 - **Tests** on 2026-10-27, on scripted frames and readers, counted with `pytest --collect-only` after
   the review's fixes: `test_border_camera_stream.py` 31, `_hls.py` 34, `_runner.py` 50, `_transit.py`
   44 (on 2026-10-28, with ADR-0017's GPU-stop tests and the anchoring bars added: 31, 34, 59, 54). A

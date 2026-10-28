@@ -373,7 +373,18 @@ stretches (`gaps_a`, `gaps_b`: the minute each began, its length in seconds as t
 that is padded and merged, and its reasons), how many times each line's stream was opened again
 since the runner started (`reconnects_a`, `reconnects_b`), how far its latest epoch has come towards
 anchoring and which line is unseen now and why (`anchoring`, below), and, on a yolox record,
-which path counted at each camera (`devices`, below): derived numbers only. A window with fewer
+which path counted at each camera (`devices`, below): derived numbers only. Since 2026-10-28 it also holds, per line, what the frozen
+rule and the hold rest on (Q-32), the same in every record of one tick:
+
+| Field | What it is | Example |
+|---|---|---|
+| `most_repeats_a`, `most_repeats_b` | The most frame pairs that repeated exactly in any window of the still tier (40 pairs at 2 fps; 14 is frozen) since the records before, whether or not a `StreamFrozen` was raised. `null` at a line with a clock (its tier counts clock ticks) or with no frame since | `3` |
+| `native_repeat_s_a`, `native_repeat_s_b` | The longest the picture stayed bit-identical at the stream's own frame rate since the records before, s, from ffmpeg's checksum of every decoded frame (`hls.NativeRepeats`; about 1 % of a core on a 720p 30-fps test clip). A picture still showing counts to its latest frame, so a freeze shows while it lasts. One live maximum was 0.42 s, against pairs at least 0.48 s apart. `null` where not measured: a line with a clock | `0.4` |
+| `darkest_grey_a`, `darkest_grey_b` | The lowest mean grey of a frame since the records before: the level the black test compares with `BLACK_LEVEL` (12) | `41.7` |
+| `hold_lag_s_a`, `hold_lag_s_b` | How far the line's latest frame was past where it is seen (`moved_at`) when the records were measured, s: the hold's lag. A duration, so not cut to the minute as `seen_until` is | `12.5` |
+
+They are read in each camera's own thread, from every frame and every `StreamFrozen`, and kept under
+the runner's lock until records take them. A window with fewer
 than 3 transits gets no median or percentiles. That ties no written time to a car, but it is not
 anonymity: with 3, the median and percentiles give the three times back. Times that could be a
 car's own are cut to the minute (`seen_until`, `now.at`, an epoch's edges, a gap's start). A gap's
@@ -496,7 +507,7 @@ PDN northbound, per lane-type group, side by side and never averaged.
    - Each record names its tick (`run`: the process start, cut to the minute; `tick`: a count), so
      a replay splits the log into the live ticks exactly. It also carries the run's `not_measured`
      (method -> group -> why, `{}` when there is none), so a replay lists the same methods as not
-     measured.
+     measured, and `queue_seen` (step 3).
    - When no method of the run measures any group (every (method, group) is in `not_measured`), no
      camera record is written. The page flags "No camera wait: no method of this run measures any
      group (...)" with the reasons, and the status says so, not "nothing measured yet".
@@ -505,19 +516,40 @@ PDN northbound, per lane-type group, side by side and never averaged.
    reason, never as a wait; it wins over a record of the same method and group, which then feeds
    neither `agree` nor the vote's reasons.
    - `at` is the records' `seen_until`, cut to the minute.
-   - Only queue readings whose `observed_at`, cut to the minute, is not after `at` are used.
+   - Only queue readings in memory whose `observed_at`, cut to the minute, is not after `at` are
+     used.
+   - Which readings were in memory is logged in the tick's transit records and its camera record:
+     `queue_seen`, per camera and lane the newest reading's `observed_at`, a minute and no reading's
+     numbers, for example `{"pdn-north": {"lane-1": "2026-10-28T07:51:00+00:00", ...},
+     "pdn-south-street": {...}}`. A lane with no reading is not listed.
 4. A status prints, ending with this tick's alerts (`  alert: ...`). Without Telegram set up, the
    terminal is the only place they show.
 
 Every lane signal the Worker emits, error lines included, is appended to `queue-<date>.jsonl` with
-`observed_at` cut to the minute. `QueueLog` keeps the last 30 min of readings in memory (`KEEP_S`):
-the 15 min `combine` rolls over, plus 15 min for the counting lines to run behind the reader.
+`observed_at` cut to the minute. An error line (a camera's cycle failed) carries the minute it
+failed, `failed_at`, by this PC's clock (`{"camera": "pdn-south-street", "error": "TimelineCut: …",
+"failed_at": "2026-10-28T07:54:00+00:00"}`); before 2026-10-28 it had no time. `QueueLog` keeps the
+last 30 min of readings in memory (`KEEP_S`): the 15 min `combine` rolls over, plus 15 min for the
+counting lines to run behind the reader.
 
 **`--replay`** combines logged files tick by tick (by each record's `run` and `tick`; an older record
 by its `seen_until`) under the live rule, writes `camera-replay-<name>.jsonl` and prints
-`combine.self_check`. It can differ from what a live tick wrote where a reading reached the log after
-that tick, after a restart (the new process starts with no readings in memory), or across a UTC
-midnight (one `--queue` file). It uses each tick's logged `not_measured`. For a record without it
+`combine.self_check`. For a tick that logged `queue_seen` it takes each lane's readings up to that
+lane's minute there, and none of a lane not there (`estimate.upto`), so a reading of the tick's own
+minute that reached the log after the tick is left out, as it was live. The Worker's 120-s cycle runs
+from its start, so its phase in the minute drifts against the ticks': replayed without this, 15 of 209
+camera records of the 3.5-h night run of 2026-10-28 differed in `tail_to_a`. A minute identifies a
+lane's reading because the Worker reads each camera once a cycle, 60 s of stream, and emits one
+reading per lane stamped by the stream's own clock, so a lane's readings are about a cycle apart: in
+that night's queue log, 712 readings, none sharing a minute with another of its lane, each 120 s after
+the one before to the minute, none going back. Where a minute holds two (reads back to back under a
+`--queue-every` shorter than a read, one starting on the playlist's older segments, or a stream clock
+that went back), the replay takes both although the tick may have had only the first, and warns. It
+can also differ after a restart (the new process starts with no readings in memory), where a line ran
+more than 15 min (`KEEP_S` − the 15 min rolled over) behind the reader, or across a UTC midnight (one
+`--queue` file). A record without `queue_seen` (written before 2026-10-28) is replayed with every
+reading not after `at`, and differs too where a reading reached the log after its tick. It uses each
+tick's logged `not_measured`. For a record without it
 (`camera transit`'s, or one written before it was logged), `not_measured` is rebuilt from
 `cameras.json` `"methods"` as they are now and from `--methods` (give the live run's), for the
 record's own kind of group only (a log of untyped "mixed" records gains no typed group). Where those
@@ -607,7 +639,14 @@ All of it is in that method's counted units (ADR-0015 decision 1).
     from unflagged transits only, even while `show_minutes` is false (Q-36);
   - where YOLOX runs at each camera (`yolox device: …`), and `YOLOX STOPPED at <camera>: <why>` once
     its GPU path has stopped;
-  - one line per queue lane (whether it reaches A);
+  - one line per queue lane (whether it reaches A), with the minute it was read and its age once
+    its newest reading is older than the Worker's cycle explains: one cycle (`--queue-every`, or a
+    60-s read plus 15 s to open where that is longer) plus 120 s (`QUEUE_LATE_S`: the cut to the
+    minute, a slower open, and the stream's delay, 5-19 s seen, 45 s allowed as an ASSUMPTION), so
+    240 s at the default (`queue pdn-south-street left-column: no_queue 0 m, read 07:51 UTC, 4 min
+    ago`). A camera whose last cycle failed says so first (`queue pdn-south-street: last cycle failed
+    at 07:54 UTC: TimelineCut: …`) until a reading of it follows. The page's queue cards already
+    show a failed read ("down" or "error", with the message) and mark the lanes stale;
   - the process CPU.
 
   It prints no runner minutes ("now ~N", median transit).

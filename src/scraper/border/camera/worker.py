@@ -420,7 +420,9 @@ class Worker:
     def _fail(self, cam: Camera, phase: str, exc: Exception, was_failing: bool) -> None:
         message = f"{type(exc).__name__}: {exc}"
         self._set(cam, phase=phase, message=message)
-        self._emit({"camera": cam.id, "error": message})
+        # When it failed, by this PC's clock: no frame gives the time of a read that failed.
+        # `camera estimate`'s queue log cuts it to the minute, as every time it writes.
+        self._emit({"camera": cam.id, "error": message, "failed_at": _iso(datetime.now(UTC))})
         if not was_failing:
             self._notify(f"Border camera {cam.id} stopped: {message}")
 

@@ -79,12 +79,18 @@ records), not kept in the repository. No picture was kept or looked at.
    - When something moves at t1 and nothing had for more than 300 s, the stretch from `moved_at` to t1
      becomes a gap, "nothing moved for N s", before that frame reaches the counters. It raises no
      `StreamFrozen` and reopens nothing.
+   - So does a shorter still stretch in which a `StreamFrozen` was taken: it held a freeze throughout.
+     Without this, a freeze ending 5-8 s into the read after a reopen left 0.5-2.6 s past the seam's
+     5-s pad read as empty road (21 of 781 replayed freeze lengths, at 2026-10-27 frame spacing).
 3. **A line is seen only up to its last moving frame.** `seen_until` is the older line's
    min(latest frame, `moved_at`). A still stretch is held, not written as empty road, because a written
    record is never corrected. If something moves within 300 s, the stretch is seen again as a quiet road;
    if not, decision 2 cuts it.
 4. **The take-back is the rule's own.** `StreamFrozen.seconds` says how far back from the last frame the
-   reader's rule judged (20 s today). The runner takes back exactly that.
+   reader's rule judged (20 s today), at its nominal 2 fps. The runner takes back that. The City's 40 pairs
+   span more (p50 20.96 s, at most 21.38 s on 2026-10-27), and a fresh read's check raises only on a full
+   window. So the start of a read that began frozen, and the end of a freeze read after a reopen, fall
+   outside it. The seam's 5-s pad holds the first; decision 2 cuts the rest when something moves.
 5. **Reopening backs off.** After `StreamFrozen` after `StreamFrozen`, the wait before opening the stream
    again doubles: 10, 20, 40, 80, 160, then 300 s (`RECONNECT_MAX_S`). It drops back to 10 s only after a
    read whose frames reaching the runner span 60 s (`RESET_AFTER_S`, ASSUMPTION). A read that ends any
@@ -124,7 +130,7 @@ records), not kept in the repository. No picture was kept or looked at.
   20-30 s. At about 3 cars a minute (ASSUMPTION), a 3-min freeze misses about 9 exits at B, more than the
   3 cars (`OUTLIER_CARS`) an anchor may disagree by. Inside a sure epoch the count then stays sure until
   anchors dispute it. A freeze that repeats exactly is still caught in 20 s. A noisy one longer than 300 s
-  is cut from its last moving frame, across reopens.
+  is cut from its last moving frame, across reopens, unless a car is counted inside it (below).
 - **"Now" lags by the last motion.** At line B at 21:30 traffic, the time from one moving pair to the next
   was p50 0.52 s, p99 8.4 s, at most 16.5 s. With that night's motion bursts thinned to a half and a
   quarter (ASSUMPTION), p99 was 49 s and 112 s, the longest 216 s and 407 s. Where nothing moves for
@@ -134,7 +140,18 @@ records), not kept in the repository. No picture was kept or looked at.
     Its text names only a stream that stopped (Q-28).
   - The behind-live alert reads each line's latest frame, so the hold raises no alert.
 - **A car counted in a frame whose picture barely changed,** after more than 300 s with nothing moving,
-  ends that stretch with a gap that cuts the car too.
+  ends that stretch with a gap that cuts the car too. Counted sooner, it moves `moved_at` on and restarts
+  the 300 s. So a noisy freeze with a car counted in it at least every 300 s, even a false count (a box
+  jittering across a far edge; how often is not measured, ASSUMPTION), reads as a quiet road for as long
+  as it lasts. In a scripted run of the runner (2026-10-27), one crossing 150 s into a 400-s noisy freeze
+  at B left all 400 s written as empty road. Counting only frames that moved would close this. The cost:
+  a line whose cars are counted while its scene stays still for 300 s would be cut (Q-28 (v)).
+- **A freeze's tail after a reopen.** Since decision 2's second bullet, after any `StreamFrozen` the
+  reopened read's first moving frame adds a "nothing moved for N s" gap from `moved_at`. It overlaps the
+  seam's gap and adds no epoch cut, but it adds a reason to the record and can lengthen the cut by a few
+  seconds (13.1 s against the seam's 10.5 s in one replay). If a keyframe moves the frozen picture by
+  0.3 grey or more inside that tail, `moved_at` passes the frozen mark, and 7 of the 781 replayed
+  lengths still left 0.5-2.1 s uncovered (ASSUMPTION that keyframes do this; Q-28 (ix)).
 - **Black that is re-encoded with noise** is caught only by the no-motion gap, not as "is black" in 20 s.
 - **A real recovery can wait up to 5 min** to be read again after a run of freezes. That stretch stays a
   gap.
@@ -149,6 +166,8 @@ records), not kept in the repository. No picture was kept or looked at.
 - **Verification is owed** (Q-32): runs at dusk straddling sunset, deep night, peak, and one under
   `camera estimate`, with numbers-only logging. Until then the still tier's margin, `QUIET_S` and the lag
   rest on one 20-min night sample at line B.
-- **Tests** on 2026-10-27, on scripted frames and readers: `test_border_camera_stream.py` 29,
-  `_hls.py` 33, `_runner.py` 46, `_transit.py` 44. A copy of the runner and transit with each new
-  behaviour broken in turn failed the tests 11 times out of 11.
+- **Tests** on 2026-10-27, on scripted frames and readers, counted with `pytest --collect-only` after
+  the review's fixes: `test_border_camera_stream.py` 31, `_hls.py` 34, `_runner.py` 50, `_transit.py`
+  44 (on 2026-10-28, with ADR-0017's GPU-stop tests and the anchoring bars added: 31, 34, 59, 54). A
+  copy of the runner and transit with each new behaviour broken in turn failed the tests 11 times out
+  of 11.

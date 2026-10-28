@@ -28,6 +28,8 @@ disagree, the commit body is the primary source.
 | [0014](0014-crossing-time-from-two-cameras.md) | Crossing time is measured between a Mexican-side and a US-side camera, by two methods side by side | Accepted |
 | [0015](0015-camera-wait-from-cars-ahead.md) | The camera wait is counted from the cars ahead, one method at a time, and shown only to the owner | Accepted in part (decision 2, display on the owner's PC); decisions 1, 3 and 4, and the not-measured consequence, Proposed |
 | [0016](0016-frozen-when-the-picture-repeats.md) | A whole-scene camera is frozen when its picture repeats; a line where nothing moves is held back, and cut after 300 s | Proposed |
+| [0017](0017-yolox-on-the-gpu.md) | YOLOX-S runs on the NVIDIA GPU by default, only while it finds the CPU's cars, and never takes the CPU's place silently (amends ADR-0014's "run locally on CPU") | Accepted in part (decisions 1, 3 and 5, and decision 2's conditions: the owner's GPU choice); decision 2's limits and decision 4, Proposed |
+| [0018](0018-queue-card-with-the-booth-out-of-view.md) | With the booth out of view, a queue card shows no minutes for an empty lane, and only the line where the camera wait times the road | Proposed |
 
 ## Writing a new one
 

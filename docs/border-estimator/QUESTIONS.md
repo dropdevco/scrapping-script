@@ -124,24 +124,32 @@ Ready 7, SENTRI N/A.
 
 | View | SENTRI | Normal |
 |---|---|---|
-| PDN, Mexican half (`pdn-north`, line A) | lane 5, the roadway past the orange barrels | lanes 1–4 |
+| PDN, Mexican half (`pdn-north`, line A) | lanes 4 and 5, from the white posts to the right curb: one SENTRI lane, split by the orange barrels near the camera (corrected 2026-10-27) | lanes 1–3 |
 | PDN, US half (`city-pdn-north`, line B) | column E, to the right of the white posts along the right railing | the columns left of the posts |
 | Zaragoza bridge, Mexican side (FPFCH "Zaragoza (Vista Norte)") | column D, to the right of the white posts along the barrier | columns A–C |
 | Zaragoza, US booths (City `BridgeZaragoza3`) | not sure; "normally the far left", left of booth lane 1 | — |
 
-At both PDN lines the SENTRI lane is physically separated (barrels at A, posts at B), so SENTRI and normal
+At both PDN lines the SENTRI lane is physically separated (white posts at both), so SENTRI and normal
 cars can be counted and paired separately there. The Zaragoza booth answer is the owner's best recollection,
 not a confirmed one.
 
 **What changed with this answer (2026-10-26):**
 - **Zones are typed.**
-  - `pdn-north`: lane-5 is `sentri`, lanes 1-4 `normal`.
+  - `pdn-north`: lane-5 is `sentri`, lanes 1-4 `normal`. **Corrected 2026-10-27 (owner):** the road
+    at A has 4 car lanes, 3 normal (lanes 1-3, each with its own painted arrow) and 1 SENTRI on the
+    very right; lane-4 and lane-5 are both that SENTRI lane, split by the orange barrels near the
+    camera, so lane-4's zone is typed `sentri` too. Both keep their own strip and zone (one zone over
+    ~9 m would read two cars abreast as one; no quad moved, so the saved loop roads hold). The owner
+    also confirmed the direction: cars drive away from the camera, northbound
+    (`direction_verified: true`).
   - `city-pdn-north`: line B was redrawn as col-1..col-4 (`normal`, left of the posts) and col-e
     (`sentri`, column E).
-  - The queue reader's `pdn-north` strips all keep `cbp_lane` null, lane-5 included: the lane type
+  - The queue reader's `pdn-north` strips all keep `cbp_lane` null, lane-4 and lane-5 included: the lane type
     lives on the count zones. A strip's number is the queue reader's (D+L)/v, which ADR-0015 rejects
-    as a wait, so it is not labelled SENTRI or filed as `car_sentri` until it is checked against
-    timed crossings.
+    as a wait, so it is not filed as `car_sentri` until it is checked against timed crossings. Until
+    2026-10-28 it was not labelled SENTRI on the card either. Since then the card names it
+    "lane-4 · SENTRI" from its zone's type, a label only and shown with no minutes (ADR-0018). That
+    reverses this rule, pending the owner's choice in Q-36(ii).
 - **SENTRI and normal are measured apart.** The runner gives one record per counting method and lane
   type. The exception is the loop's SENTRI at PDN, which is not measured: col-e is counted by yolox
   only (Q-24).
@@ -185,8 +193,8 @@ Neither counter has been checked against a hand count, so no number can be trust
 
 | Lane type | Line A | Line B |
 |---|---|---|
-| SENTRI | lane 5 | column E |
-| Normal | lanes 1-4 | the columns left of the posts |
+| SENTRI | lanes 4 and 5 | column E |
+| Normal | lanes 1-3 | the columns left of the posts |
 
 **How long and when:** 15 min each, in free flow, in stop-and-go and at night.
 
@@ -242,15 +250,16 @@ is separate. While col-e is counted by yolox only, SENTRI has one method and can
 - **(iii) `camera transit`'s status line.** It still prints an ungated "now ~N min" and median
   transit. Should it follow the same rule?
 
-### Q-27. Do SENTRI cars queue with the other cars before lane-5 splits off?
+### Q-27. Do SENTRI cars queue with the other cars before the SENTRI lane (lane-4 and lane-5) splits off?
 
-At `pdn-north`, SENTRI is lane-5, past the orange barrels (Q-22). Sometimes lanes 1-4 back up past the
-camera's near edge onto the Juárez street while lane-5 does not reach line A. The camera wait then
+At `pdn-north`, SENTRI is lane-4 and lane-5, right of the white posts (Q-22, corrected 2026-10-27).
+Sometimes lanes 1-3 back up past the camera's near edge onto the Juárez street while neither lane-4
+nor lane-5 reaches line A. The camera wait then
 cannot tell whether a SENTRI car joining now waits in that street line first.
 - **If SENTRI has its own approach** from the street, its tail before A is 0 then, and the street line
   is the normal lanes' alone.
 - **If it shares the street approach**, its tail includes the street line, the gap, and the run-up to
-  where lane-5 splits off.
+  where the SENTRI lane splits off.
 
 Until this is answered, that tail is not known (a floor of 0). The same holds for the normal group in
 the mirror case.
@@ -301,6 +310,13 @@ count stays sure until anchors dispute it.
 - **(v) A car counted in a still frame.** After more than 300 s with nothing moving, a car counted in a
   frame whose picture barely changed ends that stretch with a gap that cuts the car too. Accept that, or
   take such a crossing as proof that the road was live? **Default:** cut.
+  **And before 300 s** (raised 2026-10-27, after review): a car counted in a frame whose picture did not
+  move still moves `moved_at` on and restarts the 300 s. So a noisy freeze with a count in it at least
+  every 300 s, even a false one, reads as a quiet road for as long as it lasts: in a scripted run, one
+  crossing 150 s into a 400-s noisy freeze at B left all 400 s written as empty road (ADR-0016). Should
+  only frames that moved move `moved_at`? The cost: a line whose cars are counted while its whole scene
+  stays still for 300 s (a standing queue, ASSUMPTION) would be cut. **Default:** a counted car moves it,
+  as built.
 - **(vi) What records now say about gaps.** Each gap's start (to the minute), its length in seconds, and
   its reasons, which can name a segment number ("segment N expired before it was fetched"). Within the
   privacy rule? **Default:** written. The review judged minute-level starts safe.
@@ -311,6 +327,17 @@ count stays sure until anchors dispute it.
   listed when the channel is listed again (that listing is then kept up to 10 min), and an old playlist
   that stalls instead of ending. Drop the listing on every miss too, at the cost of listing the channel
   on every reopen while a stream is down? **Default:** no.
+- **(ix) A freeze's tail after a reopen** (raised 2026-10-27, after review). A still stretch that held a
+  `StreamFrozen` is now cut when something moves, even under 300 s (ADR-0016 decision 2). Two things
+  come with it:
+  - if a keyframe moves the frozen picture by 0.3 grey or more inside that tail, `moved_at` passes the
+    frozen mark, and 7 of 781 replayed lengths still left 0.5-2.1 s read as empty road (ASSUMPTION that
+    keyframes do this). Keep the frozen mark until a run of moving frames instead?
+  - after any `StreamFrozen`, the reopened read's first moving frame adds a "nothing moved for N s"
+    reason and can lengthen the cut by a few seconds (13.1 s against the seam's 10.5 s in one replay),
+    with no extra epoch cut.
+
+  **Default:** both as built.
 
 ### Q-29. Anchoring needs about 3 h uncut: how should runs be made?
 
@@ -319,6 +346,15 @@ An anchor sets the count from nothing only when both ends of its trip lie inside
 **both** lines: about 174 min for a trip T of about 6 min (ASSUMPTION; read it as 150-179 min). Your
 97.5-min run on 2026-10-26 could not have anchored even with no cut. No code change alone lets a run of
 under about 3 h anchor.
+
+**Since 2026-10-28** each transit record's `anchoring`, and the status's and page's bars, show per
+method and group how much of 180 − T the current uncut stretch has run (T the latest measured median,
+or 0 while none is measured) and how many of the 3 enclosed anchors it has. Only an anchored count
+reads 100 %, and only while anchors checked it in the last 60 min (`CHECK_MAX_MIN`; at night it
+falls back to waiting, at most 99 %, as its Now is then not sure). A count carried in and confirmed
+by 3 anchors that follow it is anchored too, with fewer than 3 enclosed. Cuts at line A matter as much as at B: in the daylight run of 2026-10-27 line A was cut 40
+times in an hour, each time by a segment that expired before it was read or frames more than 5 s
+apart. ADR-0017 takes the CPU's load as the cause (ASSUMPTION) and moves YOLOX to the GPU.
 
 - **(a) Run longer, no code.** **Default.** Run `camera transit` or `camera estimate` for at least
   3.5 h, away from sunset: wholly after civil dusk (for example 19:00-22:30 local now) or wholly in
@@ -341,7 +377,8 @@ spans, which neither shows nor rules out 1 %. A 15-min hand count of yolox "norm
 ### Q-30. Was SENTRI open at 21:30 on 2026-10-26, or is col-e in the wrong place?
 
 In the live check of 2026-10-26, 21:32-21:52 local, yolox counted **0 cars** at B's col-e in every
-measured span, while A's lane-5 counted about 1.75 a minute. SENTRI cannot anchor while that holds.
+measured span, while A's lane-5 counted about 1.75 a minute (lane-4 was typed normal then; it is
+SENTRI too since 2026-10-27, so A's SENTRI rate was at least that). SENTRI cannot anchor while that holds.
 - **(a) SENTRI was closed or empty at B then.** CBP's published SENTRI lanes for that hour would tell.
 - **(b) col-e is drawn in the wrong place.** It was drawn from two daylight frames with no car in
   column E (Q-22).
@@ -402,9 +439,141 @@ At PDN the loop does not measure SENTRI (Q-24). Built on 2026-10-27, each as its
 - **(iii) `camera transit`'s logs.** Only `camera estimate` writes `not_measured` into its records. Should
   `camera transit` write it too, so that its logs replay exactly? **Default:** no.
 
+### Q-34. Free flow on the queue cards (ADR-0018)
+
+On 2026-10-27 at 13:45 local your page showed minutes on an empty street at PDN: "under ~18" on a lane
+with no line, and "line 51 m+" for a still 10 m blob 41 m into the view (ASSUMPTION: moved shadows
+or something learnt and since gone; no frame of that column was checked)
+([ADR-0018](../architecture/adr/0018-queue-card-with-the-booth-out-of-view.md), Proposed). Built on
+2026-10-28 while you were away, each as its default:
+- **(i) The crosswalk in the street view.** `pdn-south-street` drops a line starting more than 18 m
+  into the view, and a crosswalk sits about 23-27 m in. Does a signal or a control hold northbound cars
+  there? If so, such a line would read "no line" on the card, and
+  combine's tail before A would be a floor (not known) where it would otherwise time the line from
+  its own head. **Default:** nothing holds cars there.
+- **(ii) 18 m or 15 m?** On the logged hour, 15 m also removes the 19:59 UTC right-column line (the
+  street then blocks the tail in 2 records, not 4), but it sits exactly on Lerdo's one real 15 m clear
+  head (07:16 local, 2026-10-19). **Default:** 18 m, on `pdn-north` and `pdn-south-street` only.
+- **(iii) Lerdo and BOTA** have no camera wait. Should their cards also show the line only, with no
+  minutes, and should they get a head gap once their real heads are logged? **Default:** both kept as
+  they were: (D + L) / v on a card with a line, no head gap.
+- **(iv) Is anything metering northbound cars between the Av. Juárez view and line A** (a toll collected
+  on the Juárez side, a signal, a control point)? It decides whether combine's "metered before A" stays.
+  Dropping it would turn a line held there into a known 0 (on the repo's own simulation, a 30-min tail
+  became 0). **Default:** it stays.
+- **(v) Day and night references.** A reference learnt by day never refreshed at night: false 75 m and
+  50 m+ lines in 16 of 16 windows (ADR-0018). Options:
+  - **(a)** relearn with no held reference once when the light changes, or keep a day and a night
+    reference per lane, chosen by the frame's brightness. A fresh night reference read no false line.
+    Its dawn behaviour is unmeasured, and PDN had a queue at 03:16 local on 2026-10-19 (one night;
+    ASSUMPTION that it is typical), so a relearn during a queue could learn cars;
+  - **(b)** absorb into the reference what stood still for 30 min (fed by regular reads only, never on
+    a lane whose booth is in view, and reporting the lane as not measured for the next 30 min where
+    that removed a line). On renders it hid 0 of 18 stop-and-go reads; a line standing wholly still for
+    about 30 min would be learnt as road;
+  - **(c)** nothing: start each run in a new `CAMERA_STATE_DIR`, in the light it will run in.
+
+  How long do PDN's lanes stand fully still outside closures? That sets (b)'s span. **Default:** (c),
+  as the 3.5-hour night run of 2026-10-28 did.
+- **(vi) ADR-0018 itself.** Accept it, so PDN's cards show measurements only and the minutes come from
+  the camera wait? **Default:** as built, Proposed.
+- **(vii) A run the head gap drops, in the camera wait.** combine counts it as not known (a floor at
+  0) in the tail before A, never a known 0, unless the dropped run ended short of line A
+  (`combine._dropped`). ASSUMPTION: a run far into the view may be a real line held there. On the
+  free-flow hour the review replayed, this keeps more street-blocked floors than reading such runs as
+  free road would (16 records against 4). Or count it as free road, a known 0? **Default:** a floor.
+
+### Q-35. YOLOX on the GPU: the limits of its checks (ADR-0017)
+
+You chose the GPU where it runs better (2026-10-27). Its conditions came from the measurement's review
+([ADR-0017](../architecture/adr/0017-yolox-on-the-gpu.md)); these limits are defaults, each built:
+- **(i) The running check.** One frame in 30 (`CHECK_EVERY`, every 15 s at 2 fps) is also detected on
+  the CPU, and 3 differing checks within 20 (`DIFFER_LIMIT`, `DIFFER_WINDOW`) stop the GPU path. A
+  difference means: count, class or order differ, a box corner moves more than 0.1 px, a score more
+  than 1e-3 or across 0.4, or a raw output more than 1e-3. ASSUMPTION: a real difference is a rare
+  threshold flip (estimated 0.12-0.7 per 1,000 frames), so one alone does not stop a long run, while a
+  broken GPU differs on every check and is stopped within 45 s. Check more often (costing CPU: one
+  check is about 0.8 CPU-s), or stop on the first difference? **Default:** as built.
+- **(ii) After a mid-run stop.** The stop is process-wide: every camera whose YOLOX is on the GPU (both,
+  under `auto`) is a yolox gap for the rest of the run, never restarted on the CPU. Or start a new CPU
+  counter at each, its records labelled `cpu`? **Default:** the gap.
+- **(iii) The device label** is `gpu:<adapter name>`, without the driver version, which is only logged.
+  GPU against GPU was bit-exact on one driver (617.42). Add the driver to the label? **Default:** no.
+- **(iv) A replay of a log with two devices** is refused unless `--device cpu|gpu` picks one. Or grade
+  both side by side in one pass? **Default:** refuse.
+- **(v) Loop records** carry no device, since no YOLOX path touches a loop count. **Default:** yolox
+  records only.
+- **(vi) The `gpu` extra** pulls onnxruntime-directml's listed dependencies (flatbuffers, protobuf,
+  sympy, mpmath), which running the model does not need; the measurement installed it with
+  `--no-deps`. Say `--no-deps` in the install line? **Default:** a plain install.
+- **(vii) ADR-0017 itself.** Accept decision 2's limits ((i), (ii)) and decision 4 ((iii) to (v)) as
+  built, so the whole ADR reads Accepted? **Default:** as built, Proposed.
+- **(viii) The name `unlogged`.** A replay's `--device unlogged` picks the records that name no device
+  (logs from before the device was recorded); a live run refuses it. ASSUMPTION: the name is the
+  review's choice, not yours. **Default:** `unlogged`.
+
+### Q-36. The anchoring bars and the lane labels (2026-10-28)
+
+Progress bars were asked for on 2026-10-28, for future runs. Built as defaults:
+- **(i) The bar's trip T** is the median of the latest 15-min window holding at least 3 unflagged
+  transits, else 0 (which asks for the longest stretch, 180 min). Its needed minutes give T back
+  (180 − needed) on the terminal and the page, even while `show_minutes` is false. Acceptable?
+  **Default:** as built.
+- **(ii) Lane labels.** A queue card now names a lane by its count zone's type, "lane-4 · SENTRI", filed
+  as nothing (`cbp_lane` stays null), with one note on `pdn-north` that lane-4 and lane-5 are one SENTRI
+  lane split by barrels. **This reverses Q-22's "not labelled SENTRI" on the card.** That rule's reason,
+  that the card's number is (D+L)/v, no longer holds at `pdn-north`, whose card shows no minutes since
+  ADR-0018. Keep the label, or go back to "(lane type unconfirmed)"? **Default:** keep it. The split is
+  written in `viewer.py` (`SPLIT_LANES`). Should it be a `cameras.json` field instead (a
+  `calibration.py` change)? **Default:** `viewer.py`.
+- **(iii) When a bar reads 100 %.** A count reads anchored only while anchors checked it in the last
+  60 min (`CHECK_MAX_MIN`); after that it reads waiting, at most 99 %, with the text of a run not yet
+  long enough. A count transit itself calls sure but "continued" also reads waiting. Should the bar
+  follow transit's sureness (`_SURE`) exactly, and should anchors that have gone unchecked get their
+  own text ("anchors last checked N min ago")? **Default:** no to both, as built.
+- **(iv) A camera falling behind.** A stream that is down or a picture that repeats leaves the bar as
+  it was until frames move again; the page flags it stale after 120 s. Should the bar also read
+  broken when a camera's frames are older than `LAG_ALERT_S` by the wall clock? **Default:** no.
+
+### Q-37. Does `lerdo-south-booths` time the wait to CBP, or to the bridge trust's toll gate?
+
+`cameras.json` takes `lerdo-south-booths` (`CYhISA_wFQ8`, "Lerdo (Sur)") as booths in view
+(`booth_distance_m: 0`), with the direction inferred southbound and not confirmed. The camera survey
+of 2026-10-27 (about 13:14 local) found it looks **south over northbound traffic**: two vehicles drove
+toward the camera to the gates in four crops 3 s apart, every pavement arrow points at the camera, its
+on-screen label says "Vista Sur", and the bridge trust labels the stream "Línea Exprés (Vista de Norte
+a Sur)". If these gates are the trust's own toll gates for the SENTRI lane (an inference), a wait read
+there ends at the toll gate, not at CBP, and the component doc's "complete wait" of 1.0-7.6 min
+(2026-10-19) measured that.
+- **(a)** It is the toll gate: give the camera a measured booth distance to CBP (its minutes then
+  become approximate), or keep it as a toll-gate queue only, never a crossing wait.
+- **(b)** It is CBP's booths: confirm the direction (`direction_verified: true`).
+
+**Default:** nothing changed; its readings stay as they are, now marked in doubt in the component doc.
+
+### Q-38. Cameras at the other bridges
+
+The survey of 2026-10-27 found live public cameras at every crossing but Santa Teresa. Only PDN has a
+camera on both sides; nothing else was configured.
+- **(i) Queue cards for Zaragoza and Tornillo?** `KX-bm-Lhy3w` (Zaragoza (Norte), about 4 northbound
+  lanes, the view in which you labelled column D SENTRI, Q-22) and `0gT7jvaLCkg` (Guadalupe (Sur), Tornillo, 4
+  booth lanes toward the camera) were live, with a clear counting line. Cards need only `cameras.json`
+  entries: no City feed, no code and no ADR. They show queue and speed, with approximate minutes from
+  map distances (to CBP, never 0 at Tornillo's toll plaza), never a crossing time. **Default:** not
+  added until you say.
+- **(ii) A Zaragoza pair.** Its only live City feed, `BridgeZaragoza3`, is labelled "Norte a Sur". Does
+  it show northbound cars near the CBP booths, and which lanes are SENTRI? Only you may look, on the
+  City's own page (Q-21); we never fetch or show a City picture for this. If it does, Zaragoza could be
+  the next pair after PDN (ROADMAP 6.12), through a new ADR. **Default:** no look, no pair.
+- **(iii) BOTA** answered "technical difficulties" on all three streams on 2026-10-27, and Stanton's
+  City feeds returned 404, so neither can pair. **Default:** nothing to do.
+
 ---
 
 *Answers recorded 2026-10-12 on branch `chisme-border`; Q-21 on 2026-10-24 and Q-22 on 2026-10-26 on
 `chisme-border-waittime`. Q-23 to Q-26 raised 2026-10-26 with ADR-0015; Q-27 the same day, with the lane-type split.
 Q-28 to Q-33, and the open point in Q-24, raised 2026-10-26/27 from that evening's run and the night's
-live check, with ADR-0016 and the review of methods that are not measured.*
+live check, with ADR-0016 and the review of methods that are not measured. Q-22's line A corrected
+2026-10-27. Q-28 (v) extended and (ix) added, Q-29's progress note, and Q-34 to Q-38 raised
+2026-10-28: from the free-flow review (ADR-0018), YOLOX on the GPU (ADR-0017), the anchoring bars and
+lane labels, and the camera survey of 2026-10-27.*

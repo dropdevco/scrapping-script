@@ -17,7 +17,7 @@ ADR-0015).
 | **Runs** | On a machine we own (Q-3), continuously: `python -m scraper.border camera run` |
 | **Reads** | The FPFCH YouTube live streams (`youtube.com/@fpfch/streams`), found by title. The City of El Paso's bridge cameras (HLS on `zoocams.elpasozoo.org`), for crossing time only: read at the owner's risk and **never displayed** (ADR-0014). The viewer also fetches CBP's published waits each cycle, **for display only**: they never feed the camera estimate |
 | **Writes** | JSON signal lines on stdout; each lane's empty-road reference, `status.json` (what the viewer shows, including `cbp`, `cbp_at`, `cbp_error`) and a heartbeat in `CAMERA_STATE_DIR` (default `~/.chisme/camera`). `camera transit` writes `transit-<date>.jsonl` and each camera's learnt loop roads (`<camera>.loop.npz`) there too. `camera estimate` also writes `queue-<date>.jsonl` and `camera-<date>.jsonl`, and `--replay` writes `camera-replay-<name>.jsonl` |
-| **Install** | `pip install -e ".[camera]"` (OpenCV headless, numpy, yt-dlp); Node on `PATH` for yt-dlp's YouTube extraction; the **ffmpeg** command-line tool on `PATH` (the stamped HLS reader). For the model counter: `yolox_s.onnx` from Megvii's YOLOX 0.1.1rc0 release in `~/.chisme/models/` (sha256 `c5c2d13e…998063`, checked on load) |
+| **Install** | `pip install -e ".[camera]"` (OpenCV headless, numpy, yt-dlp); for YOLOX on the NVIDIA GPU, `pip install -e ".[camera,gpu]"` (onnxruntime-directml 1.24.4, Windows only; `gpu.py`, `--device`, [ADR-0017](../architecture/adr/0017-yolox-on-the-gpu.md)); Node on `PATH` for yt-dlp's YouTube extraction; the **ffmpeg** command-line tool on `PATH` (the stamped HLS reader). For the model counter: `yolox_s.onnx` from Megvii's YOLOX 0.1.1rc0 release in `~/.chisme/models/` (sha256 `c5c2d13e…998063`, checked on load) |
 | **Decision on record** | Reading YouTube streams is against YouTube's terms; the product owner chose to do it (QUESTIONS.md, Q-7). Frames are analysed in memory; the worker and the viewer **never write one**. Only an operator's explicit `camera snapshot --out` or `camera read --debug` writes a single annotated frame, to check a calibration. For a `display: false` camera (the City's) both refuse before opening anything, unless `--calibration` is passed. With the flag, they print the rule: the frame is only for drawing a counting line (owner, 2026-10-26, Q-21), stays outside the repository (a path inside it is refused before any stream opens), is never committed and is deleted after. |
 
 ---
@@ -30,6 +30,7 @@ Needs Python 3.11+ and Node.js on `PATH` (yt-dlp uses it to read YouTube). From 
 python -m venv .venv
 .venv\Scripts\activate                     # macOS/Linux: source .venv/bin/activate
 pip install -e ".[camera]"
+pip install -e ".[camera,gpu]"               # optional: YOLOX on the NVIDIA GPU (ADR-0017)
 python -m scraper.border camera list         # every calibrated camera, and whether its stream is live
 ```
 
@@ -59,10 +60,12 @@ references to `CAMERA_STATE_DIR` (default `~/.chisme/camera`), and alerts Telegr
 goes down or comes back if `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. Only one worker
 (`run` or `view`) can use a `CAMERA_STATE_DIR` at a time; a second one refuses to start.
 
-Every calibrated lane now has a `booth_distance_m`, so every lane can give minutes.
+Every calibrated lane now has a `booth_distance_m`, so every lane's signal can give minutes.
 `lerdo-south-booths` sees its booth, so its distance is exact. The other four cameras' distances
 are **map estimates** (2026-10-22) with a ± and `booth_distance_verified: false`, so their
-minutes are shown as approximate (see [What the viewer shows](#what-the-viewer-shows)).
+minutes are shown as approximate (see [What the viewer shows](#what-the-viewer-shows)). On the
+cards, PDN's lanes (`pdn-north`, `pdn-south-street`) show their line and its speed instead of
+minutes, because the camera wait times their road to the booth ([ADR-0018](../architecture/adr/0018-queue-card-with-the-booth-out-of-view.md), Proposed).
 
 Every live frame is stamped with **when it was captured**, from the stream's own clock (`hls.py`):
 - YouTube: PROGRAM-DATE-TIME plus the frame's PTS;
@@ -95,14 +98,16 @@ frame ──► image grey + edges ──► warp each lane into a strip (booth 
                                    ▼
    queue  = run of metres occupied ≥ half the window, gaps ≤ 9 m, at least 60 % of its
             metres queued and occupied ≥ 67 % of the window on average. With the booth in
-            view it must start at the booth end; otherwise any such run ≥ 10 m counts. Its
-            length is always counted from the strip's booth end
+            view it must start at the booth end; otherwise any such run ≥ 10 m counts, up to
+            the camera's max_head_gap_m into the view where cameras.json sets one (see
+            below). Its length is always counted from the strip's booth end
    speed  = time-averaged speed of what is inside the queue, stationary cars included
             (the worker publishes a 15-minute rolling average of it)
    wait   = (distance from strip to booth + visible queue) ÷ speed
 ```
 
-Three choices in that pipeline were made on real footage, not in advance:
+Four choices in that pipeline were made on real footage, not in advance (the fourth from a logged
+hour's readings):
 
 - **Structure, not brightness.** At night the empty road has no single brightness: the
   headlights of whatever is queued nearby light it. The same empty Paso del Norte (Sur) street
@@ -117,6 +122,19 @@ Three choices in that pipeline were made on real footage, not in advance:
 - **A queue is dense.** Static clutter (a vendor's cart, people standing in the street) made
   islands that the gap rule chained together. Every real queue in the labelled rounds was at
   least 70 % queued metres; every false one was under 50 %.
+- **A line starts near the view's booth end, where the camera says so.** `max_head_gap_m` in
+  `cameras.json`, 18 m on `pdn-north` and `pdn-south-street` only: with the booth out of view, the
+  nearest run that would be a line is no line if it starts further into the view than that (a blob
+  nearer the booth end, too short or sparse to be a line itself, such as a parked object, does not
+  carry it), and the reading logs the run it dropped as `far_run_m`
+  ([ADR-0018](../architecture/adr/0018-queue-card-with-the-booth-out-of-view.md)
+  decision 3). In the free-flow hour of 2026-10-27 (19:05-20:01 UTC), 11 of 14 lines on empty lanes
+  started 20-41 m into the view; the 3 left start 0, 1 and 18 m in. ASSUMPTION: 18 m is fitted to that
+  hour, with one real point beside it (`lerdo-north`'s 15 m clear head at 07:16 local, 2026-10-19).
+  It also drops a line held inside the street's view (a crosswalk about 23-27 m in: Q-34), which
+  combine would otherwise time from its head: combine counts a dropped run as a floor in its tail
+  before A, never a known 0, unless it ended short of line A (`combine._dropped`; ASSUMPTION,
+  Q-34(vii)). In effect since 2026-10-28, when `calibration.Camera` began reading the field.
 
 A photometric correction (matching the scene's brightness outside the lanes) was also built
 and scored. It made the result worse and is not used.
@@ -167,17 +185,30 @@ published `low`–`high`. A queue running past the view is published with its `l
 ### What the viewer shows
 
 The viewer (`camera view`) gives a number whenever one can be stood behind, and says what kind
-of number it is. `worker.lane_summary` decides; the page only prints it.
+of number it is. `worker.lane_summary` decides; the page only prints it. With the booth out of view
+it shows no minutes where nothing in view can be timed, nor on a camera whose road on to the booth
+the camera wait times ([ADR-0018](../architecture/adr/0018-queue-card-with-the-booth-out-of-view.md),
+Proposed, 2026-10-28). Which cameras those are is read from `pairs.json` (each pair's `a` and
+`street`: `pdn-north`, `pdn-south-street`) when the Worker starts.
+
+A lane with no CBP lane is named by its camera's count zone of the same lane name: `lane-1 · normal`,
+`lane-4 · SENTRI` (`pdn-north`). Where no typed zone exists (`pdn-south-street`, Lerdo, BOTA) it keeps
+`(lane type unconfirmed)`. It is a label only: `cbp_lane` stays null on every strip, so no reading is
+filed as SENTRI. `pdn-north`'s card says once that lane-4 and lane-5 are one SENTRI lane, split by
+barrels near the camera (`viewer.SPLIT_LANES`, shown only while `cameras.json` types both
+`sentri`). The labels come from the Worker's cameras; a page that reads `status.json` from file has
+none.
 
 | Shown | When | How |
 |---|---|---|
 | `12 min` | A queue, booth in view | The 15-minute rolling wait. With the booth in view the scale cancels, so it is never marked approximate |
-| `≈ 12 min`, range `9–16` | A queue, booth out of view | The rolling wait and its range. It is always approximate: the line under it says "road out of view assumed to move like the line in view", plus a map-estimated distance or an unverified scale where those apply. A line running past the view has no high end, so no range is printed, and its minutes stop at the edge of the view: the line under it also says "the line past the view not counted" |
+| `≈ 12 min`, range `9–16` | A queue, booth out of view, on a camera with no camera wait (`lerdo-north`, `bota-south-approach`) | The rolling wait and its range. It is always approximate: the line under it says "road out of view assumed to move like the line in view", plus a map-estimated distance or an unverified scale where those apply. A line running past the view has no high end, so no range is printed, and its minutes stop at the edge of the view: the line under it also says "the line past the view not counted" |
 | `≥ 9 min` | The line runs past the edge of the view, booth in view | A floor, stated at its range's **low** end, not at the central wait |
-| `3 min` (or `≈ 3`) with "this minute's line" | A line in view, but too few motion samples this minute to time it | This minute's line, timed at the last 15 minutes' speed. Never an older line's wait: a short line at the booth is always too short to time, and showing a long line's wait from ten minutes ago would be wrong exactly when the line has cleared |
+| `3 min` (or `≈ 3`) with "this minute's line" | A line in view, but too few motion samples this minute to time it (booth in view, or a camera with no camera wait) | This minute's line, timed at the last 15 minutes' speed. Never an older line's wait: a short line at the booth is always too short to time, and showing a long line's wait from ten minutes ago would be wrong exactly when the line has cleared |
 | `0 min` | No queue, booth in view | — |
-| `under ~20 min` | No queue in view, booth out of view | A line could still wait between the view and the booth. It would be shorter than that stretch, so it is (distance + uncertainty) timed at the **slowest** recent queue speed among this camera's lanes that are moving at all, × 1.25 while the scale is unverified. It is "probably under", not a strict bound: a hidden line could move slower still |
-| `—` and a reason | No booth distance; a queue that has not moved in its recent readings; a line too short or too still to time with no recent speed on that lane (speed is timed only on 12 m segments wholly inside the line, so a line under 12–18 m is never timed); no recent queue on this camera to time a hidden line by; too few frames | — |
+| `no line` | No queue in view, booth out of view | No minutes. The line under it names the road on to the booth and what times it: "the 365 m to the booth are out of view: the camera wait times them" on a camera of a pair (`pairs.json` `a` or `street`: `pdn-north`, `pdn-south-street`); "…; nothing here times them" elsewhere (`lerdo-north`, `bota-south-approach`). Until 2026-10-28 this was `under ~N min`, (distance + uncertainty) at the slowest recent queue speed: (D + L) / v with L = 0, the form ADR-0015 rejects; on 2026-10-27 it read 18-41 min on empty lanes |
+| `line 51 m+` | A line, booth out of view, on a camera of a pair (`pdn-north`, `pdn-south-street`) | Its length, and its speed or that it is not moving; no minutes: the wait is the camera wait's (ADR-0015). Its signal still carries (D + L) / v (`signal_from_roll`), which is filed under no CBP lane while the strip's `cbp_lane` is null; a test fails if one is typed. `lerdo-north` and `bota-south-approach` keep `≈ N` (Q-34) |
+| `—` and a reason | No booth distance with a line in view (with no line: `no line` and "booth distance not measured"); too few frames; and, with the booth in view or on a camera with no camera wait, a queue that has not moved in its recent readings, or a line too short or too still to time with no recent speed on that lane (speed is timed only on 12 m segments wholly inside the line, so a line under 12–18 m is never timed) | — |
 
 Under each bridge, CBP's own published waits are printed for comparison. They are fetched in
 parallel with the cameras, with one short attempt, and never feed the camera number.
@@ -211,8 +242,10 @@ retrying. One camera failing, for any reason, never stops the others or the work
 line on one camera (A) to a counting line on another (B). Today the only pair is Paso del Norte
 northbound:
 - **A** is on FPFCH `pdn-north`, the Mexican half of the bridge: a 1.5 m band across all five
-  lanes, 66-67.5 m from the strips' booth end. Lane-5 (past the orange barrels) is `sentri`, and
-  lanes 1-4 are `normal` (Q-22).
+  strips (four lanes), 66-67.5 m from the strips' booth end. lane-4 and lane-5, right of the white
+  posts, are `sentri`: one SENTRI lane split by the orange barrels near the camera, kept as two zones
+  so the loop does not read two cars abreast as one. lanes 1-3 are `normal` (Q-22, corrected by the
+  owner 2026-10-27).
 - **B** is on the City of El Paso's `bridgepdn1` (camera `city-pdn-north`, `display: false`), the
   US half.
   - **How it was drawn:** redrawn on 2026-10-26 from two daylight frames, by the owner's leave, with
@@ -255,7 +288,7 @@ never mixed:
 | Method | How a car is counted | Known limits (rendered scenes and simulations) |
 |---|---|---|
 | `loop` (`loop.py`, deterministic) | A virtual loop per zone: each car's back edge is followed through the zone against a learnt empty road, and counted when it crosses the far edge | 0 missed and 0 false in rendered stop-and-go and crawls with 1-2 m gaps. With staggered starts, as real queues start (each car 1-2 s after the one ahead), 2 of 1522 missed and 5 false. But the rendered cars are flat, so no car hides the road. From `pdn-north`, which sees the traffic from behind, a stopped car hides roughly 1.5-2.5 m of road ahead of its bumper at line A (ASSUMPTION: camera pose from the unverified 10.5 × 30 m rectangle, typical car shapes). With that road painted over, the loop counted cars with 1.1 m of road showing and none with 0.5 m, so stopped gaps under about 2.5-3.5 m may read as one car. That result does not carry over to line A until line A is hand-counted. Cars 0.5 m apart read as one. Half the resolution misses most. At line A as drawn it misses cars in free flow from about 5 m/s: about 30 % at 5-6 m/s with random gaps (a 3 m zone missed none up to 6 m/s). Learns the empty road from near-empty moments only, and stays "learning" (a gap) until the lane clears. A road learnt wrong (a queue standing still through the first learning, a repair patch, a nudged camera) is replaced only after about 32 minutes of one unchanging picture (ASSUMPTION: no queue stands wholly still that long); until then the zone counts short while it says "counting" (rendered: 27 of 54 missed). A car already in a zone when counting resumes after any gap came in unseen and is never counted, as with `yolox`. No gap is reported for it, since `transit` sets the next epoch's offset afresh (in simulation, a gap for it made no unflagged number closer to the truth) |
-| `yolox` (`detect.py`, YOLOX-S) | Car, truck and bus boxes in the zones' tiles, tracked frame to frame, counted when a track crosses the far edge | Not trusted above 8 m/s. At line A as drawn, short from about 6 m/s: in simulation with its 9.1 m of road in view, 8 of 87 lost at 8 m/s and 19 of 95 at 12 m/s (with 18 m in view, 0 and 2 of 96). Not trusted in creeping queues until a hand count at line A settles it: in `detect.py`'s simulation at 0.5 m/s, boxes jittering by 1.5 px at `pdn-north` counted 9 of 66 cars twice and lost 18 (14 % short); with jitter of 2 % of a box and 1 box in 4 missed, 0 twice and 2 lost. How much real YOLOX boxes jitter has not been measured. About 0.3 CPU-s a model pass; line A at `pdn-north` takes two passes a frame |
+| `yolox` (`detect.py`, YOLOX-S) | Car, truck and bus boxes in the zones' tiles, tracked frame to frame, counted when a track crosses the far edge | Not trusted above 8 m/s. At line A as drawn, short from about 6 m/s: in simulation with its 9.1 m of road in view, 8 of 87 lost at 8 m/s and 19 of 95 at 12 m/s (with 18 m in view, 0 and 2 of 96). Not trusted in creeping queues until a hand count at line A settles it: in `detect.py`'s simulation at 0.5 m/s, boxes jittering by 1.5 px at `pdn-north` counted 9 of 66 cars twice and lost 18 (14 % short); with jitter of 2 % of a box and 1 box in 4 missed, 0 twice and 2 lost. How much real YOLOX boxes jitter has not been measured. On the CPU 0.3-0.34 CPU-s a model pass on 2026-10-24 (`detect.py`), and 0.41 at 4 threads in ADR-0017's measurement of 2026-10-27/28; line A at `pdn-north` takes two passes a frame (0.82 CPU-s in that measurement). On the GPU (`gpu.py`, [ADR-0017](../architecture/adr/0017-yolox-on-the-gpu.md)) about 0.006 CPU-s a pass, plus a CPU re-check of one frame in 30 (about 0.8 CPU-s a check, 0.027 CPU-s a frame on average); the same boxes as the CPU on every live frame measured, but not bit-identical, so its counts are never graded with the CPU's |
 
 Line A as drawn is 1.5 m long with about 9.3 m of road (nominal) in view below it, which breaks
 `detect.py`'s rule for drawing zones (a car seen whole in 3 frames before the zone) above about
@@ -279,7 +312,11 @@ no transit spans one. Every one of these is a gap, never "no cars":
 - nothing moved at the line for more than 300 s (`QUIET_S`, ASSUMPTION): no frame whose picture
   moved (`hls.Stamped.moved`: the clock ticked, or the whole scene changed by 0.3 grey) and no car
   counted there. Once something moves again, the stretch from the last frame that moved becomes a
-  gap, "nothing moved for N s", and the cars in it are cut out;
+  gap, "nothing moved for N s", and the cars in it are cut out. So does a shorter one that held a
+  `StreamFrozen`: a fresh read's check raises only on a full window, so the end of a freeze read
+  after a reopen was never taken back;
+- for `yolox` at one camera, from the frame before its GPU path stopped (`GpuFailed`) to the end of
+  the run: "YOLOX stopped: …" ([ADR-0017](../architecture/adr/0017-yolox-on-the-gpu.md));
 - frames more than 5 s apart, or a stamp that does not move forward, found by the counters
   themselves;
 - for `loop`, a zone still learning its road.
@@ -333,8 +370,10 @@ What is written: one record per method and lane-type group per minute to
 `CAMERA_STATE_DIR/transit-<date>.jsonl`.
 It holds counts, rates, transit statistics per 15-minute window, epochs, each line's unseen
 stretches (`gaps_a`, `gaps_b`: the minute each began, its length in seconds as the epochs were cut,
-that is padded and merged, and its reasons), and how many times each line's stream was opened again
-since the runner started (`reconnects_a`, `reconnects_b`): derived numbers only. A window with fewer
+that is padded and merged, and its reasons), how many times each line's stream was opened again
+since the runner started (`reconnects_a`, `reconnects_b`), how far its latest epoch has come towards
+anchoring (`anchoring`, below), and, on a yolox record, which path counted at each camera
+(`devices`, below): derived numbers only. A window with fewer
 than 3 transits gets no median or percentiles. That ties no written time to a car, but it is not
 anonymity: with 3, the median and percentiles give the three times back. Times that could be a
 car's own are cut to the minute (`seen_until`, `now.at`, an epoch's edges, a gap's start). A gap's
@@ -368,7 +407,8 @@ This is **not the full wait, and not a bound on it**:
   booth after B.
 - It is read by exit: it is the A→B time of cars that crossed A about one transit earlier. In a
   queue that is clearing, a car entering now takes less.
-- SENTRI (A lane-5, B col-e) and normal (A lanes 1-4, B col-1..col-4) are measured apart (Q-22).
+- SENTRI (A lane-4 and lane-5, B col-e) and normal (A lanes 1-3, B col-1..col-4) are measured apart
+  (Q-22).
   Normal pools CBP's standard and Ready (ASSUMPTION), so within it the pairing holds only while
   those two do not reorder between A and B. The rest of this point applies to a pooled ("mixed")
   pair. The pairing of the
@@ -395,8 +435,8 @@ This is **not the full wait, and not a bound on it**:
 ## Combined estimate (`camera estimate`)
 
 ```bash
-python -m scraper.border camera estimate     # --port 8090 --every 60 --queue-every 120 --methods loop,yolox
-python -m scraper.border camera estimate --replay transit-<date>.jsonl --queue queue-<date>.jsonl [--methods loop,yolox]
+python -m scraper.border camera estimate     # --port 8090 --every 60 --queue-every 120 --methods loop,yolox --device auto|gpu|cpu
+python -m scraper.border camera estimate --replay transit-<date>.jsonl --queue queue-<date>.jsonl [--methods loop,yolox] [--device cpu|gpu|unlogged]
 ```
 
 `camera estimate` ([ADR-0015](../architecture/adr/0015-camera-wait-from-cars-ahead.md)) is one process
@@ -408,13 +448,37 @@ PDN northbound, per lane-type group, side by side and never averaged.
   and `transit` refuse while it runs, and it refuses while any of them runs.
 - **The counters.** `TransitRunner(pdn-north, city-pdn-north)`, as `camera transit` runs it, with both
   methods by default.
+- **Where YOLOX runs.** `--device auto|gpu|cpu` on `camera estimate` and `camera transit` (default
+  `$CHISME_YOLOX_DEVICE`, else `auto`: the GPU when it passes `gpu.py`'s checks, else the CPU with a
+  warning; [ADR-0017](../architecture/adr/0017-yolox-on-the-gpu.md)). An explicit `gpu` the GPU
+  refuses stops the command before anything is read, with a message, and lets go of the locks. A GPU
+  path that stops mid-run (`GpuFailed`: a failed run, a bad output, or 3 differing CPU re-checks
+  within 20) stops for the whole process (`gpu.STATE`): every camera whose YOLOX runs on the GPU
+  drops its YOLOX counter at its next frame, for the rest of the run: its line is a yolox gap
+  ("YOLOX stopped: …") from its frame before, never counted on the CPU instead, and the loop goes on.
+  Before 2026-10-28 such a stop fell into the reader's catch-all and reopened the stream on every
+  frame, darkening both methods. Each yolox record carries `devices`: per camera `device` (`cpu` or
+  `gpu:<adapter>`), on the GPU `cpu_checked` and `cpu_differed`, and after a stop `stopped` and
+  `stopped_at` (to the minute). So does the camera record's yolox entry.
+- **Anchoring progress.** Each transit record carries `anchoring` (`transit.anchoring`):
+  - `state`: `anchored` (the latest epoch's count set by anchors, or given), `waiting`, or `broken` (a
+    gap at either line runs to the end of what is measured);
+  - `unbroken_min`, the latest epoch at both lines;
+  - `needed_min`: 2 × 90 − T, with T (`transit_min`) the median of the latest 15-min window holding at
+    least 3 unflagged transits, at most 90; with none, T = 0 and `transit_assumed`;
+  - `percent`, rounded down, at most 99 until anchored and 0 when broken;
+  - `enclosed` and `min_anchors`.
+
+  The status shows it as a bar under each count line, and the page as a bar per group and method,
+  with one note saying what it is. It says nothing of whether a wait is right.
 - **The queue reader.** A `Worker` on `pdn-north` and `pdn-south-street`, with 60 s reads every 120 s.
   A `display: false` camera is never given to it. So `pdn-north` is pulled twice, once by the runner
   and once by the Worker (the owner's OK, 2026-10-26), and the City once.
 - **The page.** The existing page on 127.0.0.1, with a "camera estimate" section fed from
   `/estimate.json`.
 - **Threads.** `cv2.setNumThreads(4)`, the thread count `detect.py`'s timings were taken at.
-  `--methods loop` is the fallback if the CPU falls behind. It gives no SENTRI wait while col-e is
+  YOLOX on the GPU is the first relief if the CPU falls behind (ADR-0017); `--methods loop` is the
+  fallback where there is no GPU path. It gives no SENTRI wait while col-e is
   counted by yolox only (Q-24): SENTRI then shows only "—, not measured".
 
 **Each tick (every `--every` s):**
@@ -450,7 +514,13 @@ midnight (one `--queue` file). It uses each tick's logged `not_measured`. For a 
 record's own kind of group only (a log of untyped "mixed" records gains no typed group). Where those
 are not the live run's, the replay can differ in the methods it lists as not measured, and a method
 they now refuse is listed so even where the run measured it. It reads files with or without a BOM,
-and skips unreadable lines.
+and skips unreadable lines. A replay grades the yolox records of one path only (`replay_device`): a
+log whose yolox records name more than one (`combine.record_device`: `cpu`, `gpu:<adapter>`, or
+`device not logged` for older records) is refused unless `--device cpu` or `--device gpu` picks
+one (`--device unlogged` picks the records that name none), and the others are listed as not
+measured in their ticks ("counted on …; this replay grades …
+only (--device)"). `self_check` grades each path apart (`yolox/<group> on <device>`). Here
+`--device` never reads `$CHISME_YOLOX_DEVICE`.
 
 **The wait (`combine.py`, pure).** For each group and method:
 
@@ -499,6 +569,9 @@ All of it is in that method's counted units (ADR-0015 decision 1).
 - **The page also shows**, per group:
   - each stretch through the same rule (A→B gated by its count; the tail and B→booth not);
   - the count's source and sd;
+  - each method's anchoring bar and its line of text, with one note for the section saying what the
+    bars are (`viewer.ANCHOR_NOTE`);
+  - where YOLOX ran (`device_text`), and a flag once its GPU path stopped;
   - the flags;
   - the agreement and vote reasons;
   - CBP's published wait (SENTRI beside "sentri", standard and Ready beside "normal"). It is for
@@ -508,6 +581,17 @@ All of it is in that method's counted units (ADR-0015 decision 1).
   - each stream's seconds behind live, errors and loop learning, then ", nothing moved for N s"
     while a line has been held 10 s or more, and ", reopened Nx" once its stream was opened again;
   - the counts and rates per method and group, with the epoch source and sd;
+  - under each record's count line, its anchoring bar, for example `anchoring loop  normal
+    [#####.....] 58% 101/174 min, anchors 1/3`. A count carried in and confirmed by the anchors that
+    follow it reads `100%: anchored, the count carried in confirmed by distinctive cars that follow
+    it`; anchors that have not checked the count for 60 min (`CHECK_MAX_MIN`, at night) read waiting,
+    at most 99 %, as the Now is then not sure; and once YOLOX has stopped, a broken yolox bar reads
+    `broken for the rest of this run: YOLOX stopped, its line unseen (YOLOX STOPPED)`. A stream down
+    or a still picture keeps the bar as it was until frames move again (the page flags it stale
+    after 120 s). Its needed minutes give T back (180 − needed),
+    from unflagged transits only, even while `show_minutes` is false (Q-36);
+  - where YOLOX runs at each camera (`yolox device: …`), and `YOLOX STOPPED at <camera>: <why>` once
+    its GPU path has stopped;
   - one line per queue lane (whether it reaches A);
   - the process CPU.
 
@@ -518,6 +602,9 @@ All of it is in that method's counted units (ADR-0015 decision 1).
 - **City refuses us (401/403).** Line B stops for good and is never retried. From then on no transit
   or camera line is written, one alert says so, and the page shows no total.
 - **A line falls more than 120 s behind live** (ASSUMPTION). One alert, and one more when it catches up.
+- **YOLOX's GPU path stops.** The stop is process-wide: one alert per camera on the GPU (both, under
+  `auto`), never cleared: its yolox count there is a gap for the rest of the run, never made on the
+  CPU instead; the loop goes on.
 - **A line's stream stops without a refusal.** Each tick re-measures its last minute (for up to 3 h,
   `SIGNATURE_TTL_S`). The page flags the wait "Stale: the slower counting line is N min behind live"
   once the record is more than 120 s (ASSUMPTION, `LAG_ALERT_S`) behind its tick. Times are cut to the
@@ -603,7 +690,7 @@ Internacional".
 | `0Pg3S6s76IE` | Paso del Norte (Norte) | 240202 | live | Northbound bridge carriageways from the Juárez end, booths out of view | `pdn-north` (5 lanes) |
 | `IcvugJWPXz8` | Paso del Norte (Sur) | 240202 | live | The Juárez street feeding the bridge; the queue drives toward the camera | `pdn-south-street` (2 columns) |
 | `sOHFG6_3zAs` | Lerdo (Norte) | 240204 | live | Northbound roadway on the Lerdo–Stanton bridge | `lerdo-north` |
-| `CYhISA_wFQ8` | Lerdo (Sur) | 240204 | live | Gates staffed by officers, traffic driving toward them; direction inferred southbound, not confirmed | `lerdo-south-booths` (2 lanes, **booth in view**) |
+| `CYhISA_wFQ8` | Lerdo (Sur) | 240204 | live | Gates staffed by officers, traffic driving toward them; direction inferred southbound, not confirmed (2026-10-27: it looks south over **northbound** traffic, Q-37) | `lerdo-south-booths` (2 lanes, **booth in view**) |
 | `RVXhhbkBGbI` | Lerdo (Fila) | 240204 | live | Labelled "queue view"; which lane is the queue is not identifiable at night | — |
 | `mp3RS0y77tY` | Córdova–Américas (Norte) | 240201 | live | Seen only as a thumbnail so far | — |
 | `CZM5TpXLzE8` | Córdova–Américas (Sur) | 240201 | live | Approach road, bridge behind the camera; the queue drives toward it | `bota-south-approach` (2 lanes) |
@@ -620,25 +707,43 @@ Internacional".
 No stream covers **Santa Teresa / San Jerónimo**. The BOTA streams carry a banner saying the
 bridge is not administered by FPFCH.
 
+**Rechecked 2026-10-27, about 19:00-19:14 UTC** (a camera survey; "live" is YouTube's listing, and a
+current frame was taken from each live Juárez-side stream; no City picture was fetched):
+- **Live then:** Zaragoza (Norte) `KX-bm-Lhy3w`, (Sur) `GC5RY3zipa4`, Waterfill `o5h9RB7qwY8`, both
+  cargo views (`707L8Qkhh9E`, `HCMKTKZKqq4`; the frames and the bridge trust's page agree, and the
+  YouTube titles are the ones with the directions swapped), and both Guadalupe–Tornillo streams
+  (`8u-hBawdG8c`, `0gT7jvaLCkg`), so the "down" above no longer holds. `ZZFgkly8XyE` had ended. All
+  three BOTA streams answered "technical difficulties", `CZM5TpXLzE8` (`bota-south-approach`)
+  included, on three checks that day.
+- **`lerdo-south-booths` looks south over northbound traffic.** Two vehicles drove toward the camera
+  to the gates in four crops 3 s apart, the pavement arrows point at the camera, and the bridge
+  trust labels the stream "Línea Exprés (Vista de Norte a Sur)". If these are the trust's own SENTRI
+  toll gates (an inference), its `booth_distance_m: 0` is wrong and its waits end at the toll gate,
+  not at CBP (Q-37).
+- **No new pair is possible yet.** Zaragoza's only live City feed, `BridgeZaragoza3`, is labelled
+  north to south; the City's Stanton feeds and Zaragoza 1-2 returned 404. Tornillo and BOTA have no
+  US-side camera, and no public camera was found for Santa Teresa (Q-38).
+
 ---
 
 ## Verification status
 
 | What | How it was checked | Result |
 |---|---|---|
-| Rectification, occupancy, motion, window logic, the range | 41 tests on rendered perspective queues of known length and speed, plus the range, calibration fields and saved references (`tests/border/test_border_camera.py`) | Speed 0.99–1.04× truth from 0.1 to 3 m/s; length within ±5 m; scale cancels; the range widens by the distance's ± and by the 25 % scale slack only when the booth is out of view; a stale or corrupt reference is replaced without a crash on Windows; learning one lane leaves the others' saved road untouched |
-| Stream handling | 29 tests against small recorded videos, synthetic frames and a mocked channel (`test_border_camera_stream.py`, 2026-10-27) | Down / frozen / lost all raise. A synthetic quiet road, whose frames never repeat, never reads as frozen (a live one at dusk is unchecked, Q-32); a third of 20 s of pairs repeating exactly does; a stopped clock does though no two frames repeat; a whole scene read faster than 2 fps is refused before anything opens; each frame says whether it moved; a failed resolve, or a read that found its stream gone, lists the channel afresh |
-| What the viewer shows, and the worker | 31 tests (`test_border_camera_viewer.py`) | Every row of [What the viewer shows](#what-the-viewer-shows); the published signal pairs the rolling wait with its own range; an unexpected failure, a closed output or a full disk marks the camera `error` and the worker carries on; CBP is fetched alongside the cameras; one worker per state folder |
+| Rectification, occupancy, motion, window logic, the range | 59 tests on rendered perspective queues of known length and speed, plus the range, calibration fields, saved references, the queue-run rules and the max head gap, read from `cameras.json` and refused when negative (`tests/border/test_border_camera.py`, 60 on 2026-10-28) | Speed 0.99–1.04× truth from 0.1 to 3 m/s; length within ±5 m; scale cancels; the range widens by the distance's ± and by the 25 % scale slack only when the booth is out of view; a stale or corrupt reference is replaced without a crash on Windows; learning one lane leaves the others' saved road untouched |
+| Stream handling | 31 tests against small recorded videos, synthetic frames and a mocked channel (`test_border_camera_stream.py`, 2026-10-27) | Down / frozen / lost all raise. A synthetic quiet road, whose frames never repeat, never reads as frozen (a live one at dusk is unchecked, Q-32); a third of 20 s of pairs repeating exactly does; half a grey level over the whole scene moves and a fifth does not (the bar the runner's `QUIET_S` was measured with); a pair changing by one pixel is never frozen (compared at 320×180); a stopped clock does though no two frames repeat; a whole scene read faster than 2 fps is refused before anything opens; each frame says whether it moved; a failed resolve, or a read that found its stream gone, lists the channel afresh, and a transient failure (HTTP 503, in `test_border_camera_hls.py`) keeps the listing |
+| What the viewer shows, and the worker | 57 tests (`test_border_camera_viewer.py`, 2026-10-28) | Every row of [What the viewer shows](#what-the-viewer-shows); which cameras hand the wait to the camera wait (`pairs.json`), and that no strip of theirs has a `cbp_lane`; the lane labels from the count zones and the one note on `pdn-north`'s split SENTRI lane; the anchoring bar and its text; the published signal pairs the rolling wait with its own range; an unexpected failure, a closed output or a full disk marks the camera `error` and the worker carries on; CBP is fetched alongside the cameras; one worker per state folder |
 | Queue vs. no queue on real footage | 45 lane-rounds hand-labelled from nine 20-minute rounds of PDN north (3 lanes) and PDN south (2 columns), 02:16–04:56 local on 2026-10-19, 21 queued. Each round read with a reference learnt only from the rounds before it, as the worker would have it. The structure test, the emptiest-moment references, `QUEUE_DENSITY` and `RUN_OCCUPANCY` were all chosen against these same labels, so this is a score on the tuning set, not a held-out result | **40/40** under the current queue rules (commit `47df461`; `measure.py`'s queue rules have not changed since). **39/40** under the rules before it (`7515bec`): the miss was PDN south, left column, 02:36, with one 45 s clip of history. Round 1 has no history and is not scored |
 | Speed on real footage | First and last frames of each clip compared by eye | Stalled lanes read 0.00–0.03 m/s; a lane that advanced about one car length (7–10 m) in 44 s read 0.16–0.23 m/s. Absolute metres are nominal until a calibration's scale is verified |
-| The camera estimate: the wait, the command, the page section, the refusal of City frames | 2026-10-26, updated 2026-10-27, on simulated or scripted inputs only, with no stream: 35 tests (`test_border_camera_combine.py`) on `queue_sim.py`'s first-in-first-out bottleneck through the real `transit.measure`; 23 (`test_border_camera_estimate.py`) with fake runner and worker; 10 in the viewer's `EstimateSection`; 7 in the reader's `HiddenFrames` | With K_eff timed in the simulation, the total is within 5 % of the simulated truth, with the line wholly past A and with it straddling A. With half the cars counted at B, A→B stays within its range, and a K of real cars reads 1/p_B (2×) high. Replay equals the live records when every reading was logged before its tick, and keeps two ticks at one `seen_until` apart; a test pins the known difference (a reading logged after its tick). A replay lists as not measured what the log says, whatever its `--methods`; a log without it is rebuilt, and gains no typed group if its records are "mixed". A not-measured method keeps its place in the methods' order, wins over a record of its own, and shows why, with no count line. A run that measures no group says so. The City is refused without `--calibration`, and with it when the file would land inside the repository. Not yet run live; nothing against a hand count or a timed crossing |
+| The camera estimate: the wait, the command, the page section, the refusal of City frames | 2026-10-26, updated 2026-10-27, on simulated or scripted inputs only, with no stream: 40 tests (`test_border_camera_combine.py`) on `queue_sim.py`'s first-in-first-out bottleneck through the real `transit.measure`; 34 (`test_border_camera_estimate.py`) with fake runner and worker; 10 in the viewer's `EstimateSection` and 2 in `AnchoringBars`; 7 in the reader's `HiddenFrames` (counts of 2026-10-28) | With K_eff timed in the simulation, the total is within 5 % of the simulated truth, with the line wholly past A and with it straddling A. With half the cars counted at B, A→B stays within its range, and a K of real cars reads 1/p_B (2×) high. Replay equals the live records when every reading was logged before its tick, and keeps two ticks at one `seen_until` apart; a test pins the known difference (a reading logged after its tick). A replay lists as not measured what the log says, whatever its `--methods`; a log without it is rebuilt, and gains no typed group if its records are "mixed". A not-measured method keeps its place in the methods' order, wins over a record of its own, and shows why, with no count line. A run that measures no group says so. The City is refused without `--calibration`, and with it when the file would land inside the repository. Each yolox record, the camera record, the status and the page name the device; a replay refuses a log of two devices unless `--device` picks one, and lists the other's yolox records as not measured; `self_check` grades each device apart. A GPU refused at start stops `camera estimate` and lets go of both locks. Run live on 2026-10-27 (12:58-14:01 local), with YOLOX on the CPU; the 3.5-hour night run of 2026-10-28 counts here once its results are recorded (ROADMAP 6.8); nothing yet against a hand count or a timed crossing |
 | Lane types, scale | Lane types at PDN only: count zones typed from the owner's labelled frames (Q-22), not hand-counted; every queue-reader strip keeps `cbp_lane` `null`. Scale: not verified for any camera | Elsewhere `null`; scales `false` in `cameras.json` |
 | Booth distances | `lerdo-south-booths`: booth in view, exact. The other four: Google satellite map with its scale bar (2026-10-22), then corrected to each strip's booth-end row from a live frame. For PDN north, the strip runs ~45 m past the Feliz Viaje gantry's posts. For the two near-booth cameras, the camera position implied by their calibration puts the strip's row ~30 m (PDN south) and ~17 m (BOTA) in front of the camera | PDN north 365 ± 35 m, PDN south 510 ± 75 m, BOTA 615 ± 70 m, Lerdo north 335 ± 35 m; all `booth_distance_verified: false`. Lerdo north is **not yet corrected**: its strip ends short of the far gantry by a gap the flat-road calibration cannot measure (the road climbs there), so 335 m is likely low |
+| YOLOX on the GPU ([ADR-0017](../architecture/adr/0017-yolox-on-the-gpu.md)) | Both paths side by side in a test script, not through the runner, on live `pdn-north`: 2026-10-27 13:28-13:34 local (721 frames) and 2026-10-28 00:02-00:12 local (1,201 frames); that night darkened and as dusk; constructed threshold cases. `test_border_camera_gpu.py`, 41 tests, 3 of them on the real GPU | The same boxes to the pixel on every live frame and the same crossings, 31 = 31 and 15 = 15; raw outputs never bit-identical (at most 3.35e-4); threshold flips can be constructed (estimated 0.12-0.7 decisions per 1,000 frames). Not yet counted live through the runner |
 | Daylight and dawn | Lerdo–Stanton northbound (`lerdo-north`), empty overnight and queued once the port opened at 6 a.m.; replayed the way the worker runs from 03:16 to 07:56 local | 15/15 rounds right, through the change from streetlight to sun. Also in-sample: the rule letting a queue start anywhere, and `MIN_RUN_M`, were written after a missed lane at 07:16 in these same rounds, which were then re-scored |
 | Direction, measured | Signed speed toward the booth across 15 rounds | `bota-south-approach` was first set the wrong way round (red lights at night suggested it); speed was negative every round, so it was flipped. `lerdo-south-booths` positive every round |
-| A complete wait | `lerdo-south-booths`, booth in view so scale cancels | Empty until 06:36 local, then waits of 1.0–7.6 min |
+| A complete wait | `lerdo-south-booths`, booth in view so scale cancels | Empty until 06:36 local, then waits of 1.0–7.6 min. **In doubt since 2026-10-27:** the camera looks south over northbound SENTRI traffic at gates that may be the bridge trust's toll gates, not CBP's booths; if so, these are waits to the toll gate (Q-37) |
 | The live worker | `camera run` on PDN north and the Lerdo booths for five minutes | Four cycles, rolling speeds accumulating, heartbeat written; its first run found a JSON crash, now fixed and tested |
-| Crossing time: stamping, both counters, transit, the runner | 230 tests on 2026-10-27, all passing (`pytest --collect-only`: hls 33, loop 43, detect 51, crossing 13, transit 44, runner 46), on rendered scenes, simulated boxes, simulated crossings and scripted readers, cut to run in seconds. They include the per-zone `methods` and `metres` checks (`MethodsAndMetres`), the col-e yolox-only `RealZones` test, the loop's metres tests, and the runner's freeze, no-motion, hold and backoff tests (ADR-0016). Longer runs of the same scenes and simulations on 2026-10-24 and 2026-10-26 | The tests hold the behaviour but assert few of the figures. The figures in the counters table above, in [Crossing time](#crossing-time-between-two-cameras) and in each module's docstring come from the longer runs, and the docstrings date them and say how they were run. `detect.py`'s creeping-queue and line A figures rebuild from the test suite's `drive` and `Road`. The loop's staggered, occluded and random-gap runs, the line-B occluder run (col-4 cars in front of col-e, 2026-10-26), the crossing-time simulations (mixed lane types, short trips, reordering) and the replays behind ADR-0016 (frame differences logged live on 2026-10-26, with no picture kept) were one-off scripts not kept in the repo. Nothing yet against a hand count, a timed crossing or real YOLOX boxes |
+| Crossing time: stamping, both counters, transit, the runner | 265 tests on 2026-10-28 (`pytest --collect-only`: hls 34, loop 43, detect 57, crossing 18, transit 54, runner 59), plus 41 in `test_border_camera_gpu.py`, on rendered scenes, simulated boxes, simulated crossings and scripted readers, cut to run in seconds. They include the per-zone `methods` and `metres` checks (`MethodsAndMetres`), the col-e yolox-only `RealZones` test, the loop's metres tests, the runner's freeze, no-motion, hold and backoff tests (ADR-0016), the runner's GPU-stop tests (`YoloxDevice` and `SharedGpuStop`: a `GpuFailed` stops YOLOX at every camera on the GPU, each a gap from its own frame before, no reconnect), `--device` (`TransitCommand`) and `transit.anchoring` (`AnchoringTest`). `RealZones`' check that `pdn-north`'s geometry is unchanged since `1221c9f` leaves out what moves no pixel: the notes, the confirmed direction, the head-gap limit (`max_head_gap_m`, ADR-0018), the zones' lane types and the strips' CBP lanes. Longer runs of the same scenes and simulations on 2026-10-24 and 2026-10-26 | The tests hold the behaviour but assert few of the figures. The figures in the counters table above, in [Crossing time](#crossing-time-between-two-cameras) and in each module's docstring come from the longer runs, and the docstrings date them and say how they were run. `detect.py`'s creeping-queue and line A figures rebuild from the test suite's `drive` and `Road`. The loop's staggered, occluded and random-gap runs, the line-B occluder run (col-4 cars in front of col-e, 2026-10-26), the crossing-time simulations (mixed lane types, short trips, reordering) and the replays behind ADR-0016 (frame differences logged live on 2026-10-26, with no picture kept) were one-off scripts not kept in the repo. Nothing yet against a hand count, a timed crossing or real YOLOX boxes |
 
 **No held-out score exists yet.** Label new rounds (PDN by day, low sun, rain) before quoting an
 accuracy.
@@ -648,33 +753,50 @@ accuracy.
   patches of PDN's empty left lanes as "occupied"; the run-occupancy rule kept that from becoming
   a queue, and the worker's reference refresh should learn the shadows, but it has not been
   watched through a full day.
+- **A reference learnt in one light never refreshes in the other.** On 2026-10-27 the road was
+  learnt around solar noon, and after that no sample passed the refresh check (0 of 121 frames and 0
+  of 18 samples at midday, 0 of 151 at night). Against those references, on 2026-10-28 00:34-00:50
+  local, `pdn-north` lane-5 read a false 75 m line and the street's right column a false 50 m+ line
+  in 16 of 16 one-minute windows each; a reference learnt fresh that night read none. Until day and
+  night references exist (ROADMAP 6.11, Q-34 v), start a run in a new `CAMERA_STATE_DIR` in the
+  light it will run in, and treat readings after dawn or dusk as suspect (ASSUMPTION that the lock
+  returns at dawn).
 - **Map distances.** Every out-of-view lane's minutes rest on a map estimate. Until they are
   graded against timed crossings, treat them as the approximate figures the viewer says they
   are.
 - **The road out of view.** Every out-of-view lane's minutes also time the road between the view
-  and the booth at the speed of the line in view (ASSUMPTION). On 2026-10-22 PDN north read
+  and the booth at the speed of the line in view (ASSUMPTION). Since 2026-10-28 the cards show them
+  only at `lerdo-north` and `bota-south-approach`; every such lane's signal still carries them
+  (ADR-0018). On 2026-10-22 PDN north read
   99-128 min against CBP's 47. ADR-0014 names a hidden stretch that moves differently as one
   likely cause, with the speed reader and the scales; which dominates is not yet known.
 - **PDN `lane-5`** reads only a short stalled stretch where daylight frames show more cars: it
-  under-reads and is not validated. Its count zone is typed SENTRI (Q-22), but the strip keeps
-  `cbp_lane` `null`, so its card row and signal are not filed as SENTRI. Nothing stores the queue
+  under-reads and is not validated. Its count zone is typed SENTRI (Q-22), as is lane-4's since
+  2026-10-27, but both strips keep `cbp_lane` `null`, so their card rows and signals are not filed
+  as SENTRI. Nothing stores the queue
   reader's signals yet.
 
 **Not yet done:**
 - **Verifying booth distances.** The four map estimates need a survey, or grading against timed
   crossings. Lerdo north's also needs correcting to its strip's booth-end row.
-- Confirming lane types (`cbp_lane`), directions (`direction_verified`) and scales outside PDN. At
-  PDN, a hand count per lane type at both lines (Q-24).
+- Confirming lane types (`cbp_lane`) and scales outside PDN, and directions (`direction_verified`)
+  on every camera but `pdn-north` (owner, 2026-10-27) and `city-pdn-north`. At PDN, a hand count per
+  lane type at both lines (Q-24).
+- Settling `lerdo-south-booths`: it looks over northbound traffic, at gates that may be the bridge
+  trust's toll gates rather than CBP's booths (Q-37).
 - Timing line B to the booths (K_eff) and recording B's occupancy, without which every camera wait
   stays a floor (Q-23).
 - The verification runs ADR-0016 rests on: dusk across sunset, deep night, peak, and one under
   `camera estimate`, with numbers-only logging (Q-32). Its still tier, `QUIET_S` and the hold's lag
   rest on one 20-min night sample at line B.
 - An uncut run long enough to anchor: about 3 h at both lines, away from sunset (Q-29). No run so
-  far could anchor.
-- BOTA north, Lerdo (Fila), BOTA (Av. Rafael Pérez Serna) and the Zaragoza avenue view are live but
-  not calibrated. Every Zaragoza bridge stream and both Guadalupe–Tornillo streams were down all
-  morning.
+  far could anchor. Each record's `anchoring`, and the status's and page's bars, now show how far a
+  run has come (2026-10-28).
+- Day and night references for the queue reader (ROADMAP 6.11).
+- Lerdo (Fila), the Zaragoza streams (`KX-bm-Lhy3w`, `GC5RY3zipa4`, Waterfill `o5h9RB7qwY8`) and both
+  Guadalupe–Tornillo streams (`8u-hBawdG8c`, `0gT7jvaLCkg`) were live on 2026-10-27 but are not
+  calibrated; queue cards for `KX-bm-Lhy3w` and `0gT7jvaLCkg` are an owner question (Q-38). All
+  three BOTA streams were down that day.
 - Grading against timed crossings (needs Phase 3).
 - Calibrating the remaining live cameras.
 
@@ -684,4 +806,7 @@ accuracy.
 branch `chisme-border-waittime` for map booth distances, the viewer's minutes and the review
 fixes; updated 2026-10-26 for the camera audit's fixes, and again for lane types (Q-22), line B's
 redraw and `camera estimate` (ADR-0015); updated 2026-10-27 for the frozen rule, the hold and the
-no-motion gap (ADR-0016), and the not-measured review fixes.*
+no-motion gap (ADR-0016), and the not-measured review fixes; updated 2026-10-28 for YOLOX on the GPU
+(ADR-0017), the queue cards with the booth out of view (ADR-0018), the anchoring bars, the lane
+labels, `pdn-north`'s lane-4 (SENTRI) and its confirmed direction, the freeze tail after a reopen,
+and the camera survey of 2026-10-27.*

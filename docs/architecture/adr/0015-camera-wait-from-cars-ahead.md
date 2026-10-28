@@ -37,7 +37,8 @@ Four facts shaped the decision:
   high. That is 2× when half the cars are counted (simulation in `test_border_camera_combine.py`).
 - **ADR-0014 decision 2.** The two counting methods are "logged separately, compared before either is
   trusted".
-- **Lane types (Q-22, 2026-10-26).** SENTRI is lane 5 at A and column E at B. "Normal" is the other
+- **Lane types (Q-22, 2026-10-26; A corrected 2026-10-27).** SENTRI is lanes 4 and 5 at A (one
+  SENTRI lane, split by barrels near the camera) and column E at B. "Normal" is the other
   lanes and columns. Normal covers both of CBP's standard and Ready car lanes, which are not told apart
   (ASSUMPTION). Pairing the k-th car at A with the (offset + k)-th at B holds only within one type.
 - **Nothing measures line B to the booths.** No City view shows a booth up close.
@@ -157,7 +158,8 @@ Four facts shaped the decision:
   both lines carry on its own: one record per method and group. The exception is a group with a zone
   that names the counters allowed there (`cameras.json` `"methods"`). Any other method leaves that
   group "not measured", with no record. At PDN the groups are
-  `normal` (A lanes 1-4 ↔ B col-1..col-4) and `sentri` (A lane-5 ↔ B col-e). col-4's cars cover col-e,
+  `normal` (A lanes 1-3 ↔ B col-1..col-4) and `sentri` (A lane-4 and lane-5 ↔ B col-e; lane-4 was
+  typed normal until the owner's correction of 2026-10-27, Q-22). col-4's cars cover col-e,
   so col-e is counted by yolox only (Q-24), and a tick gives 3 records: loop normal, yolox normal and
   yolox sentri. A pair pools its lanes
   as "mixed" only when its lines share no type. ADR-0014's consequence "One lane type per pair"
@@ -191,6 +193,6 @@ Four facts shaped the decision:
   - K_eff timings and the primary booth count (Q-23);
   - hand counts per group at A and B (Q-24);
   - whether Ready is separate before line B (Q-25);
-  - whether SENTRI cars queue with the others on the street before lane-5 splits off (Q-27);
+  - whether SENTRI cars queue with the others on the street before the SENTRI lane splits off (Q-27);
   - decisions 3 and 4 (Q-26);
   - three choices about methods that are not measured (Q-33).

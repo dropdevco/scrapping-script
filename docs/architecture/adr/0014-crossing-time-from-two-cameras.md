@@ -1,6 +1,11 @@
 # ADR-0014: Crossing time is measured between a Mexican-side and a US-side camera, by two methods side by side
 
-- **Status:** Accepted, 2026-10-24, by the product owner
+- **Status:** Accepted, 2026-10-24, by the product owner. **Amended 2026-10-28 by
+  [ADR-0017](0017-yolox-on-the-gpu.md)** (accepted by the owner on 2026-10-27): decision 2's model
+  rules "run through OpenCV" and "run locally on CPU" now read "run locally, on the CPU through OpenCV
+  or on the NVIDIA GPU through ONNX Runtime's DirectML build, checked against the CPU", and "the same
+  frames give the same counts" holds per path, not across paths. The decisions below are left as
+  they were written.
 - **Date:** 2026-10-24
 - **Amends:** [SPEC.md §1](../../border-estimator/SPEC.md) "No machine learning" and the camera doc's "no
   model" (`docs/components/border-camera-reader.md`). Both now apply to the **fusion**, which stays

@@ -59,32 +59,95 @@ class LaneSummary(unittest.TestCase):
     def test_no_queue_with_an_unmeasured_booth_distance_says_why_there_is_no_number(self):
         out = lane_summary(est("no_queue", queue=0, speed=None), lane(None), {}, NOW)
         self.assertIsNone(out["minutes"])
+        self.assertEqual(out["display_value"], "no line")
         self.assertIn("booth distance not measured", out["why_no_minutes"])
         self.assertEqual(out["display_detail"].count("no line in view"), 1)
 
-    def test_no_queue_with_the_booth_out_of_view_is_probably_under_at_the_slowest_speed(self):
-        # 400 m +/- 40 left to the booth and the slowest recent lane moving 0.2 m/s: a line
-        # hidden in those 440 m would probably take under 440 / 0.2 s. "Probably": a hidden
-        # line could move slower still, so the page never prints a strict "<".
-        out = lane_summary(est("no_queue", queue=0, speed=None), far(), {}, NOW,
-                           slowest_speed=0.2, scale_verified=True)
-        self.assertTrue(out["upper_bound"])
-        self.assertAlmostEqual(out["minutes"], round(440 / 0.2 / 60, 1))
-        self.assertEqual(out["display_value"], "under ~37")
-        self.assertIn("probably", out["display_detail"])
-        self.assertNotIn("<", out["display_value"])
+    def test_no_queue_with_the_booth_out_of_view_is_no_line_and_no_minutes(self):
+        # No ceiling at a queue speed, however slow a lane moved lately: that was (D + L) / v
+        # with L = 0, which read "under ~18" on an empty street (2026-10-27).
+        for roll in ({}, {"speed_m_s": 0.2, "windows": 3}):
+            for scale_verified in (True, False):
+                with self.subTest(roll=roll, scale_verified=scale_verified):
+                    out = lane_summary(est("no_queue", queue=0, speed=None), far(), roll, NOW,
+                                       scale_verified=scale_verified)
+                    self.assertEqual((out["minutes"], out["low_min"], out["high_min"]),
+                                     (None, None, None))
+                    self.assertEqual((out["display_value"], out["kind"]), ("no line", "clear"))
+                    self.assertFalse(out["approx"])
+                    self.assertFalse(out["lower_bound"])
+                    self.assertNotIn("upper_bound", out)
+                    self.assertIsNone(out["why_no_minutes"])
+                    self.assertTrue(out["display_detail"].startswith("no line in view · "))
+                    self.assertNotIn("under", out["display_value"] + out["display_detail"])
 
-    def test_an_unverified_scale_stretches_the_probably_under_figure(self):
-        out = lane_summary(est("no_queue", queue=0, speed=None), far(), {}, NOW,
-                           slowest_speed=0.2, scale_verified=False)
-        self.assertAlmostEqual(out["minutes"], round(440 / 0.2 / 60 * 1.25, 1))
-        self.assertIn("camera scale unverified", out["approx_reasons"])
+    def test_a_road_no_camera_wait_times_is_said_to_be_timed_by_nothing(self):
+        # Lerdo and BOTA: no pair, so nothing times the 400 m on to the booth.
+        out = lane_summary(est("no_queue", queue=0, speed=None), far(), {}, NOW)
+        self.assertIn("the 400 m to the booth are out of view; nothing here times them",
+                      out["display_detail"])
+        self.assertNotIn("camera wait", out["display_detail"])
 
-    def test_no_queue_with_no_recent_speed_gives_no_number(self):
-        out = lane_summary(est("no_queue", queue=0, speed=None), far(), {}, NOW,
-                           slowest_speed=None)
-        self.assertIsNone(out["minutes"])
-        self.assertIn("no recent line", out["why_no_minutes"])
+    def test_a_road_the_camera_wait_times_says_so(self):
+        # PDN's camera A and its street: the camera wait times the road on to the booth.
+        out = lane_summary(est("no_queue", queue=0, speed=None), far(510, 75), {}, NOW,
+                           camera_wait=True)
+        self.assertEqual(out["display_detail"], "no line in view · the 510 m to the booth are "
+                                                "out of view: the camera wait times them")
+        self.assertEqual(out["display_value"], "no line")
+
+    def test_no_queue_with_the_booth_in_view_is_zero_on_a_camera_of_the_camera_wait_too(self):
+        out = lane_summary(est("no_queue", queue=0, speed=None), lane(0), {}, NOW,
+                           camera_wait=True)
+        self.assertEqual((out["minutes"], out["display_value"]), (0.0, "0"))
+
+    def test_a_line_on_a_camera_of_the_camera_wait_shows_its_length_and_speed_not_minutes(self):
+        # The street's right column, 19:57 UTC: shown as "≈ 22" until 2026-10-28. With the booth
+        # out of view the wait is the camera wait's, never (D + L) / v.
+        roll = {"wait_min": 22.0, "low_min": 15.0, "high_min": None, "speed_m_s": 1.2,
+                "windows": 3}
+        out = lane_summary(est("queue", queue=51, speed=1.2, beyond=True), far(510, 75), roll,
+                           NOW, scale_verified=False, camera_wait=True)
+        self.assertEqual((out["minutes"], out["low_min"], out["high_min"]), (None, None, None))
+        self.assertEqual((out["display_value"], out["kind"]), ("line 51 m+", "line"))
+        self.assertEqual(out["display_detail"], "moving 1.20 m/s · the 510 m to the booth are "
+                                                "out of view: the camera wait times them")
+        self.assertFalse(out["approx"])
+        self.assertFalse(out["lower_bound"])
+        self.assertIsNone(out["why_no_minutes"])
+        self.assertEqual(out["speed_m_s"], 1.2)
+
+    def test_the_same_line_elsewhere_keeps_its_approximate_minutes(self):
+        # Lerdo and BOTA have no camera wait, so their cards keep (D + L) / v (owner question).
+        roll = {"wait_min": 22.0, "low_min": 15.0, "high_min": None, "speed_m_s": 1.2,
+                "windows": 3}
+        out = lane_summary(est("queue", queue=51, speed=1.2, beyond=True), far(510, 75), roll,
+                           NOW, scale_verified=False)
+        self.assertEqual((out["minutes"], out["display_value"], out["kind"]),
+                         (22.0, "≈ 22", "estimate"))
+
+    def test_a_line_not_moving_on_a_camera_of_the_camera_wait_says_so(self):
+        roll = {"wait_min": None, "speed_m_s": 0.0, "windows": 3}
+        out = lane_summary(est("stalled", speed=0.0), far(), roll, NOW, camera_wait=True)
+        self.assertEqual((out["minutes"], out["display_value"]), (None, "line 40 m"))
+        self.assertEqual(out["display_detail"],
+                         "not moving over the last 3 readings · not moving this minute · the "
+                         "400 m to the booth are out of view: the camera wait times them")
+        self.assertIsNone(out["why_no_minutes"])
+
+    def test_a_minute_too_short_to_time_on_a_camera_of_the_camera_wait_is_not_timed(self):
+        roll = {"wait_min": 20.0, "speed_m_s": 0.5}
+        out = lane_summary(est("insufficient", queue=30, speed=None), far(), roll, NOW,
+                           camera_wait=True)
+        self.assertEqual((out["minutes"], out["display_value"]), (None, "line 30 m"))
+        self.assertIn("the camera wait times them", out["display_detail"])
+        self.assertNotIn("this minute's line", out["display_detail"])
+
+    def test_a_line_at_a_booth_in_view_keeps_its_minutes_on_a_camera_of_the_camera_wait(self):
+        # Only a booth out of view hands the wait to the camera wait.
+        roll = {"wait_min": 3.0, "low_min": 2.0, "high_min": 4.0, "speed_m_s": 0.4}
+        out = lane_summary(est("queue"), lane(0), roll, NOW, camera_wait=True)
+        self.assertEqual((out["minutes"], out["display_value"]), (3.0, "3"))
 
     def test_a_map_estimated_distance_marks_the_minutes_approximate_with_their_range(self):
         roll = {"wait_min": 20.0, "low_min": 15.0, "high_min": 27.0, "speed_m_s": 0.4}
@@ -222,6 +285,20 @@ class WorkerReadings(unittest.TestCase):
         lane = self.worker.status["cameras"][self.cam.id]["lanes"][0]
         self.assertEqual(round(lane["minutes"]), rolled)
 
+    def test_a_camera_of_the_camera_wait_shows_no_minutes_but_publishes_the_same_signal(self):
+        # The card hands the wait to the camera wait; the signal is unchanged (it does not vote
+        # while the strip has no cbp_lane: see CameraWaitCameras).
+        self.worker.camera_wait = frozenset({self.cam.id})
+        self.worker._summarise(self.cam, [self.window(0.5)], NOW)
+        lane = self.worker.status["cameras"][self.cam.id]["lanes"][0]
+        self.assertEqual((lane["minutes"], lane["display_value"]), (None, "line 40 m"))
+        self.assertIn("the camera wait times them", lane["display_detail"])
+        self.assertEqual(self.signals[-1]["minutes"], round((100 + 40) / 0.5 / 60))
+
+    def test_the_worker_knows_the_camera_waits_cameras_from_pairs_json(self):
+        self.assertEqual(self.worker.camera_wait, frozenset({"pdn-north", "pdn-south-street"}))
+        self.assertNotIn(self.cam.id, self.worker.camera_wait)
+
     def test_an_unexpected_failure_marks_the_camera_and_does_not_stop_the_worker(self):
         with unittest.mock.patch("scraper.border.camera.worker.find",
                                  side_effect=RuntimeError("yt-dlp timed out")):
@@ -259,6 +336,32 @@ class WorkerReadings(unittest.TestCase):
                                            lambda cam, started: camera_started.set()):
             self.worker.cycle()
         self.assertEqual(seen, [True])
+
+
+class CameraWaitCameras(unittest.TestCase):
+    """Which cards hand the wait to the camera wait: each pair's camera A and its street."""
+
+    def test_camera_a_and_the_street_of_every_pair_and_nothing_else(self):
+        from scraper.border.camera.worker import camera_wait_cameras
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "pairs.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"_readme": {"a": "not-a-camera"},
+                           "x": {"a": "x", "b": "x-b", "street": "x-street"},
+                           "y": {"a": "y", "b": "y-b", "street": None}}, f)
+            self.assertEqual(camera_wait_cameras(path), frozenset({"x", "x-street", "y"}))
+
+    def test_their_strips_are_untyped_so_their_signals_never_vote(self):
+        # Their cards show no (D + L) / v, but signal_from_roll still publishes it: harmless only
+        # while no strip of theirs has a cbp_lane. Typing one must drop its signal's minutes too.
+        from scraper.border.camera.calibration import load_cameras
+        from scraper.border.camera.worker import camera_wait_cameras
+
+        cams = load_cameras()
+        typed = [(cid, lane.lane) for cid in camera_wait_cameras() for lane in cams[cid].lanes
+                 if lane.cbp_lane is not None]
+        self.assertEqual(typed, [])
 
 
 class Routes(unittest.TestCase):
@@ -550,6 +653,143 @@ class EstimateSection(unittest.TestCase):
             shown = json.loads(r.read())
         self.assertEqual(shown, viewer.estimate_view(live.snapshot(), self.cbp))
         self.assertEqual(shown["at"], self.floor["at"])
+
+
+class LaneLabels(unittest.TestCase):
+    """A queue card names a lane by its count zone's lane type, not "(lane type unconfirmed)":
+    a label only, so cbp_lane stays null and nothing is filed as SENTRI (owner, 2026-10-27:
+    pdn-north's lane-4 and lane-5 are one SENTRI lane, split by barrels)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from scraper.border.camera.calibration import load_cameras
+
+        cls.cams = load_cameras()
+
+    def test_pdn_north_names_three_normal_lanes_and_two_sentri_ones_said_once_to_be_one(self):
+        got = viewer.lane_types([self.cams["pdn-north"], self.cams["pdn-south-street"]])
+        self.assertEqual(got["pdn-north"]["lane_types"],
+                         {"lane-1": "normal", "lane-2": "normal", "lane-3": "normal",
+                          "lane-4": "SENTRI", "lane-5": "SENTRI"})
+        self.assertEqual(got["pdn-north"]["lanes_note"],
+                         "lane-4 and lane-5 are one SENTRI lane, split by barrels near the "
+                         "camera: each is read as its own strip.")
+        # No count zone on the street camera: its lanes keep "(lane type unconfirmed)".
+        self.assertEqual(got["pdn-south-street"], {"lane_types": {}, "lanes_note": None})
+        # A label only: no strip is filed as a CBP lane.
+        self.assertEqual({lane.cbp_lane for lane in self.cams["pdn-north"].lanes}, {None})
+
+    def test_the_split_lanes_are_what_cameras_json_types_them(self):
+        for cid, (lanes, kind, _) in viewer.SPLIT_LANES.items():
+            zones = {z.lane: z.lane_type for z in self.cams[cid].count_zones}
+            self.assertEqual({zones[lane] for lane in lanes}, {kind}, cid)
+        # Retyped, the note is no longer said, and each lane shows its own zone's type.
+        from dataclasses import replace
+
+        cam = self.cams["pdn-north"]
+        retyped = replace(cam, count_zones=tuple(
+            replace(z, lane_type="normal") if z.lane == "lane-4" else z
+            for z in cam.count_zones))
+        got = viewer.lane_types([retyped])["pdn-north"]
+        self.assertEqual((got["lane_types"]["lane-4"], got["lanes_note"]), ("normal", None))
+
+    def test_status_json_carries_the_labels_and_leaves_the_workers_status_alone(self):
+        server = serve(0)
+        cams = [self.cams["pdn-north"], self.cams["pdn-south-street"]]
+        status = {"cameras": {c.id: {"id": c.id, "lanes": []} for c in cams}}
+        server.worker = unittest.mock.Mock(status=status, cameras=cams, _lock=threading.Lock())
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}/status.json"
+        with urllib.request.urlopen(url) as r:
+            served = json.loads(r.read())["cameras"]
+        self.assertEqual(served["pdn-north"]["lane_types"]["lane-5"], "SENTRI")
+        self.assertIn("one SENTRI lane", served["pdn-north"]["lanes_note"])
+        self.assertEqual(served["pdn-south-street"]["lane_types"], {})
+        self.assertEqual(status["cameras"]["pdn-north"], {"id": "pdn-north", "lanes": []})
+
+    def test_the_page_prints_the_type_said_once_and_keeps_unconfirmed_for_untyped_lanes(self):
+        page = viewer.PAGE
+        self.assertIn("laneRow(l, stale, c.lane_types)", page)
+        self.assertIn("const type = l.cbp_lane ? null : (types || {})[l.lane];", page)
+        self.assertIn('type ? ` · ${type}` : " (lane type unconfirmed)"', page)
+        self.assertIn('if (c.lanes_note && (c.lanes || []).length) box.append(el("div", "detail", '
+                      'c.lanes_note));', page)
+        self.assertEqual(page.count("c.lanes_note"), 2)      # tested and printed, once a camera
+
+
+class AnchoringBars(unittest.TestCase):
+    """Each method's card shows its anchoring as a bar (transit.anchoring, carried by the camera
+    record), 100 % only once anchored, with one line saying what it is."""
+
+    def a(self, **changes):
+        return {"state": "waiting", "unbroken_min": 101.6, "needed_min": 173.2,
+                "transit_min": 6.8, "transit_assumed": False, "percent": 58, "enclosed": 1,
+                "min_anchors": 3, **changes}
+
+    def test_each_state_says_what_the_bar_is_and_never_shows_more_than_there_is(self):
+        view = viewer._anchoring_view
+        self.assertEqual(view(self.a()), {
+            "state": "waiting", "percent": 58,
+            "text": "Anchoring: 58 % · 101 of 174 min unbroken at both lines · anchors 1 of 3."})
+        self.assertEqual(view(self.a(unbroken_min=180.0, percent=99, transit_min=None,
+                                     transit_assumed=True, needed_min=180.0))["text"],
+                         "Anchoring: 99 % · 180 of 180 min unbroken at both lines · anchors 1 "
+                         "of 3 · long enough, waiting for distinctive cars at both lines (no trip "
+                         "measured yet: taken as 0 min, the longest stretch).")
+        self.assertTrue(view(self.a(state="anchored", percent=100, enclosed=4))["text"]
+                        .startswith("Anchored: 100 % · "))
+        broken = view(self.a(state="broken", percent=0, unbroken_min=0.0, enclosed=0))
+        self.assertEqual((broken["state"], broken["percent"]), ("broken", 0))
+        self.assertIn("a line is unseen now", broken["text"])
+        self.assertIsNone(view(None))
+        # transit._epoch: a count carried in and confirmed by the anchors that follow it is
+        # anchored with fewer enclosed than MIN_ANCHORS, and says so, not "anchors 0 of 3"
+        carried = view(self.a(state="anchored", percent=100, enclosed=0, unbroken_min=30.0))
+        self.assertEqual(carried["text"], "Anchored: 100 % · the count carried in (across a gap, "
+                         "or from the measurement before), confirmed by distinctive cars that "
+                         "follow it.")
+        # YOLOX stopped: its gap stays open for the rest of the run (runner._gaps_for)
+        stopped = view(self.a(state="broken", percent=0, unbroken_min=0.0, enclosed=0),
+                       stopped=True)
+        self.assertIn("broken for the rest of this run: YOLOX stopped", stopped["text"])
+        self.assertNotIn("starts again", stopped["text"])
+        self.assertNotIn("YOLOX stopped", view(self.a(), stopped=True)["text"])
+
+    def test_the_card_carries_the_bar_and_the_section_its_note(self):
+        rec = {"at": "2026-10-28T17:00:00+00:00", "groups": {"sentri": {
+            "lane": "car_sentri", "agree": None, "would_vote": False, "would_vote_reasons": [],
+            "methods": {"yolox": {"count": {"source": "few-anchors", "offset_sd": None,
+                                            "sure": False},
+                                  "segments": [], "floor": True, "anchoring": self.a(),
+                                  "transient": [], "info": []}}}}}
+        snapshot = {"pair": {"port_number": "240202", "direction": "north",
+                             "show_minutes": False}, "record": rec, "stopped": None,
+                    "updated_at": rec["at"]}
+        shown = viewer.estimate_view(snapshot)
+        card = shown["groups"][0]["methods"][0]
+        self.assertEqual(card["anchoring"]["percent"], 58)
+        self.assertEqual(card["value"], "")                  # show_minutes false: no number
+        self.assertEqual((card["device_text"], card["device_stopped"]), ("", ""))
+        self.assertIn("reads 100 % only once anchors set the count", shown["anchor_note"])
+        self.assertIn("or once 3 that follow a count carried in", shown["anchor_note"])
+        self.assertIn("once none has checked the count for 60 min", shown["anchor_note"])
+        self.assertIn('setAttribute("role", "progressbar")', viewer.PAGE)
+        self.assertIn("fill.style.width = `${m.anchoring.percent}%`;", viewer.PAGE)
+        self.assertIn('if (m.device_text) card.append(el("div", "detail", m.device_text));',
+                      viewer.PAGE)
+        self.assertIn('if (m.device_stopped) card.append(el("div", "flag", m.device_stopped));',
+                      viewer.PAGE)
+        self.assertIn("estimate.anchor_note", viewer.PAGE)
+        # A card whose YOLOX stopped says its broken bar stays broken this run.
+        rec["groups"]["sentri"]["methods"]["yolox"].update(
+            anchoring=self.a(state="broken", percent=0, unbroken_min=0.0, enclosed=0),
+            devices={"pdn-north": {"device": "gpu:test", "stopped": "test",
+                                   "stopped_at": rec["at"]}})
+        card = viewer.estimate_view(snapshot)["groups"][0]["methods"][0]
+        self.assertTrue(card["device_stopped"].startswith("YOLOX STOPPED at pdn-north"))
+        self.assertIn("broken for the rest of this run", card["anchoring"]["text"])
 
 
 if __name__ == "__main__":

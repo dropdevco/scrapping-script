@@ -31,13 +31,20 @@ pytest.importorskip("cv2")   # crossing imports hls, which imports the stream re
 from scraper.border.camera.crossing import SIGNATURE_TTL_S, Crossing, Zone, look
 from scraper.border.camera.hls import Gap
 from scraper.border.camera.transit import (
+    ANCHOR_BAR,
     CHECK_MAX_MIN,
     GAP_PAD_S,
     MATCH_DISTANCE,
+    MIN_ANCHORS,
     Anchor,
+    Epoch,
+    Measurement,
     Prior,
+    Transit,
     _Candidate,
     _largest_chain,
+    anchoring,
+    anchoring_text,
     anchors,
     colour_distance,
     count_at,
@@ -1104,6 +1111,162 @@ class DriftConfirmTest(unittest.TestCase):
                 worst = max(abs(w.by_entry.median - STEADY_S / 60) for w in windows(m)
                             if not w.flagged and w.by_entry.median is not None)
                 self.assertLess(worst, 2.0)
+
+
+class AnchoringTest(unittest.TestCase):
+    """(11) Each record's `anchoring`, the owner's progress bars (asked 2026-10-28): how far the
+    latest epoch has come towards anchors. 100 only once anchored, at most 99 while waiting, 0
+    while a line is unseen; the stretch it needs is 2 x hi_min less the latest measured trip,
+    or 2 x hi_min while none is measured. Counts and minutes only."""
+    HI = 90.0
+    KEYS = frozenset({"state", "unbroken_min", "needed_min", "transit_min", "transit_assumed",
+                      "percent", "enclosed", "min_anchors"})
+
+    def measure(self, a, b, minutes, **kw):
+        return measure(a, b, 0.5, self.HI, start=T0, end=T0 + timedelta(minutes=minutes), **kw)
+
+    def test_an_anchored_epoch_is_full_and_needed_2_hi_min_less_its_trip(self):
+        a, b, _ = wheel(31, 20.0, minutes=180)
+        m = self.measure(a, b, 180)
+        self.assertEqual(m.epochs[-1].source, "anchors")
+        got = anchoring(m)
+        self.assertEqual(set(got), self.KEYS)
+        self.assertEqual((got["state"], got["percent"], got["unbroken_min"]),
+                         ("anchored", 100, 180.0))
+        self.assertAlmostEqual(got["transit_min"], 20.0, delta=0.5)
+        self.assertFalse(got["transit_assumed"])
+        self.assertAlmostEqual(got["needed_min"], 2 * self.HI - got["transit_min"], delta=0.1)
+        self.assertGreaterEqual(got["enclosed"], MIN_ANCHORS)
+        self.assertEqual(got["min_anchors"], MIN_ANCHORS)
+        text = anchoring_text("loop", "normal", got)
+        self.assertTrue(text.startswith(f"anchoring loop  normal [{'#' * ANCHOR_BAR}] 100% 180/"))
+        self.assertTrue(text.endswith(f"anchors {got['enclosed']}/3: anchored"), text)
+
+    def test_a_short_epoch_waits_with_its_trip_taken_as_0_and_rounds_down(self):
+        a, b, _ = wheel(31, 20.0, minutes=180)
+        cut = T0 + timedelta(minutes=60)
+        m = self.measure([c for c in a if c.at < cut], [c for c in b if c.at < cut], 60)
+        self.assertNotIn(m.epochs[-1].source, ("anchors", "given"))
+        got = anchoring(m)
+        self.assertEqual((got["state"], got["transit_min"], got["transit_assumed"]),
+                         ("waiting", None, True))
+        self.assertEqual((got["needed_min"], got["percent"]), (2 * self.HI, 33))   # 60 / 180
+        self.assertEqual(anchoring_text("loop", "normal", got),
+                         "anchoring loop  normal [###.......] 33% 60/180 min, anchors 0/3 (no "
+                         "trip measured yet: taken as 0 min, the longest stretch)")
+
+    def test_a_stretch_long_enough_with_no_anchor_stays_below_full(self):
+        qa, qb = quiet_stretch({}, cars=400, transit_min=30.0)        # no distinctive car
+        got = anchoring(self.measure(qa, qb, 200))
+        self.assertEqual((got["state"], got["percent"], got["enclosed"]), ("waiting", 99, 0))
+        text = anchoring_text("yolox", "sentri", got)
+        self.assertIn("[#########.] 99% 200/180 min", text)
+        self.assertIn("long enough, waiting for distinctive cars at both lines", text)
+
+    def test_a_gap_at_either_line_up_to_the_end_is_broken_and_empty(self):
+        a, b, _ = wheel(31, 20.0, minutes=180)
+        for gaps in ({"gaps_a": [Gap(T0 + timedelta(minutes=179), 120.0, "test")]},
+                     {"gaps_b": [Gap(T0 + timedelta(minutes=179), 120.0, "test")]}):
+            got = anchoring(self.measure(a, b, 180, **gaps))
+            self.assertEqual((got["state"], got["percent"], got["unbroken_min"], got["enclosed"]),
+                             ("broken", 0, 0.0, 0), gaps)
+            self.assertIn(f"[{'.' * ANCHOR_BAR}] broken: a line is unseen now",
+                          anchoring_text("loop", "normal", got))
+        # A gap that ended before the end cuts an epoch, and the one after it is unbroken.
+        got = anchoring(self.measure(a, b, 180, gaps_b=[Gap(T0 + timedelta(minutes=100), 60.0,
+                                                            "test")]))
+        self.assertNotEqual(got["state"], "broken")
+        self.assertAlmostEqual(got["unbroken_min"], 80 - (60 + GAP_PAD_S) / 60, delta=0.1)
+
+    def test_a_span_wholly_inside_a_gap_is_broken_not_waiting(self):
+        # The runner moves its start past a gap that runs on to the end (YOLOX stopped long
+        # ago): nothing is measured, and nothing is unbroken.
+        at = T0 + timedelta(minutes=60)
+        m = measure([], [], 0.5, self.HI, start=at, end=at,
+                    gaps_a=[Gap(T0, 3600.0, "YOLOX stopped: test")])
+        self.assertEqual(m.epochs, ())
+        self.assertEqual(anchoring(m)["state"], "broken")
+
+    def test_the_trip_is_the_latest_window_of_enough_unflagged_transits_at_most_hi_min(self):
+        def transit(exit_min, minutes, flagged=False):
+            out = T0 + timedelta(minutes=exit_min)
+            return Transit(out - timedelta(minutes=minutes), out, minutes, flagged)
+
+        def got(transits):
+            end = T0 + timedelta(minutes=60)
+            epoch = Epoch(T0, end, 0, "carried", None, None, ())
+            return anchoring(Measurement("loop", T0, end, (epoch,), tuple(transits), (), (), (),
+                                         (), self.HI))
+        older = [transit(16, 30.0), transit(18, 31.0), transit(20, 32.0)]
+        # The latest window (45-60 min) has 2 unflagged transits and 3 flagged: too few.
+        latest = [transit(50, 10.0), transit(52, 10.0)] + [transit(55, 5.0, True)] * 3
+        self.assertEqual(got(older + latest)["transit_min"], 31.0)
+        self.assertEqual(got(older + latest)["needed_min"], 2 * self.HI - 31.0)
+        self.assertEqual(got(latest)["transit_min"], None)       # none with enough: assumed 0
+        long = [transit(50, 120.0)] * 3                            # a trip that cannot anchor
+        self.assertEqual((got(long)["transit_min"], got(long)["needed_min"]), (120.0, self.HI))
+        self.assertEqual(anchoring_text("loop", "mixed", None),
+                         f"anchoring loop  mixed  [{'?' * ANCHOR_BAR}] not recorded")
+
+    def test_percent_and_minutes_never_show_more_than_there_is(self):
+        # 60.9 of 180 min is 33.8 %: shown 33. The line floors what has run and ceils what is
+        # needed, so 101.6 of 173.2 reads 101/174, never 102/173.
+        end = T0 + timedelta(minutes=60.9)
+        epoch = Epoch(T0, end, 0, "carried", None, None, ())
+        got = anchoring(Measurement("loop", T0, end, (epoch,), (), (), (), (), (), self.HI))
+        self.assertEqual((got["state"], got["unbroken_min"], got["needed_min"], got["percent"]),
+                         ("waiting", 60.9, 2 * self.HI, 33))
+        a = {"state": "waiting", "unbroken_min": 101.6, "needed_min": 173.2, "transit_min": 6.0,
+             "transit_assumed": False, "percent": 58, "enclosed": 1, "min_anchors": MIN_ANCHORS}
+        self.assertEqual(anchoring_text("loop", "normal", a),
+                         "anchoring loop  normal [#####.....] 58% 101/174 min, anchors 1/3")
+
+    def test_anchors_that_no_longer_check_the_count_leave_it_waiting(self):
+        # At night no distinctive car crosses from minute 100: the epoch keeps its anchors'
+        # count ("anchors"), but none has checked it for more than CHECK_MAX_MIN by minute 180,
+        # so the Now is flagged (not sure), and the bar is not full either.
+        a, b, _ = wheel(31, 20.0, minutes=240)
+        night, end = T0 + timedelta(minutes=100), T0 + timedelta(minutes=180)
+        a, b = ([c if c.at < night else replace(c, signature=None) for c in xs if c.at < end]
+                for xs in (a, b))
+        m = self.measure(a, b, 180)
+        self.assertEqual(m.epochs[-1].source, "anchors")
+        self.assertGreater(end - m.epochs[-1].checked_at, timedelta(minutes=CHECK_MAX_MIN))
+        self.assertTrue(now_from(m, end).flagged)
+        got = anchoring(m)
+        self.assertEqual((got["state"], got["percent"]), ("waiting", 99))
+        self.assertGreaterEqual(got["enclosed"], MIN_ANCHORS)
+        self.assertTrue(anchoring_text("loop", "normal", got).endswith(
+            "long enough, waiting for distinctive cars at both lines"))
+
+    def test_a_count_carried_in_and_confirmed_says_so_not_a_stretch_it_never_needed(self):
+        # _epoch: anchors that follow a count carried in confirm it, enclosed or not. The bar is
+        # full, and its line names the carried count, not "anchors 0/3".
+        a, b, _ = wheel(31, 20.0, minutes=180)
+        s, e = T0 + timedelta(minutes=120), T0 + timedelta(minutes=150)
+        between = prior_at(self.measure(a, b, 121), s).between
+        m = measure([c for c in a if s <= c.at < e], [c for c in b if s <= c.at < e], 0.5,
+                    self.HI, end=e, prior=Prior(s, between, True, 2.0, s))
+        self.assertEqual(m.epochs[-1].source, "anchors")
+        got = anchoring(m)
+        self.assertEqual((got["state"], got["percent"]), ("anchored", 100))
+        self.assertLess(got["enclosed"], MIN_ANCHORS)
+        self.assertEqual(anchoring_text("loop", "normal", got),
+                         f"anchoring loop  normal [{'#' * ANCHOR_BAR}] 100%: anchored, the count "
+                         "carried in confirmed by distinctive cars that follow it")
+
+    def test_a_bar_broken_by_yolox_stopped_says_it_stays_broken_for_the_run(self):
+        # runner._gaps_for keeps a stopped YOLOX's gap open to the end of every measurement
+        broken = {"state": "broken", "unbroken_min": 0.0, "needed_min": 180.0,
+                  "transit_min": None, "transit_assumed": True, "percent": 0, "enclosed": 0,
+                  "min_anchors": MIN_ANCHORS}
+        self.assertEqual(anchoring_text("yolox", "mixed", broken, stopped=True),
+                         f"anchoring yolox mixed  [{'.' * ANCHOR_BAR}] broken for the rest of "
+                         "this run: YOLOX stopped, its line unseen (YOLOX STOPPED)")
+        self.assertIn("starts again once both are seen", anchoring_text("yolox", "mixed", broken))
+        waiting = dict(broken, state="waiting", unbroken_min=60.0, percent=33)
+        self.assertEqual(anchoring_text("yolox", "mixed", waiting, stopped=True),
+                         anchoring_text("yolox", "mixed", waiting))
 
 
 def _realised_bias(sim: Sim, line: str) -> float:

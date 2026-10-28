@@ -49,8 +49,10 @@ class StreamDown(StreamError):
 
 
 class StreamFrozen(StreamError):
-    """`seconds` is how far back from the last frame the rule that raised it looked: the
-    stretch a caller takes back, because those frames were already read as a quiet road."""
+    """`seconds` is how far back from the last frame the rule that raised it looked, at its
+    nominal fps: the stretch a caller takes back, because those frames were already read as a
+    quiet road. Frames come a little more than 1/fps apart, so the window itself is longer: the
+    City's 40 pairs spanned p50 20.96 s, at most 21.38 s, on 2026-10-27."""
 
     def __init__(self, message: str, seconds: float = FROZEN_SECONDS):
         super().__init__(message)

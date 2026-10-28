@@ -18,12 +18,21 @@ comparison only (ADR-0015 decision 2, accepted 2026-10-26: the owner, on this PC
 number shows is decided by combine.display alone (`estimate_view`). The section is filled only
 when `camera estimate` serves the page; under `camera view` it says the estimate is not running.
 Line B's camera (the City's) is read by that command and never shown: the section has no
-picture.
+picture. Each method's card also has its anchoring bar (transit.anchoring: how far the count
+between the lines has come towards anchors, 100 % only once anchored) and, for YOLOX, where it
+ran (cpu or gpu:<adapter>), flagged when its GPU path stopped.
+
+A queue card's lane is named by the lane type of its camera's count zone of the same lane name
+(cameras.json; `lane_types`): "lane-4 · SENTRI". That is a label only, and files nothing: a
+strip's `cbp_lane` is what files its readings as a CBP lane, and it stays null on every strip.
+A lane with no typed zone keeps "(lane type unconfirmed)". Where two strips are one lane
+(SPLIT_LANES), the camera says so once.
 """
 from __future__ import annotations
 
 import copy
 import json
+import math
 import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,6 +42,8 @@ from . import combine
 from .estimate import LAG_ALERT_S
 from .measure import plain
 from .reader import state_dir
+from .runner import HI_MIN
+from .transit import CHECK_MAX_MIN, MIN_ANCHORS
 
 ESTIMATE_PAIR = {"port_number": "240202", "direction": "north"}   # the pair `camera estimate`
                                                                   # measures (pairs.json)
@@ -60,6 +71,19 @@ CBP_LANES = {"sentri": (("car_sentri", "SENTRI"),),                 # display on
 AGREE_TEXT = {True: "The two methods agree (within 3 min or 20 %).",
               False: "The two methods disagree.",
               None: "Agreement: — (both methods need minutes)."}
+ANCHOR_NOTE = (
+    f"Anchoring bars: a method's count of the cars between the lines is anchored once "
+    f"{MIN_ANCHORS} distinctive cars seen at both lines fall inside one unbroken stretch (no gap "
+    f"at either line) of 2 × {HI_MIN:.0f} min less their trip, or once {MIN_ANCHORS} that "
+    "follow a count carried in (across a gap, or from the measurement before) confirm it. The "
+    "bar is how much of that stretch has run; it reads 100 % only once anchors set the count, "
+    f"and below it again once none has checked the count for {CHECK_MAX_MIN} min (the count is "
+    "then not sure). It says nothing of whether a wait is right.")
+TYPE_LABELS = {"normal": "normal", "sentri": "SENTRI"}   # a count zone's lane type, on a lane
+# Strips that are one lane on the road, as cameras.json's notes record them: the camera's card
+# says so once. pdn-north: the owner, 2026-10-27 (QUESTIONS.md Q-22).
+SPLIT_LANES = {"pdn-north": (("lane-4", "lane-5"), "sentri",
+                             "one SENTRI lane, split by barrels near the camera")}
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -123,6 +147,10 @@ footer { font-size:12.5px; color:var(--soft) }
 .seg { display:grid; grid-template-columns: 1fr auto; gap:0 10px; font-size:13px }
 .seg .detail { font-size:12px }
 .estimate .cbp { margin-top:0 }
+.bar { height:6px; border-radius:3px; background:var(--line); overflow:hidden; margin-top:4px }
+.bar > span { display:block; height:100%; background:var(--busy) }
+.bar.anchored > span { background:var(--ok) }
+.bar.broken { outline:1px dashed var(--down); outline-offset:1px }
 </style></head>
 <body><main>
 <header>
@@ -148,11 +176,16 @@ function left(iso) {
 }
 const LANE_NAMES = { car: "Cars", car_sentri: "SENTRI", car_ready: "Ready Lane", walk: "Walking",
   walk_ready: "Walking Ready", truck: "Trucks", truck_fast: "FAST" };
-function laneRow(l, stale) {
+function laneRow(l, stale, types) {
   // The worker decides what a lane's number means (worker.lane_summary); the page only prints it.
+  // With no CBP lane, the lane is named by its count zone's type (viewer.lane_types): a label
+  // only, filed as nothing.
   const row = el("div", "lane" + (stale ? " stale" : ""));
   const name = l.cbp_lane ? LANE_NAMES[l.cbp_lane] || l.cbp_lane : l.lane;
-  row.append(el("span", "lname", name + (l.cbp_lane ? "" : " (lane type unconfirmed)")));
+  const type = l.cbp_lane ? null : (types || {})[l.lane];
+  const label = el("span", "lname", name + (l.cbp_lane ? "" : type ? ` · ${type}` : " (lane type unconfirmed)"));
+  if (type) label.title = "The lane type of this strip's count zone (cameras.json). Its readings are not filed as a CBP lane.";
+  row.append(label);
   const w = el("span", "wait", l.display_value || "—");
   if (l.minutes != null) w.append(el("small", null, " min"));
   row.append(w);
@@ -186,7 +219,8 @@ function camInfo(c) {
   }
   box.append(st);
   const stale = c.phase === "reading" || c.phase === "down" || c.phase === "error";
-  for (const l of c.lanes || []) box.append(laneRow(l, stale));
+  for (const l of c.lanes || []) box.append(laneRow(l, stale, c.lane_types));
+  if (c.lanes_note && (c.lanes || []).length) box.append(el("div", "detail", c.lanes_note));
   return box;
 }
 
@@ -322,6 +356,21 @@ function renderEstimate() {
         card.append(r);
       }
       if (m.count_text) card.append(el("div", "detail", m.count_text));
+      if (m.anchoring) {
+        // viewer._anchoring_view: 100 only once anchored; the text says what the bar is
+        const bar = el("div", "bar " + m.anchoring.state);
+        bar.setAttribute("role", "progressbar");
+        bar.setAttribute("aria-label", `${m.label}: anchoring`);
+        bar.setAttribute("aria-valuemin", "0");
+        bar.setAttribute("aria-valuemax", "100");
+        bar.setAttribute("aria-valuenow", String(m.anchoring.percent));
+        const fill = el("span");
+        fill.style.width = `${m.anchoring.percent}%`;
+        bar.append(fill);
+        card.append(bar, el("div", "detail", m.anchoring.text));
+      }
+      if (m.device_text) card.append(el("div", "detail", m.device_text));
+      if (m.device_stopped) card.append(el("div", "flag", m.device_stopped));
       if (m.transient.length) card.append(el("div", "flag", m.transient.join(" · ")));
       if (m.info.length) card.append(el("div", "detail", m.info.join(" · ")));
       row.append(card);
@@ -331,6 +380,7 @@ function renderEstimate() {
     parts.push(sec);
   }
   parts.push(el("div", "legend", estimate.note));
+  if (estimate.anchor_note) parts.push(el("div", "legend", estimate.anchor_note));
   box.replaceChildren(...parts);
 }
 async function poll() {
@@ -367,7 +417,13 @@ class Handler(BaseHTTPRequestHandler):
             worker = getattr(self.server, "worker", None)
             if worker is not None:
                 with worker._lock:
-                    body = json.dumps(plain(worker.status), ensure_ascii=False).encode("utf-8")
+                    status = plain(worker.status)       # a copy: the worker's is never changed
+                cams = getattr(worker, "cameras", None)
+                if isinstance(cams, (list, tuple)):
+                    for cid, extra in lane_types(cams).items():
+                        if cid in status.get("cameras", {}):
+                            status["cameras"][cid].update(extra)
+                body = json.dumps(status, ensure_ascii=False).encode("utf-8")
             else:
                 path = state_dir() / "status.json"
                 body = path.read_bytes() if path.exists() else b'{"cameras": {}}'
@@ -387,6 +443,34 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args):     # the worker's output matters; request lines do not
         pass
+
+
+def lane_types(cameras) -> dict[str, dict]:
+    """camera -> what its queue card names its lanes by: `lane_types`, lane -> the type of the
+    camera's count zone of that lane name (TYPE_LABELS; the zone that covers the strip, paired
+    by name as transit.lane_types and estimate.line_a_place pair them), for lanes with exactly
+    one typed zone; and `lanes_note`, said once, where SPLIT_LANES names strips of one lane and
+    their zones are all of its type. A label only: nothing is filed by it (cbp_lane). It names
+    pdn-north's lane-4 and lane-5 "SENTRI", which reverses QUESTIONS.md Q-22's earlier "not
+    labelled SENTRI on the card", pending the owner's choice (Q-36 (ii))."""
+    out = {}
+    for cam in cameras:
+        types = {}
+        for lane in cam.lanes:
+            found = {z.lane_type for z in cam.count_zones if z.lane == lane.lane and z.lane_type}
+            if len(found) == 1:
+                kind = found.pop()
+                types[lane.lane] = TYPE_LABELS.get(kind, kind)
+        note = None
+        split = SPLIT_LANES.get(cam.id)
+        if split is not None:
+            lanes, kind, what = split
+            zones = [z for z in cam.count_zones if z.lane in lanes]
+            if ({z.lane for z in zones} == set(lanes)
+                    and all(z.lane_type == kind for z in zones)):
+                note = f"{' and '.join(lanes)} are {what}: each is read as its own strip."
+        out[cam.id] = {"lane_types": types, "lanes_note": note}
+    return out
 
 
 def _estimate(server) -> dict:
@@ -430,7 +514,7 @@ def estimate_view(snapshot: dict | None, cbp: dict | None = None,
            "stopped": snapshot.get("stopped"), "stale": stale,
            "message": (snapshot.get("stopped") or ("" if record else NOTHING_YET)
                        or (STALE.format(n=round(behind / 60)) if stale else "")),
-           "groups": [], "note": ESTIMATE_NOTE}
+           "groups": [], "note": ESTIMATE_NOTE, "anchor_note": ANCHOR_NOTE}
     lanes = (cbp or {}).get(port)
     for group, g in ((record or {}).get("groups") or {}).items():
         reasons = g.get("would_vote_reasons") or []
@@ -461,6 +545,7 @@ def _method_view(method: str, wait: dict, show: bool) -> dict:
     shown = combine.display(wait, show)
     count = wait.get("count") or {}
     sd = count.get("offset_sd")
+    device_text, device_stopped = _device_view(wait.get("devices"))
     return {"method": method, "label": METHOD_LABELS.get(method, method),
             "value": shown["value"], "unit": _unit(shown["value"]), "detail": shown["detail"],
             "minutes_shown": shown["minutes_shown"],
@@ -469,7 +554,62 @@ def _method_view(method: str, wait: dict, show: bool) -> dict:
                            f"Cars between the lines: count {count.get('source') or 'none'}, "
                            f"sd {'—' if sd is None else f'{sd} cars'}"
                            + ("" if count.get("sure") else ", not sure")),
+            "anchoring": _anchoring_view(wait.get("anchoring"), stopped=bool(device_stopped)),
+            "device_text": device_text, "device_stopped": device_stopped,
             "transient": list(wait.get("transient") or []), "info": list(wait.get("info") or [])}
+
+
+def _anchoring_view(a: dict | None, stopped: bool = False) -> dict | None:
+    """A method's anchoring bar (transit.anchoring, carried by the camera record): its state,
+    the percent it fills (100 only once anchored) and one line saying what it is. Minutes are
+    rounded down and the needed ones up, so it never shows more than there is. `stopped`: the
+    card's YOLOX stopped at a camera (_device_view), so a broken bar stays broken this run."""
+    if not a:
+        return None
+    state = a.get("state")
+    if state == "broken" and stopped:
+        text = ("Anchoring broken for the rest of this run: YOLOX stopped (flagged below), so "
+                "its line stays unseen.")
+    elif state == "broken":
+        text = ("Anchoring broken: a line is unseen now (a gap at A or B); the unbroken stretch "
+                "starts again once both are seen.")
+    elif state == "anchored" and a["enclosed"] < a["min_anchors"]:
+        # transit._epoch: anchors that follow a carried count confirm it, enclosed or not
+        text = ("Anchored: 100 % · the count carried in (across a gap, or from the measurement "
+                "before), confirmed by distinctive cars that follow it.")
+    else:
+        text = (f"{'Anchored' if state == 'anchored' else 'Anchoring'}: {a['percent']} % · "
+                f"{math.floor(a['unbroken_min'])} of {math.ceil(a['needed_min'])} min unbroken "
+                f"at both lines · anchors {a['enclosed']} of {a['min_anchors']}")
+        if state == "waiting" and a["unbroken_min"] >= a["needed_min"]:
+            text += " · long enough, waiting for distinctive cars at both lines"
+        if a.get("transit_assumed"):
+            text += " (no trip measured yet: taken as 0 min, the longest stretch)"
+        text += "."
+    return {"state": state, "percent": int(a.get("percent") or 0), "text": text}
+
+
+def _device_view(devices: dict | None) -> tuple[str, str]:
+    """Where a yolox card's boxes came from (runner.devices, carried by the camera record), and
+    a flag for each camera whose GPU path stopped; ("", "") for a card with none."""
+    if not devices:
+        return "", ""
+    where: dict[str, list[str]] = {}
+    for cid, d in devices.items():
+        where.setdefault(str(d.get("device") or combine.NO_DEVICE), []).append(cid)
+    text = "YOLOX ran on " + "; ".join(f"{dev} ({', '.join(cids)})" for dev, cids in where.items())
+    checked = [d for d in devices.values() if "cpu_checked" in d]
+    if checked:
+        text += (f", {sum(d['cpu_checked'] for d in checked)} frames also run on the CPU, "
+                 f"{sum(d.get('cpu_differed', 0) for d in checked)} of them differing")
+    stopped = [f"YOLOX STOPPED at {cid} ({d['stopped']}): its count there is a gap from "
+               f"{_hhmm(d.get('stopped_at'))} on, never made on the CPU instead"
+               for cid, d in devices.items() if d.get("stopped")]
+    return text + ".", " · ".join(stopped)
+
+
+def _hhmm(iso: str | None) -> str:
+    return "—" if not iso else f"{datetime.fromisoformat(iso):%H:%M} UTC"
 
 
 def _segment_view(seg: dict, count: dict, show: bool) -> dict:

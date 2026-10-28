@@ -479,6 +479,74 @@ class SelfCheckTest(unittest.TestCase):
         self.assertAlmostEqual(wrong["error_median"], 40 / RATE, delta=0.5)
 
 
+class DeviceTest(unittest.TestCase):
+    """Where YOLOX ran (runner.records' `devices`): records of two devices are never graded
+    together (gpu.py: the same frames give the same counts per path, not across paths), and a
+    camera record keeps it, and each method's anchoring, as shown values only."""
+    GPU = "gpu:NVIDIA GeForce RTX 4070"
+
+    def on(self, rec: dict, device: str) -> dict:
+        return dict(rec, method="yolox", devices={"pdn-north": {"device": device},
+                                                  "city-pdn-north": {"device": device}})
+
+    def test_a_records_device_is_its_cameras_one_and_none_for_the_loop(self):
+        gpu = {"device": self.GPU, "cpu_checked": 1, "cpu_differed": 0}
+        self.assertIsNone(combine.record_device({"method": "loop", "devices": {"a": gpu}}))
+        for devices in (None, {}, {"a": "not a mapping"}, {"a": {}}):
+            self.assertEqual(combine.record_device({"method": "yolox", "devices": devices}),
+                             combine.NO_DEVICE, devices)
+        stopped = dict(gpu, stopped="a DirectML run failed")
+        self.assertEqual(combine.record_device({"method": "yolox",
+                                                "devices": {"a": gpu, "b": stopped}}), self.GPU)
+        self.assertEqual(combine.record_device({"method": "yolox",
+                                                "devices": {"a": gpu, "b": {"device": "cpu"}}}),
+                         f"cpu + {self.GPU}")
+
+    def test_the_self_check_grades_each_device_apart(self):
+        run = qs.run(**PAST_A, minutes=300.0)
+        live = [measured(run, minute)[1] for minute in range(181, 211, 4)]
+        later = measured(run)[1]
+        name = f"yolox/sentri on {self.GPU}"
+        same = combine.self_check([*(self.on(r, self.GPU) for r in live),
+                                   self.on(later, self.GPU)])
+        self.assertEqual(list(same), [name])
+        self.assertEqual(same[name], combine.self_check([*live, later])["loop/sentri"])
+        # The later horizon counted on the CPU grades none of the GPU's Nows.
+        alone = combine.self_check([self.on(r, self.GPU) for r in live]).get(name)
+        apart = combine.self_check([*(self.on(r, self.GPU) for r in live),
+                                    self.on(later, "cpu")])
+        self.assertEqual(apart.get(name), alone)
+        self.assertLess((alone or {"windows": 0})["windows"], same[name]["windows"])
+        # Yolox records that name no device keep the plain name, and are never pooled either.
+        self.assertEqual(list(combine.self_check([*(dict(r, method="yolox") for r in live),
+                                                  dict(later, method="yolox")])),
+                         ["yolox/sentri"])
+        mixed = combine.self_check([*(dict(r, method="yolox") for r in live),
+                                    self.on(later, "cpu")])
+        self.assertNotIn("yolox/sentri on cpu", mixed)
+
+    def test_a_methods_entry_keeps_its_records_anchoring_and_devices_and_nothing_else_moves(self):
+        run = qs.run(**PAST_A)
+        end = run.at(run.minutes)
+        _, rec = measured(run)
+        anchoring = {"state": "waiting", "unbroken_min": 101.0, "needed_min": 174.0,
+                     "transit_min": 6.0, "transit_assumed": False, "percent": 58, "enclosed": 1,
+                     "min_anchors": 3}
+        yolox = dict(self.on(rec, self.GPU), anchoring=anchoring)
+        out = combine.combine([yolox, dict(rec, anchoring=anchoring)], no_line_at_a(end), pair(),
+                              end)
+        methods = out["groups"]["sentri"]["methods"]
+        self.assertEqual((methods["yolox"]["anchoring"], methods["yolox"]["devices"]),
+                         (anchoring, yolox["devices"]))
+        self.assertEqual(methods["loop"]["anchoring"], anchoring)
+        self.assertNotIn("devices", methods["loop"])
+        bare = combine.combine([dict(rec, method="yolox"), rec], no_line_at_a(end), pair(),
+                               end)["groups"]["sentri"]["methods"]
+        for m in ("loop", "yolox"):
+            self.assertEqual({k: v for k, v in methods[m].items()
+                              if k not in ("anchoring", "devices")}, bare[m], m)
+
+
 class DisplayTest(unittest.TestCase):
     """The one rule for what the owner sees (owner decision 2026-10-26, ADR-0015 decision 2)."""
 
@@ -669,6 +737,31 @@ class TailTest(unittest.TestCase):
             self.assertTrue(seg.known, group)
             self.assertAlmostEqual(seg.minutes, 30.0 / self.v / 60, msg=group)
             self.assertIn("metered before A", " ".join(seg.info))
+
+    def test_a_street_run_dropped_by_the_head_gap_is_a_floor_not_a_known_zero(self):
+        """measure's head gap (cameras.json max_head_gap_m) drops a line held 30 m into the
+        street view to no_queue, and logs where it was (far_run_m): not known to be no line."""
+        short = {"queue_m": 20.0, "speed": self.v}
+        queue = self.lanes(short, short, {"state": "no_queue"})
+        for s in queue:
+            if s["evidence"]["camera"] == "pdn-south-street":
+                s["evidence"]["detail"]["far_run_m"] = [30.0, 60.0]
+        for group in ("sentri", "normal"):
+            seg = self.tail(queue, group)
+            self.assertEqual((seg.minutes, seg.low, seg.known), (None, 0.0, False), group)
+            self.assertIn("dropped by the head gap", seg.why)
+
+    def test_an_a_lane_run_dropped_by_the_head_gap_counts_only_if_it_reached_a(self):
+        for far, want in (([25.0, 50.0], (0.0, 0.0, True)), ([25.0, 70.0], (None, 0.0, False))):
+            queue = []
+            for lane in A_LANES:
+                queue += signals("pdn-north", lane, self.end, state="no_queue")
+            for s in queue:
+                s["evidence"]["detail"]["far_run_m"] = far
+            for column in ("left-column", "right-column"):
+                queue += signals("pdn-south-street", column, self.end, state="no_queue")
+            seg = self.tail(queue)
+            self.assertEqual((seg.minutes, seg.low, seg.known), want, far)
 
 
 class PairFactsTest(unittest.TestCase):

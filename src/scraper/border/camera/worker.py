@@ -30,14 +30,15 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import cv2
 
 from ..cbp import PORTS
 from .calibration import Camera
+from .estimate import PAIRS_FILE
 from .measure import (
     MIN_SPEED_M_S,
-    SCALE_SLACK,
     LaneEstimate,
     image_features,
     plain,
@@ -63,6 +64,15 @@ def bridge_name(camera: Camera) -> str:
     return PORTS.get(camera.port_number, {}).get("name", camera.port_number)
 
 
+def camera_wait_cameras(path: Path = PAIRS_FILE) -> frozenset[str]:
+    """The cameras whose road on to the booth a pair's camera wait times (ADR-0015): each
+    pair's camera A and the street before it (pairs.json `a` and `street`)."""
+    with open(path, encoding="utf-8-sig") as f:
+        pairs = json.load(f)
+    return frozenset(pair[role] for key, pair in pairs.items() if not key.startswith("_")
+                     for role in ("a", "street") if pair.get(role))
+
+
 def _approx_reasons(lane, scale_verified: bool) -> list[str]:
     """Why a lane's minutes are approximate. Only a booth out of view can make them so: with
     the booth in view the distance is the visible line and the scale cancels. Out of view
@@ -83,24 +93,25 @@ def _approx_reasons(lane, scale_verified: bool) -> list[str]:
 
 def _display(kind: str | None, minutes, low, high, approx: bool) -> tuple[str, str]:
     """The number as the page prints it, and its range text."""
+    if kind == "clear":
+        return "no line", ""
     if minutes is None:
         return "—", ""
     if kind == "zero":
         return "0", ""
     if kind == "floor":
         return f"≥ {round(low if low is not None else minutes)}", "at least: the line runs out of view"
-    if kind == "upper":
-        return f"under ~{round(minutes)}", ""
     value = f"{'≈ ' if approx else ''}{round(minutes)}"
     if low is not None and high is not None and round(low) != round(high):
         return value, f"range {round(low)}–{round(high)} min"
     return value, ""
 
 
-def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
-                 slowest_speed: float | None = None, scale_verified: bool = True) -> dict:
+def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime, *,
+                 scale_verified: bool = True, camera_wait: bool = False) -> dict:
     """One lane, as the viewer shows it: a number of minutes whenever one can be stood behind,
-    labelled for what it is, and a reason when there is none.
+    labelled for what it is, and a reason when there is none. `camera_wait`: this camera's
+    road on to the booth is timed by a pair's camera wait (camera_wait_cameras).
 
     - queued: the 15-minute rolling wait and its range ("≈" whenever the booth is out of view:
       the road to it is timed at the visible speed, and its distance or the camera's scale may
@@ -111,26 +122,38 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
       the last 15 minutes' speed. Never an older line's wait: a short line at the booth is
       always too short to time, and showing the wait of a long line from ten minutes ago
       would be wrong exactly when the line has cleared;
+    - a line on a camera of the camera wait, booth out of view: the line's length and speed,
+      and no minutes, because the wait is the camera wait's. The (D + L) / v above is the form
+      ADR-0015 rejects as a wait, and the camera wait times this road. Cameras with no camera
+      wait (Lerdo, BOTA) keep it, approximate, as nothing else times their road;
     - no line, booth in view: 0;
-    - no line, booth out of view: a line could still be waiting between the view and the
-      booth, shorter than that stretch. Timed at the SLOWEST recent queue speed among this
-      camera's lanes (this one included), it is "probably under N". It is an estimate, not a
-      bound: a hidden line could move slower still, so the page never prints a strict "<";
-    - no line and no recent speed to time one: no number, and the reason why."""
+    - no line, booth out of view: "no line", and no minutes, saying whether the camera wait
+      times the road on to the booth. There is nothing in view to time, and timing that road
+      at a queue speed is (D + L) / v with L = 0. That ceiling ("under ~N", at the slowest
+      lane's recent speed) read 18-41 min on empty lanes on 2026-10-27, and was dropped;
+    - no line and no booth distance: "no line", and the reason why;
+    - nothing to measure: no number, and the reason why."""
     queued = est.state in ("queue", "stalled")
+    line = queued or (est.state == "insufficient" and est.queue_m > 0)
     distance = lane.booth_distance_m
     uncertainty = lane.booth_distance_uncertainty_m
     reasons = _approx_reasons(lane, scale_verified)
     speed = roll.get("speed_m_s")
     timed = speed is not None and speed >= MIN_SPEED_M_S
+    n = roll.get("windows", 0)
+    still = f"not moving over the last {n} reading{'' if n == 1 else 's'}"
+    unseen = None if not distance else (
+        f"the {round(distance)} m to the booth are out of view"
+        + (": the camera wait times them" if camera_wait else "; nothing here times them"))
     minutes = low = high = None
     kind, why, note = None, None, None
-    if queued:
+    if line and camera_wait and distance:
+        kind, note = "line", unseen
+    elif queued:
         if distance is None:
             why = "booth distance not measured"
         elif not timed:
-            n = roll.get("windows", 0)
-            why = f"line not moving over the last {n} reading{'' if n == 1 else 's'}"
+            why = f"line {still}"
         else:
             minutes, low, high = roll.get("wait_min"), roll.get("low_min"), roll.get("high_min")
             floor = distance == 0 and (roll.get("lower_bound") or est.beyond_view)
@@ -154,15 +177,9 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
         if distance == 0:
             minutes, low, high, kind = 0.0, 0.0, 0.0, "zero"
         elif distance is None:
-            why = "no line in view; booth distance not measured"
-        elif slowest_speed is not None and slowest_speed >= MIN_SPEED_M_S:
-            stretch = distance + uncertainty
-            minutes = stretch / slowest_speed / 60 * (1 if scale_verified else 1 + SCALE_SLACK)
-            kind = "upper"
-            note = ("no line in view; a line waiting nearer the booth would probably take under "
-                    "this (timed at the slowest lane's recent speed)")
+            kind, why = "clear", "no line in view; booth distance not measured"
         else:
-            why = "no line in view, and no recent line on this camera to time one"
+            kind, note = "clear", unseen
     else:
         why = "not enough movement to measure"
     if est.beyond_view:
@@ -171,18 +188,25 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
             # The minutes stop at the edge of the view. A floor says so in its "at least"; an
             # estimate has to name it, or "≈ 47" reads as the whole line's wait.
             reasons.append("the line past the view not counted")
-    approx = bool(reasons) and kind in ("estimate", "floor", "upper")
-    value, range_text = _display(kind, minutes, low, high, approx)
+    approx = bool(reasons) and kind in ("estimate", "floor")
+    length = f"line {round(est.queue_m)} m{'+' if est.beyond_view else ''}"
+    if kind == "line":
+        value, range_text = length, ""
+    else:
+        value, range_text = _display(kind, minutes, low, high, approx)
     bits = []
     if range_text:
         bits.append(range_text)
-    if queued or (est.state == "insufficient" and est.queue_m > 0):
-        bits.append(f"line {round(est.queue_m)} m{'+' if est.beyond_view else ''}")
+    if line:
+        if kind != "line":
+            bits.append(length)
         if queued and timed:
             bits.append(f"moving {speed:.2f} m/s")
+        elif queued and kind == "line":
+            bits.append(still)
         if est.state == "stalled":
             bits.append("not moving this minute")
-    elif est.state == "no_queue" and kind != "upper" and why is None:
+    elif est.state == "no_queue" and why is None:
         bits.append("no line in view")
     if note:
         bits.append(note)
@@ -196,7 +220,7 @@ def lane_summary(est: LaneEstimate, lane, roll: dict, observed: datetime,
         "lane": est.lane, "cbp_lane": lane.cbp_lane, "state": est.state, "kind": kind,
         "minutes": r(minutes), "low_min": r(low), "high_min": r(high),
         "approx": approx, "approx_reasons": reasons if approx else [],
-        "upper_bound": kind == "upper", "lower_bound": kind == "floor",
+        "lower_bound": kind == "floor",
         "why_no_minutes": why, "note": note,
         "display_value": value, "display_detail": " · ".join(bits),
         "queue_m": est.queue_m, "beyond_view": est.beyond_view,
@@ -254,6 +278,7 @@ class Worker:
         self.cameras, self.seconds, self.every = cameras, seconds, every
         self.emit, self.alert, self.compare_cbp = emit, alert, compare_cbp
         self.readers = {c.id: CameraReader(c) for c in cameras}
+        self.camera_wait = camera_wait_cameras()
         self.history: dict[tuple[str, str], list] = {}
         self.learnt: dict[str, int] = {}
         # The latest "what it measured" picture per camera, JPEG bytes, in memory only: the
@@ -359,14 +384,12 @@ class Worker:
             past[:] = [(t, e) for t, e in past if now - t <= HISTORY_SECONDS]
             rolls[est.lane] = rolling(past, now, lane.booth_distance_m,
                                       lane.booth_distance_uncertainty_m, cam.scale_verified)
-        # The slowest recent queue on this camera, for timing a line that may be out of view.
-        speeds = [r["speed_m_s"] for r in rolls.values()
-                  if r.get("speed_m_s") is not None and r["speed_m_s"] >= MIN_SPEED_M_S]
-        slowest = min(speeds) if speeds else None
         summaries = []
         for est in estimates:
             lane, roll = lanes[est.lane], rolls[est.lane]
-            summaries.append(lane_summary(est, lane, roll, observed, slowest, cam.scale_verified))
+            summaries.append(lane_summary(est, lane, roll, observed,
+                                          scale_verified=cam.scale_verified,
+                                          camera_wait=cam.id in self.camera_wait))
             if self.emit:
                 sig = as_signal(est, lane, observed, cam.direction_verified)
                 sig["evidence"]["rolling"] = roll

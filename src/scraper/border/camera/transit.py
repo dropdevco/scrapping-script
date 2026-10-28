@@ -98,7 +98,8 @@ which of the two it is; over a horizon of 2 x hi_min no window is both, so a rea
 half from a record that marks it complete. Right after a gap they rest on the carried offset,
 flagged, until enough of the new epoch is seen for its anchors to confirm it (about one transit
 plus hi_min): a caller that writes a window once must either wait that long after a gap or
-accept a flag a later horizon would clear. LiveTest runs this.
+accept a flag a later horizon would clear. LiveTest runs this. `anchoring` says how far the
+latest epoch has come towards anchors (each record's progress, for the owner's bars).
 
 Signatures are crossing.look()'s form, (saturation x cos hue, saturation x sin hue, value, width
 share), which both counters emit. Two are compared by `colour_distance` against MATCH_DISTANCE,
@@ -177,6 +178,7 @@ CHECK_MAX_MIN = 60           # ASSUMPTION: a sure count stays sure this long aft
 DRIFT_MIN_DT_MIN = 10        # Theil-Sen pairs closer in time than this say nothing about drift
 DRIFT_MIN_ENDS = 5           # and a slope needs this many anchors at each end of those pairs
 DRIFT_MAX_ANCHORS = 400      # Theil-Sen looks at every pair: thin evenly to this many anchors
+ANCHOR_BAR = 10              # characters in the terminal's anchoring bar (`anchoring_text`)
 _TICK = timedelta(microseconds=1)
 _SURE = ("given", "anchors", "continued")   # offset sources whose transits are not flagged,
                                             # for CHECK_MAX_MIN after the offset's last check
@@ -1061,6 +1063,100 @@ def _window_record(w: Window) -> dict:
         "between": w.between, "gap": w.gap, "flagged": w.flagged, "anchors": w.anchors,
         "anchor_residual": _r(w.anchor_residual),
     }
+
+
+# --- anchoring progress ---------------------------------------------------------------------
+
+def anchoring(m: Measurement) -> dict:
+    """How far the latest epoch has come towards anchoring its count, as each record carries it
+    (`anchoring`) and the owner's progress bars show it (asked 2026-10-28, for future tests).
+    Counts and minutes only: no anchor's time.
+
+    An anchor of a trip of T min is enclosed only in an unbroken stretch (no gap at either line:
+    an epoch) longer than 2 x hi_min - T (`_enclosed`), and the count is anchored once
+    MIN_ANCHORS enclosed anchors agree, or once as many that follow a count carried in (across a
+    gap, or the runner's prior) confirm it, enclosed or not (`_epoch`). So `state` is:
+    - "broken": a gap at either line runs to the end of what is measured (the loop learning,
+      YOLOX stopped): nothing is unbroken now, and the stretch starts again once both lines are
+      seen - never after YOLOX stopped, whose gap stays open for the rest of the run
+      (runner._gaps_for). A stream down and a frozen or still picture are not shown so while
+      they last: the runner holds the end at that line's last frame that moved (seen_until),
+      which no gap covers yet, so the state stays as it was there (the page flags the record
+      stale after LAG_ALERT_S); once frames move again the gap is recorded and a new epoch
+      starts after it;
+    - "anchored": the latest epoch's count is set by its anchors ("anchors"), or given, and
+      was checked no more than CHECK_MAX_MIN before the end (`_unsure`, the Now's own flag);
+    - "waiting": anything else, "continued", "carried", "disputed", "few-anchors" and anchors
+      last checked more than CHECK_MAX_MIN before the end (at night) included.
+    `percent` is the share of `needed_min` the epoch has run, rounded down and never above 99
+    while waiting: a stretch long enough still holds no anchor until distinctive cars cross
+    both lines, and only an anchored count is 100. T (`transit_min`) is the median of the
+    latest WINDOW_MIN window, by exit, holding at least MIN_STATS_N unflagged transits, taken at
+    most hi_min (a longer trip cannot anchor); with none, 0 (`transit_assumed`), which asks for
+    the longest stretch, 2 x hi_min. None of this says the offset is right: only `measure`
+    sets "anchors", and a transit's flag and the display rule (combine.display) are as before."""
+    broken = any(g0 < m.end <= g1 for g0, g1 in (*m.gaps_a, *m.gaps_b))
+    last = None if broken or not m.epochs else m.epochs[-1]
+    t = _latest_transit(m)
+    needed = 2 * m.hi_min - min(t or 0.0, m.hi_min)
+    unbroken = 0.0 if last is None else _minutes(last.end - last.start)
+    if broken:
+        state, percent = "broken", 0
+    elif (last is not None and last.source in ("anchors", "given")
+          and not _unsure(last, m.end)):
+        state, percent = "anchored", 100
+    else:
+        state, percent = "waiting", min(99, math.floor(100 * unbroken / needed))
+    return {"state": state, "unbroken_min": round(unbroken, 1), "needed_min": round(needed, 1),
+            "transit_min": _r(t, 1), "transit_assumed": t is None, "percent": percent,
+            "enclosed": 0 if last is None else last.enclosed, "min_anchors": MIN_ANCHORS}
+
+
+def _latest_transit(m: Measurement) -> float | None:
+    """The median minutes of the unflagged transits that crossed B in the latest WINDOW_MIN
+    window (aligned to the clock) holding at least MIN_STATS_N of them; None with none."""
+    done = sorted((t for t in m.transits if not t.flagged), key=lambda t: t.exited_at)
+    width = timedelta(minutes=WINDOW_MIN)
+    while len(done) >= MIN_STATS_N:
+        k = bisect_left([t.exited_at for t in done], _floor(done[-1].exited_at, width))
+        if len(done) - k >= MIN_STATS_N:
+            return _quantile(sorted(t.minutes for t in done[k:]), 0.5)
+        done = done[:k]
+    return None
+
+
+def anchoring_text(method: str, group: str, a: Mapping | None, *,
+                   stopped: bool = False) -> str:
+    """A record's `anchoring` as one line of the terminal status, in ASCII, e.g.
+    "anchoring loop  normal [#####.....] 58% 101/174 min, anchors 1/3". Minutes are rounded
+    down and the needed ones up, and the bar fills by whole tenths, so it never shows more than
+    there is. A count anchored by the anchors that follow a count carried in (fewer enclosed
+    than MIN_ANCHORS, `_epoch`) says so, not a stretch and anchors it never needed. `stopped`:
+    YOLOX stopped at a camera this run (runner.yolox_stopped), so a broken bar of this method
+    stays broken to the end of the run."""
+    head = f"anchoring {method!s:5} {group!s:6}"
+    if not a:
+        return f"{head} [{'?' * ANCHOR_BAR}] not recorded"
+    filled = min(ANCHOR_BAR, a["percent"] * ANCHOR_BAR // 100)
+    bar = "#" * filled + "." * (ANCHOR_BAR - filled)
+    if a["state"] == "broken" and stopped:
+        return (f"{head} [{bar}] broken for the rest of this run: YOLOX stopped, its line unseen "
+                "(YOLOX STOPPED)")
+    if a["state"] == "broken":
+        return (f"{head} [{bar}] broken: a line is unseen now (a gap at A or B); the stretch "
+                "starts again once both are seen")
+    if a["state"] == "anchored" and a["enclosed"] < a["min_anchors"]:
+        return (f"{head} [{bar}] 100%: anchored, the count carried in confirmed by distinctive "
+                "cars that follow it")
+    text = (f"{head} [{bar}] {a['percent']}% {math.floor(a['unbroken_min'])}/"
+            f"{math.ceil(a['needed_min'])} min, anchors {a['enclosed']}/{a['min_anchors']}")
+    if a["state"] == "anchored":
+        text += ": anchored"
+    elif a["unbroken_min"] >= a["needed_min"]:
+        text += ": long enough, waiting for distinctive cars at both lines"
+    if a["transit_assumed"]:
+        text += " (no trip measured yet: taken as 0 min, the longest stretch)"
+    return text
 
 
 # --- helpers --------------------------------------------------------------------------------

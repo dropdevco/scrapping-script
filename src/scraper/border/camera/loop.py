@@ -400,7 +400,7 @@ def _across(left: np.ndarray, right: np.ndarray, rows_l: np.ndarray, rows_r: np.
     Judged alone, each zone sees only its side of such a car. Rendered (a 7 m road split into
     two 3.5 m zones, steady flow), that counted a 1.8 m car centred within 0.05 m of the line in
     neither zone about half the time, and a 2.2 m car within 0.15 m of it in both. On pdn-north
-    lane-1 to lane-3 are equal thirds of the carriageway, not painted lanes, so cars need not
+    lane-1 to lane-3 are equal thirds of the carriageway, not the painted lanes, so cars need not
     keep off their lines. A row holds a car across the line when its foreground runs on across
     it (within EDGE_M on both sides), or when each zone holds only a sliver of it (its side
     outline); either way only when its two sides lie a car's width apart (ROW_SPAN_M to

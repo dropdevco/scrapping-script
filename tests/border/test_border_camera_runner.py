@@ -1,6 +1,8 @@
 """The two-camera crossing-time runner: what becomes a gap, what is kept, and what is written."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -19,10 +21,11 @@ pytest.importorskip("cv2")
 from test_border_camera_transit import T0 as SIM_T0
 from test_border_camera_transit import simulate, wheel
 
+from scraper.border.camera import gpu, transit
 from scraper.border.camera import runner as runner_mod
-from scraper.border.camera import transit
 from scraper.border.camera.calibration import camera_from_dict, load_cameras
 from scraper.border.camera.crossing import SIGNATURE_TTL_S, Crossing
+from scraper.border.camera.gpu import GpuFailed, GpuRefused
 from scraper.border.camera.hls import Blocked, Gap, Stamped
 from scraper.border.camera.runner import TransitRunner
 from scraper.border.camera.stream import FROZEN_SECONDS, StreamFrozen, StreamLost
@@ -89,6 +92,12 @@ class FakeCounter:
 
 def frame(at, moved=None):
     return Stamped(np.zeros((360, 640, 3), np.uint8), at, 0, moved)
+
+
+def group_lines(status: str) -> list[str]:
+    """The status's line per method and lane type, without its anchoring bars and YOLOX lines."""
+    return [ln for ln in status.splitlines()[1:]
+            if not ln.lstrip().startswith(("anchoring ", "yolox device:", "YOLOX STOPPED"))]
 
 
 class RunnerSetUp(unittest.TestCase):
@@ -687,6 +696,286 @@ class Ticks(unittest.TestCase):
                              (alone.epochs[0].source, alone.epochs[0].offset), f"minute {t}")
 
 
+class GpuCounter(FakeCounter):
+    """A YOLOX counter on the GPU: its device_record as gpu.GpuYolox gives it, and from `fail_at`
+    on gpu.GpuFailed out of `add`, as every GPU run raises once the GPU path has stopped. It
+    stops alone, so beside one that never fails it stands in for a camera whose partner's YOLOX
+    runs on the CPU: two cameras on the GPU share one stop (gpu.STATE, SharedGpuStop)."""
+    DEVICE = "gpu:NVIDIA GeForce RTX 4070"
+
+    def __init__(self, camera, line, fail_at=None):
+        super().__init__(camera, line, "yolox")
+        self.fail_at, self.frames = fail_at, 0
+
+    def add(self, frame):
+        if self.fail_at is not None and frame.at >= self.fail_at:
+            raise GpuFailed("a DirectML run on NVIDIA GeForce RTX 4070 failed: test")
+        self.frames += 1
+        return super().add(frame)
+
+    def device_record(self):
+        return {"device": self.DEVICE, "cpu_checked": (self.frames + 29) // 30,
+                "cpu_differed": 0}
+
+
+class YoloxDevice(RunnerSetUp):
+    """Where YOLOX runs (gpu.py), and a GPU path that stops mid-run: each GPU camera's YOLOX is a
+    gap from its frame before, never counted on the CPU instead, and the loop goes on. The stop
+    is process-wide (gpu.STATE); SharedGpuStop drives two GPU cameras through it."""
+    FAIL_AT = T0 + timedelta(seconds=900)
+
+    def setUp(self):
+        super().setUp()
+        with unittest.mock.patch.object(TransitRunner, "_counters", lambda self, c: []):
+            self.run_ = TransitRunner(self.a, self.b, methods=("loop", "yolox"))
+        self.ya, self.yb = GpuCounter(self.a, "A", self.FAIL_AT), GpuCounter(self.b, "B")
+        self.run_.counters = {"cam-a": [self.ca, self.ya], "cam-b": [self.cb, self.yb]}
+        for counter in (self.ca, self.ya):
+            counter.cars_on = {T0 + timedelta(seconds=s) for s in range(0, 1200, 30)}
+        for counter in (self.cb, self.yb):
+            counter.cars_on = {T0 + timedelta(seconds=s) for s in range(300, 1500, 30)}
+
+    def test_a_gpu_that_fails_drops_that_cameras_yolox_and_gaps_it_from_the_frame_before(self):
+        looked = []
+        real = self.ca.add
+        self.ca.add = lambda f: looked.append(f.at) or real(f)
+        with self.assertLogs(runner_mod.log, "ERROR") as logs:
+            self.feed_both(1500)
+        self.assertIn("cam-a: YOLOX STOPPED for the rest of this run", logs.output[0])
+        self.assertEqual(self.run_.counters, {"cam-a": [self.ca], "cam-b": [self.cb, self.yb]})
+        self.assertEqual(len(looked), 50)                   # the loop saw every frame
+        before = self.FAIL_AT - timedelta(seconds=30)
+        since, why, was = self.run_.yolox_stopped["cam-a"]
+        self.assertEqual((since, was["device"]), (before, GpuCounter.DEVICE))
+        self.assertIn("DirectML", why)
+        self.assertNotIn("cam-a", self.run_.errors)        # not a stream error: no reconnect
+        at = self.run_.seen_until()
+        stopped = [g for g in self.run_._gaps_for("yolox", "A", at) if "YOLOX" in g.reason]
+        self.assertEqual([(g.after, g.seconds) for g in stopped],
+                         [(before, (at - before).total_seconds())])
+        for key in (("loop", "A"), ("yolox", "B"), ("loop", "B")):
+            self.assertFalse([g for g in self.run_._gaps_for(key[0], key[1], at)
+                              if "YOLOX" in g.reason], key)
+
+        records = {r["method"]: r for r in self.run_.records(self.run_.measure())}
+        self.assertEqual(records["yolox"]["anchoring"]["state"], "broken")
+        self.assertNotEqual(records["loop"]["anchoring"]["state"], "broken")
+        self.assertIn("YOLOX stopped", json.dumps(records["yolox"]["gaps_a"]))
+        devices = records["yolox"]["devices"]
+        self.assertEqual(devices["cam-b"], {"device": GpuCounter.DEVICE, "cpu_checked": 2,
+                                            "cpu_differed": 0})
+        self.assertEqual(devices["cam-a"]["stopped"], why)
+        self.assertEqual(devices["cam-a"]["stopped_at"], (T0 + timedelta(minutes=14)).isoformat())
+        self.assertNotIn("devices", records["loop"])         # no YOLOX path touches its count
+
+        status = self.run_.status({})
+        self.assertIn(f"  yolox device: cam-a {GpuCounter.DEVICE} (checked on the CPU: 1 frames, "
+                      "0 differed) STOPPED; cam-b", status)
+        self.assertIn("  YOLOX STOPPED at cam-a: a DirectML run", status)
+        self.assertIn("the loop goes on", status)
+        # its bar says the stop is for the run, not that the stretch starts again
+        status = self.run_.status(self.run_.measure())
+        self.assertIn("anchoring yolox mixed  [..........] broken for the rest of this run: "
+                      "YOLOX stopped", status)
+        self.assertNotIn("anchoring yolox mixed  [..........] broken: a line is unseen now",
+                         status)
+
+    def test_a_gpu_failure_while_reading_is_not_a_stream_failure(self):
+        # Before, GpuFailed fell into _feed's catch-all: the stream reopened, the GPU raised again
+        # on the next frame, and both methods went dark, the loop's frames read again.
+        looked = []
+        self.ca.add = lambda f: looked.append(f.at) or []
+        times = [T0 + timedelta(seconds=s) for s in range(0, 1200, 30)]
+        readers = iter([ScriptedReader(times, StreamLost("dropped"))])
+
+        def next_reader(cam):
+            try:
+                return next(readers)
+            except StopIteration:
+                self.run_._stop.set()
+                raise StreamLost("script over") from None
+        with self.assertLogs(runner_mod.log, "ERROR") as logs, \
+                unittest.mock.patch.object(runner_mod, "live_reader", next_reader), \
+                unittest.mock.patch.object(runner_mod, "RECONNECT_S", 0.0):
+            self.run_._feed(self.a)
+        self.assertEqual(looked, times)
+        self.assertEqual(self.run_.reconnects["cam-a"], 1)  # the stream's own end, once
+        self.assertFalse([ln for ln in logs.output if "failed; reconnecting" in ln], logs.output)
+        self.assertEqual(self.run_.counters["cam-a"], [self.ca])
+
+    def test_records_name_each_cameras_device_and_carry_their_anchoring(self):
+        self.ya.fail_at = None
+        self.feed_both(1500)
+        measured = self.run_.measure()
+        records = self.run_.records(measured)
+        self.assertEqual([r["method"] for r in records], ["loop", "yolox"])
+        self.assertEqual({cid: d["device"] for cid, d in records[1]["devices"].items()},
+                         {"cam-a": GpuCounter.DEVICE, "cam-b": GpuCounter.DEVICE})
+        for rec in records:
+            m, _ = measured[(rec["method"], "mixed")]
+            self.assertEqual(rec["anchoring"], transit.anchoring(m))
+        lines = self.run_.status(measured).splitlines()
+        for method in ("loop", "yolox"):
+            group = next(i for i, ln in enumerate(lines) if ln.startswith(f"  {method:5} mixed"))
+            self.assertTrue(lines[group + 1].startswith(f"  anchoring {method:5} mixed  ["))
+
+    def test_the_device_asked_for_reaches_each_detector(self):
+        with unittest.mock.patch("scraper.border.camera.detect.Yolox.load",
+                                 return_value=object()) as load:
+            run = TransitRunner(self.a, self.b, methods=("yolox",), device="cpu")
+        self.assertEqual([c.kwargs["device"] for c in load.call_args_list], ["cpu", "cpu"])
+        self.assertEqual(run.device, "cpu")
+        # A detector with no `record` of its own (a stand-in) is the CPU's (detect.Yolox).
+        self.assertEqual(run.devices(), {"cam-a": {"device": "cpu"}, "cam-b": {"device": "cpu"}})
+
+
+class GpuSession:
+    """An ORT session for gpu.DmlNet: from `fail_from` on, every run raises, as a lost device's
+    does."""
+
+    def __init__(self, fail_from=None):
+        self.fail_from, self.runs, self.at = fail_from, 0, None
+
+    def run(self, outputs, feeds):
+        if self.fail_from is not None and self.at >= self.fail_from:
+            raise RuntimeError("887A0005 device removed (test)")
+        self.runs += 1
+        return [np.zeros(gpu.OUTPUT_SHAPE, np.float32)]
+
+
+class DmlCounter(FakeCounter):
+    """A yolox counter whose every frame runs through the real gpu.DmlNet.forward (on a
+    GpuSession, no ORT), so a stop reaches it through gpu.STATE as it reaches gpu.GpuYolox."""
+
+    def __init__(self, camera, line, session):
+        super().__init__(camera, line, "yolox")
+        self.session, self.net = session, gpu.DmlNet.__new__(gpu.DmlNet)
+        self.net.session = session
+        self.net.adapter = SimpleNamespace(name="NVIDIA GeForce RTX 4070")
+        self.net.input_name, self.net.output_name, self.net._blob = "images", "output", None
+
+    def add(self, frame):
+        self.session.at = frame.at
+        self.net.setInput(np.zeros(gpu.INPUT_SHAPE, np.float32))
+        self.net.forward()
+        return super().add(frame)
+
+    def device_record(self):
+        return {"device": GpuCounter.DEVICE, "cpu_checked": 0, "cpu_differed": 0}
+
+
+class SharedGpuStop(RunnerSetUp):
+    """Both cameras' YOLOX on the GPU, as `auto` puts them: the GPU path's stop is the process's
+    (gpu.STATE), so a run that fails at one camera stops the other's YOLOX at its next frame,
+    each with its own gap and its own alert."""
+    FAIL_AT = T0 + timedelta(seconds=900)
+
+    def setUp(self):
+        super().setUp()
+        patcher = unittest.mock.patch.object(gpu, "STATE", gpu.GpuState())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with unittest.mock.patch.object(TransitRunner, "_counters", lambda self, c: []):
+            self.run_ = TransitRunner(self.a, self.b, methods=("loop", "yolox"))
+        self.sa, self.sb = GpuSession(self.FAIL_AT), GpuSession()
+        ya, yb = DmlCounter(self.a, "A", self.sa), DmlCounter(self.b, "B", self.sb)
+        self.run_.counters = {"cam-a": [self.ca, ya], "cam-b": [self.cb, yb]}
+
+    def test_a_stop_at_one_camera_stops_the_other_cameras_yolox_on_the_gpu_too(self):
+        with self.assertLogs(runner_mod.log, "ERROR") as logs:
+            self.feed_both(1500)
+        self.assertEqual(self.run_.counters, {"cam-a": [self.ca], "cam-b": [self.cb]})
+        self.assertEqual(set(self.run_.yolox_stopped), {"cam-a", "cam-b"})
+        self.assertEqual(self.sb.runs, 30)              # cam-b's own runs never failed
+        self.assertEqual(len([ln for ln in logs.output if "YOLOX STOPPED" in ln]), 2)
+        before = self.FAIL_AT - timedelta(seconds=30)
+        at = self.run_.seen_until()
+        for line in ("A", "B"):
+            stopped = [g for g in self.run_._gaps_for("yolox", line, at) if "YOLOX" in g.reason]
+            self.assertEqual([g.after for g in stopped], [before], line)
+            self.assertFalse([g for g in self.run_._gaps_for("loop", line, at)
+                              if "YOLOX" in g.reason], line)
+
+
+class TransitCommand(RunnerSetUp):
+    """`camera transit --device`: an explicit "gpu" the GPU refuses stops before anything is
+    read, and lets go of the lock."""
+
+    def args(self, device):
+        return SimpleNamespace(a="cam-a", b="cam-b", methods="loop,yolox", every=60, minutes=0,
+                               device=device)
+
+    def run_command(self, args, counters):
+        from scraper.border.camera import worker
+
+        out, real, self.held = io.StringIO(), worker.hold_lock, []
+
+        def hold_lock(path):    # keeps the handle, so only cmd_transit itself can close it
+            self.held.append(real(path))
+            return self.held[-1]
+        with unittest.mock.patch.object(TransitRunner, "_counters", counters), \
+                unittest.mock.patch.object(TransitRunner, "start") as start, \
+                unittest.mock.patch.object(worker, "hold_lock", hold_lock), \
+                contextlib.redirect_stdout(out):
+            code = runner_mod.cmd_transit(args, {"cam-a": self.a, "cam-b": self.b})
+        self.assertEqual([h.closed for h in self.held], [True])         # it was let go
+        return code, out.getvalue(), start
+
+    def test_gpu_asked_for_and_refused_stops_with_a_clear_message(self):
+        def refuse(runner, cam):
+            raise GpuRefused("no NVIDIA GPU among the DirectML devices: none")
+        code, out, start = self.run_command(self.args("gpu"), refuse)
+        self.assertEqual(code, 1)
+        start.assert_not_called()
+        self.assertIn("YOLOX on the GPU was asked for (--device gpu, or CHISME_YOLOX_DEVICE=gpu) "
+                      "and refused: no NVIDIA GPU", out)
+        self.assertIn("--device auto", out)
+
+    def test_any_other_error_building_the_runner_lets_go_of_the_lock_and_is_raised(self):
+        def fail(runner, cam):
+            raise OSError("yolox.onnx is missing")
+        with self.assertRaisesRegex(OSError, "yolox.onnx is missing"):
+            self.run_command(self.args("cpu"), fail)
+        self.assertEqual([h.closed for h in self.held], [True])
+
+    def test_the_device_is_the_option_else_the_environment_else_auto(self):
+        seen = []
+
+        def counters(runner, cam):
+            seen.append(runner.device)
+            return []
+        for device, env, want in (("cpu", "gpu", "cpu"), (None, "gpu", "gpu"), (None, "", "auto")):
+            with unittest.mock.patch.dict(os.environ, {"CHISME_YOLOX_DEVICE": env}):
+                code, _, start = self.run_command(self.args(device), counters)
+            self.assertEqual((code, seen[-1]), (0, want), (device, env))
+            start.assert_called_once()
+        with unittest.mock.patch.dict(os.environ, {"CHISME_YOLOX_DEVICE": "tpu"}), \
+                self.assertRaisesRegex(SystemExit, "YOLOX device 'tpu'"):
+            runner_mod.cmd_transit(self.args(None), {"cam-a": self.a, "cam-b": self.b})
+
+    def test_the_command_line_takes_a_device_for_transit_and_estimate(self):
+        from scraper.border.camera import reader
+
+        got = []
+
+        def handler(args, cams):
+            got.append(args.device)
+            return 0
+        with unittest.mock.patch.object(reader, "load_cameras", dict), \
+                unittest.mock.patch.object(reader, "cmd_transit", handler), \
+                unittest.mock.patch.object(reader, "cmd_estimate", handler):
+            for argv in (["transit", "--device", "gpu"], ["transit"],
+                         ["estimate", "--device", "cpu"], ["estimate", "--replay", "x.jsonl"],
+                         ["estimate", "--replay", "x.jsonl", "--device", "unlogged"]):
+                self.assertEqual(reader.main(argv), 0)
+            # "unlogged" picks a replay's records that name no device: never where YOLOX runs
+            for argv in (["transit", "--device", "tpu"], ["estimate", "--device", "tpu"],
+                         ["transit", "--device", "unlogged"]):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    reader.main(argv)
+        self.assertEqual(got, ["gpu", None, "cpu", None, "unlogged"])
+
+
 def replay(crossings, method="loop"):
     """A Replay counter for `method`, its crossings relabelled to it."""
     counter = Replay([replace(c, method=method) for c in crossings])
@@ -765,13 +1054,17 @@ class LaneTypeGroups(unittest.TestCase):
                      - sum(1 for c in sb if c.at < prior.at))
             self.assertTrue(prior.sure, group)
             self.assertAlmostEqual(prior.between, truth, delta=3, msg=group)
-        # The status line has each type's own median transit.
-        lines = run.status(out[200]).splitlines()[1:]
+        # The status line has each type's own median transit, and under it its anchoring bar.
+        status = run.status(out[200])
+        lines = group_lines(status)
         self.assertEqual([line.split(":")[0].split() for line in lines],
                          [["loop", "normal"], ["loop", "sentri"]])
         for line, group in zip(lines, ("normal", "sentri")):
             median = float(line.split("median transit ")[1].split()[0])
             self.assertAlmostEqual(median, TRIPS[group], delta=1.0, msg=line)
+            bar = status.splitlines()[status.splitlines().index(line) + 1]
+            self.assertTrue(bar.startswith(f"  anchoring loop  {group:6} ["), bar)
+            self.assertIn(", anchors ", bar)
 
     def test_a_pair_with_no_lane_type_pools_every_lane_as_one_mixed_group_per_method(self):
         # Cameras typed nowhere are measured as before Q-22: every lane at once, "mixed".
@@ -885,7 +1178,7 @@ class LaneTypeGroups(unittest.TestCase):
         self.assertEqual(run.not_measured,
                          {("loop", "sentri"): "cam-b col-e is counted by yolox only"})
         self.assertIn("loop sentri (cam-b col-e is counted by yolox only)", "\n".join(logs.output))
-        lines = run.status(out[5]).splitlines()[1:]
+        lines = group_lines(run.status(out[5]))
         self.assertEqual([line.split(":")[0].split() for line in lines],
                          [["loop", "normal"], ["loop", "sentri"], ["yolox", "normal"],
                           ["yolox", "sentri"]])

@@ -33,7 +33,7 @@ pytest.importorskip("cv2")
 import queue_sim as qs
 from test_border_camera_combine import PAST_A, measured
 
-from scraper.border.camera import combine, estimate, reader, viewer
+from scraper.border.camera import combine, estimate, reader, transit, viewer
 from scraper.border.camera import runner as runner_mod
 from scraper.border.camera.calibration import load_cameras
 from scraper.border.camera.crossing import Crossing
@@ -632,6 +632,238 @@ class ReplayTest(StateDir):
         again = estimate.replay(old, [], est.pair, today)
         self.assertEqual([sorted(r["groups"]) for r in again], [["mixed"]])
         self.assertEqual(list(again[0]["groups"]["mixed"]["methods"]), ["loop"])
+
+
+class DeviceTest(StateDir):
+    """Where YOLOX ran, in every yolox record, the camera record, the status and the page; and a
+    replay that never grades two devices' yolox records together (gpu.py: the same frames give
+    the same counts per path, not across paths)."""
+    GPU = "gpu:NVIDIA GeForce RTX 4070"
+
+    def yolox_run(self, device: str) -> tuple[estimate.Estimate, str]:
+        with unittest.mock.patch.object(TransitRunner, "_counters", lambda self, cam: []):
+            est = estimate.Estimate(CAMS, self.pair, ["yolox"], 120, notify=self.alerts.append,
+                                    alert=False)
+        self.addCleanup(est.close)
+        record = {"device": device}
+        if device != "cpu":
+            record.update(cpu_checked=3, cpu_differed=0)
+        counter = type("Scripted", (Counter,), {"method": "yolox",
+                                                "device_record": lambda self: dict(record)})
+        at_a, at_b = cars(40)
+        a, b = est.runner.cams
+        est.runner.counters = {a.id: [counter(a, "A", at_a)], b.id: [counter(b, "B", at_b)]}
+        self.feed(est, 0, 20)
+        return est, est.step(now=T0 + timedelta(minutes=20))
+
+    def test_the_device_is_in_each_yolox_record_the_camera_record_the_status_and_the_page(self):
+        est, text = self.yolox_run(self.GPU)
+        logged = lines(self.dir, "transit-*.jsonl")
+        self.assertEqual([r["lane_type"] for r in logged], ["normal", "sentri"])
+        devices = {"pdn-north": {"device": self.GPU, "cpu_checked": 3, "cpu_differed": 0},
+                   "city-pdn-north": {"device": self.GPU, "cpu_checked": 3, "cpu_differed": 0}}
+        camera = lines(self.dir, "camera-*.jsonl")[0]
+        for rec in logged:
+            self.assertEqual(rec["devices"], devices)
+            self.assertEqual(combine.record_device(rec), self.GPU)
+            kept = camera["groups"][rec["lane_type"]]["methods"]["yolox"]
+            self.assertEqual((kept["devices"], kept["anchoring"]),
+                             (rec["devices"], rec["anchoring"]))
+        self.assertIn(f"  yolox device: pdn-north {self.GPU} (checked on the CPU: 3 frames, 0 "
+                      f"differed); city-pdn-north {self.GPU}", text)
+        shown = text.splitlines()
+        for rec in logged:      # each count line's bar is its own record's anchoring
+            count = shown.index(next(ln for ln in shown
+                                     if ln.startswith(f"  count yolox {rec['lane_type']:6}:")))
+            self.assertEqual(shown[count + 1], "  " + transit.anchoring_text(
+                "yolox", rec["lane_type"], rec["anchoring"]))
+        self.assertNotIn("not recorded", text)
+        card = viewer.estimate_view(est.live.snapshot())["groups"][0]["methods"][0]
+        self.assertEqual(card["device_text"],
+                         f"YOLOX ran on {self.GPU} (pdn-north, city-pdn-north), 6 frames also "
+                         "run on the CPU, 0 of them differing.")
+        self.assertEqual(card["device_stopped"], "")
+        self.assertIn(card["anchoring"]["state"], ("waiting", "anchored"))
+
+    def test_a_replay_never_grades_two_devices_together(self):
+        self.yolox_run("cpu")
+        live = lines(self.dir, "camera-*.jsonl")
+        cpu = lines(self.dir, "transit-*.jsonl")
+        gpu = [dict(r, run=r["run"] + "-gpu",       # never the live run's own minute
+                    devices={cid: {"device": self.GPU, "cpu_checked": 1, "cpu_differed": 0}
+                             for cid in r["devices"]}) for r in cpu]
+        with self.assertRaisesRegex(ValueError, f"counted on cpu, {self.GPU}"):
+            estimate.replay(cpu + gpu, [], self.pair)
+        for wanted, graded, other in (("cpu", "cpu", self.GPU), ("gpu", self.GPU, "cpu")):
+            again = estimate.replay(cpu + gpu, [], self.pair, device=wanted)
+            self.assertEqual(len(again), 2)
+            kept, left = (again[0], again[1]) if graded == "cpu" else (again[1], again[0])
+            for g in left["groups"].values():
+                self.assertEqual(g["methods"]["yolox"]["not_measured"],
+                                 f"counted on {other}; this replay grades {graded} only "
+                                 "(--device)")
+            for g in kept["groups"].values():
+                self.assertNotIn("not_measured", g["methods"]["yolox"])
+        def plain(records):
+            return json.loads(json.dumps(records, ensure_ascii=False, default=str))
+        self.assertEqual(plain(estimate.replay(cpu + gpu, [], self.pair, device="cpu")[:1]),
+                         live)
+        self.assertEqual(plain(estimate.replay(cpu, [], self.pair)), live)   # one device
+
+        source = self.dir / "t.jsonl"
+        source.write_text("".join(json.dumps(r) + "\n" for r in cpu + gpu), encoding="utf-8")
+        args = SimpleNamespace(replay=str(source), queue=None, methods="yolox", device=None)
+        with self.assertRaisesRegex(SystemExit, "give --device cpu or --device gpu"):
+            estimate.cmd_replay(args, CAMS)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(estimate.cmd_replay(dict_args(args, device="gpu"), CAMS), 0)
+        self.assertIn(f"yolox records by device: cpu 2, {self.GPU} 2; graded: {self.GPU} only",
+                      out.getvalue())
+
+    def test_a_replay_picks_its_device_by_device_only(self):
+        # "auto" picks none; "gpu" never picks one of two adapters; a device the log lacks is
+        # still the one named; and $CHISME_YOLOX_DEVICE is never read (it says where a live
+        # run's YOLOX runs, not what a log holds).
+        def on(device: str) -> dict:
+            return {"kind": "transit", "method": "yolox", "devices": {"a": {"device": device}}}
+        self.assertEqual(estimate.replay_device([on("cpu")], "auto"), "cpu")
+        with self.assertRaisesRegex(ValueError, "counted on gpu:A, gpu:B"):
+            estimate.replay_device([on("gpu:A"), on("gpu:B")], "gpu")
+        self.yolox_run("cpu")
+        cpu = lines(self.dir, "transit-*.jsonl")
+        for g in estimate.replay(cpu, [], self.pair, device="gpu")[0]["groups"].values():
+            self.assertEqual(g["methods"]["yolox"]["not_measured"],
+                             "counted on cpu; this replay grades gpu only (--device)")
+        source = self.dir / "t.jsonl"
+        source.write_text("".join(json.dumps(r) + "\n" for r in cpu), encoding="utf-8")
+        args = SimpleNamespace(replay=str(source), queue=None, methods="yolox", device=None)
+        out = io.StringIO()
+        with unittest.mock.patch.dict(os.environ, {"CHISME_YOLOX_DEVICE": "gpu"}), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(estimate.cmd_replay(args, CAMS), 0)
+        self.assertIn("yolox records by device: cpu 2; graded: cpu only", out.getvalue())
+
+    def test_a_replay_can_grade_the_records_that_name_no_device(self):
+        # A log that spans the change that named each record's device: its older yolox records
+        # name none (combine.NO_DEVICE), and `--device unlogged` grades those alone.
+        self.yolox_run("cpu")
+        new = lines(self.dir, "transit-*.jsonl")
+        old = [{k: v for k, v in dict(r, run=r["run"] + "-before").items() if k != "devices"}
+               for r in new]
+        with self.assertRaisesRegex(ValueError, "give --device cpu or --device gpu, or --device "
+                                                "unlogged for the records that name none"):
+            estimate.replay_device(old + new)
+        self.assertEqual(estimate.replay_device(old + new, "unlogged"), combine.NO_DEVICE)
+        again = estimate.replay(old + new, [], self.pair, device="unlogged")
+        self.assertEqual(len(again), 2)
+        for g in again[0]["groups"].values():
+            self.assertNotIn("not_measured", g["methods"]["yolox"])
+        for g in again[1]["groups"].values():
+            self.assertEqual(g["methods"]["yolox"]["not_measured"],
+                             "counted on cpu; this replay grades device not logged only "
+                             "(--device)")
+
+        def plain(records):
+            return json.loads(json.dumps(records, ensure_ascii=False, default=str))
+        self.assertEqual(plain(again[:1]), plain(estimate.replay(old, [], self.pair)))
+
+        source = self.dir / "t.jsonl"
+        source.write_text("".join(json.dumps(r) + "\n" for r in old + new), encoding="utf-8")
+        args = SimpleNamespace(replay=str(source), queue=None, methods="yolox",
+                               device="unlogged")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(estimate.cmd_replay(args, CAMS), 0)
+        self.assertIn(f"yolox records by device: {combine.NO_DEVICE} 2, cpu 2; graded: "
+                      f"{combine.NO_DEVICE} only", out.getvalue())
+        # where a live run's YOLOX runs is never "unlogged"
+        live = SimpleNamespace(replay=None, queue=None, methods="loop,yolox", queue_every=120,
+                               port=0, every=60, device="unlogged")
+        with self.assertRaisesRegex(SystemExit, "YOLOX device 'unlogged'"):
+            estimate.cmd_estimate(live, CAMS)
+
+    def test_a_stopped_gpu_paths_bar_says_it_stays_broken_for_the_run(self):
+        est, _ = self.yolox_run(self.GPU)
+        why = "a DirectML run on NVIDIA GeForce RTX 4070 failed: test"
+        est.runner.yolox_stopped["pdn-north"] = (T0 + timedelta(minutes=10), why,
+                                                 {"device": self.GPU})
+        text = est.step(now=T0 + timedelta(minutes=21))
+        for group in ("normal", "sentri"):
+            self.assertIn(f"  anchoring yolox {group:6} [..........] broken for the rest of this "
+                          "run: YOLOX stopped", text)
+        self.assertNotIn("a line is unseen now", text)
+
+    def test_a_stopped_gpu_path_alerts_once_and_the_page_flags_it(self):
+        est = self.open()
+        why = "a DirectML run on NVIDIA GeForce RTX 4070 failed: test"
+        est.runner.yolox_stopped["pdn-north"] = (T0, why, {"device": self.GPU})
+        now = T0 + timedelta(minutes=1)
+        self.assertEqual(est.alerts.check(est.runner, now),
+                         [(f"Border camera estimate: YOLOX stopped at line A (pdn-north): {why}. "
+                           "Its yolox count there is a gap for the rest of this run, never made "
+                           "on the CPU instead; the loop goes on.")])
+        self.assertEqual(est.alerts.check(est.runner, now), [])
+        self.assertEqual(len(self.alerts), 1)
+        devices = est.runner.devices()
+        self.assertEqual(devices["pdn-north"], {"device": self.GPU, "stopped": why,
+                                                "stopped_at": T0.isoformat()})
+        text, stopped = viewer._device_view(devices)
+        self.assertEqual(text, f"YOLOX ran on {self.GPU} (pdn-north).")
+        self.assertEqual(stopped, f"YOLOX STOPPED at pdn-north ({why}): its count there is a gap "
+                                  "from 17:00 UTC on, never made on the CPU instead")
+
+    def test_gpu_asked_for_and_refused_stops_before_reading_and_lets_go_of_both_locks(self):
+        from scraper.border.camera.gpu import GpuRefused
+
+        def refuse(runner, cam):
+            raise GpuRefused("no NVIDIA GPU among the DirectML devices: none")
+        args = SimpleNamespace(replay=None, queue=None, methods="loop,yolox", queue_every=120,
+                               port=0, every=60, device="gpu")
+        out = io.StringIO()
+        with unittest.mock.patch.object(TransitRunner, "_counters", refuse), \
+                unittest.mock.patch.object(estimate.Estimate, "start") as start, \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(estimate.cmd_estimate(args, CAMS), 1)
+        start.assert_not_called()
+        self.assertIn("YOLOX on the GPU was asked for", out.getvalue())
+        self.assertIn("refused: no NVIDIA GPU", out.getvalue())
+        hold_lock(self.dir / "transit.lock").close()
+        hold_lock(self.dir / "worker.lock").close()
+
+    def test_the_device_is_the_option_else_the_environment_else_auto(self):
+        """`camera estimate --device` reaches the runner, as `camera transit`'s does: dropped on
+        the way, YOLOX would run on "auto", the GPU on the owner's machine."""
+        from scraper.border.camera.gpu import GpuRefused
+
+        seen = []
+
+        def refuse(runner, cam):        # where YOLOX would run, then stop before any reading
+            seen.append(runner.device)
+            raise GpuRefused("no NVIDIA GPU among the DirectML devices: none")
+        for device, env, want in (("cpu", "gpu", "cpu"), (None, "gpu", "gpu"), (None, "", "auto")):
+            args = SimpleNamespace(replay=None, queue=None, methods="loop,yolox", queue_every=120,
+                                   port=0, every=60, device=device)
+            with unittest.mock.patch.dict(os.environ, {"CHISME_YOLOX_DEVICE": env}), \
+                    unittest.mock.patch.object(TransitRunner, "_counters", refuse), \
+                    unittest.mock.patch.object(estimate.Estimate, "start") as start, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(estimate.cmd_estimate(args, CAMS), 1)
+            start.assert_not_called()
+            self.assertEqual(seen[-1], want, (device, env))
+            hold_lock(self.dir / "transit.lock").close()
+            hold_lock(self.dir / "worker.lock").close()
+
+    def test_a_device_in_the_environment_that_is_none_of_the_three_stops_with_its_message(self):
+        args = SimpleNamespace(replay=None, queue=None, methods="loop,yolox", queue_every=120,
+                               port=0, every=60, device=None)
+        with unittest.mock.patch.dict(os.environ, {"CHISME_YOLOX_DEVICE": "tpu"}), \
+                self.assertRaisesRegex(SystemExit, "YOLOX device 'tpu'"):
+            estimate.cmd_estimate(args, CAMS)
+
+
+def dict_args(args: SimpleNamespace, **changes) -> SimpleNamespace:
+    return SimpleNamespace(**{**vars(args), **changes})
 
 
 class CommandTest(StateDir):

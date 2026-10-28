@@ -179,9 +179,9 @@ class RealZones(unittest.TestCase):
 
     def test_pdn_north_geometry_is_unchanged_since_1221c9f(self):
         # Its saved loop roads are keyed by zone and camera geometry: since then the zones were
-        # given lane types (lane-4 retyped sentri on 2026-10-27) and the camera its confirmed
-        # direction, and nothing else. A deliberate redraw of line A (the owner task in
-        # pdn-north's notes) replaces this test.
+        # given lane types (lane-4 retyped sentri on 2026-10-27), the camera its confirmed
+        # direction and a head-gap limit (2026-10-28), and nothing else. A deliberate redraw
+        # of line A (the owner task in pdn-north's notes) replaces this test.
         git = shutil.which("git")
         if git is None:
             self.skipTest("git is not installed")
@@ -211,8 +211,10 @@ def _centre_x(zone) -> float:
 
 def _geometry(raw: dict) -> dict:
     """A camera's entry without what may change without moving a pixel: the notes, whether
-    the direction is confirmed, the zones' lane types and the strips' CBP lanes."""
-    out = {k: v for k, v in raw.items() if k not in ("notes", "direction_verified")}
+    the direction is confirmed, the head-gap limit, the zones' lane types and the strips' CBP
+    lanes."""
+    out = {k: v for k, v in raw.items()
+           if k not in ("notes", "direction_verified", "max_head_gap_m")}
     out["count_zones"] = [{k: v for k, v in z.items() if k != "lane_type"}
                           for z in raw.get("count_zones", [])]
     out["lanes"] = [{k: v for k, v in lane.items() if k != "cbp_lane"}

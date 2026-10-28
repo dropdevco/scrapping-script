@@ -247,8 +247,8 @@ def plain(value):
     return value
 
 
-def _queue_run(share: np.ndarray, seen: np.ndarray,
-               booth_in_view: bool) -> tuple[int, int, float] | None:
+def _queue_run(share: np.ndarray, seen: np.ndarray, booth_in_view: bool,
+               max_head_gap_m: float | None = None) -> tuple[int, int, float] | None:
     """(first, last, density) of the queue in this view, in metres from its booth end.
 
     Runs of queued metres are split wherever a gap is longer than GAP_M. A run is a queue
@@ -261,6 +261,21 @@ def _queue_run(share: np.ndarray, seen: np.ndarray,
     booth, leaving 15 clear metres at the head of the view, and requiring the queue to touch
     that edge missed a full lane. There a run must instead be at least MIN_RUN_M long, so one
     parked object is not a queue.
+
+    `max_head_gap_m` (cameras.json, per camera; no limit unless set) bounds that clear head:
+    with the booth out of view, the nearest run that passes the checks above, if it starts
+    further than this into the view, is not waiting for the booth, so it is no line; a shorter
+    or sparser blob nearer the booth end (a parked object) does not carry it.
+    cameras.json sets 18 m on pdn-north and pdn-south-street only (ADR-0018 decision 3). The
+    18 m was set after a free-flow hour on 2026-10-27
+    (19:05-20:01 UTC) in which still blobs 20-41 m into the view, on empty lanes, read as
+    lines. ASSUMPTION: 18 m is fitted to that one hour, with one real point beside it (Lerdo's
+    15 m clear head above), so a stop-and-go clearance longer than 18 m drops a real line for
+    that reading. It also drops a line held inside the view, which combine would otherwise time
+    from its own head (_street, from_head); combine reads such a reading (detail far_run_m) as
+    not known, a floor, never a known 0 (combine._dropped). The street has a crosswalk ~23-27 m
+    in, and whether it holds cars is an owner question. It does nothing for a false run at the
+    booth end.
     """
     queued = share >= QUEUED_TIME
     runs, start, last, gap = [], -1, -1, 0.0
@@ -290,6 +305,9 @@ def _queue_run(share: np.ndarray, seen: np.ndarray,
             return None                    # the nearest queue does not reach the booth
         if not booth_in_view and (last - first + 1) * BIN_M < MIN_RUN_M:
             continue
+        if not booth_in_view and max_head_gap_m is not None \
+                and (first - head) * BIN_M > max_head_gap_m:
+            return None                    # every later run starts further out still
         return first, last, density
     return None
 
@@ -350,7 +368,14 @@ class LaneWindow:
                   "visible_m": [float(visible[0] * BIN_M), float((visible[-1] + 1) * BIN_M)]
                   if len(visible) else None}
         booth_distance = lane.booth_distance_m
-        run = _queue_run(share, seen, booth_in_view=booth_distance == 0)
+        # cameras.json's per-camera max_head_gap_m; a camera that does not set it has no limit.
+        head_gap = cam.max_head_gap_m
+        run = _queue_run(share, seen, booth_in_view=booth_distance == 0, max_head_gap_m=head_gap)
+        if run is None and head_gap is not None:
+            far = _queue_run(share, seen, booth_in_view=booth_distance == 0)
+            if far is not None:
+                # Kept in the reading, so a real line the limit drops can be found in the log.
+                detail["far_run_m"] = [far[0] * BIN_M, (far[1] + 1) * BIN_M]
         if run is None:
             # Nothing queued at this camera. With the booth in view that is a zero wait; with
             # the booth out of view a queue could still sit between here and it.

@@ -21,7 +21,7 @@ is recorded on its own, with `agree` saying whether they agree, and no mean or e
 
 ASSUMPTION (ADR-0014): first in, first out in aggregate from A to the booths within one lane-type
 group, with no entries or exits. Each group is measured apart by the runner (QUESTIONS.md Q-22:
-at PDN "sentri" is A lane-5 and B col-e, "normal" the other lanes); "mixed" pools every lane of a
+at PDN "sentri" is A lanes 4-5 and B col-e, "normal" the other lanes); "mixed" pools every lane of a
 pair whose lines share no lane type.
 
 A segment that cannot be measured is not known, and then the total is a floor: the sum of the
@@ -77,6 +77,7 @@ NOT_SHOWN = "recorded, not shown (show_minutes is false in pairs.json)"
 NO_COUNT = "no count of the cars between the lines"   # transit's Now has none: a line is down at
                                                       # the live edge, or the epoch has no offset
 STREET_UNTYPED = "street columns not typed: counted for every lane type"
+NO_DEVICE = "device not logged"   # a yolox record from before records named their device
 
 
 @dataclass(frozen=True)
@@ -260,8 +261,13 @@ def tail_to_a(queue_windows: Iterable[Mapping], pair: Mapping, group: str,
             why = f"{a_cam} {lane} not read in the last {QUEUE_FRESH_S // 60} min"
             parts.append((None, 0.0, None, why))
             continue
-        if latest.state == "no_queue":
+        far = _dropped(latest)
+        if latest.state == "no_queue" and (far is None or a_m is not None and far[1] < a_m):
             parts.append((0.0, 0.0, 0.0, None))
+            continue
+        if far is not None:
+            why = f"{a_cam} {lane}: a run {far[0]:g}-{far[1]:g} m in was dropped by the head gap"
+            parts.append((None, 0.0, None, why))
             continue
         if latest.state == "insufficient" and not latest.queue_m:
             parts.append((None, 0.0, None, f"{a_cam} {lane}: too few frames to read"))
@@ -371,7 +377,8 @@ def combine(records: Sequence[Mapping], queue_windows: Iterable[Mapping], pair: 
     ADR-0015's vote is undecided) with its reasons. `records` are the runner's, one per method
     and group (TransitRunner.records); `queue_windows` the queue reader's recent lane signals;
     `pair` an entry of pairs.json plus a_lanes, a_m and r_m (computed at load); `at` the
-    runner's seen_until(). `q_b` is (method, group) -> B inside the line, when measured.
+    runner's seen_until(). `q_b` is (method, group) -> B inside the line, when measured. A
+    method's entry keeps its record's `anchoring` and `devices` (runner.records) as they are.
     `not_measured` is (method, group) -> why the runner does not measure it
     (TransitRunner.not_measured): such a method is listed with its reason, never as a wait.
     It wins over a record of that method and group, which then feeds neither `agree` nor the
@@ -397,6 +404,11 @@ def combine(records: Sequence[Mapping], queue_windows: Iterable[Mapping], pair: 
         for w in waits.values():
             reasons += [r for r in w.validation if r not in reasons]
         methods = {m: w.to_dict() for m, w in waits.items()}
+        for m, rec in by_group[group].items():
+            # carried as the runner wrote them: how far the count has come towards anchors,
+            # and where YOLOX ran (shown, never an input to a number)
+            methods[m].update({k: rec[k] for k in ("anchoring", "devices")
+                               if rec.get(k) is not None})
         for m, why in skipped[group].items():
             methods[m] = {"method": m, "lane_type": group, "not_measured": why}
             reasons.append(f"{m} not measured: {why}")
@@ -507,14 +519,17 @@ def self_check(records: Iterable[Mapping]) -> dict[str, dict]:
     the error is the median Now logged in the window minus that by-entry median, and the window
     is covered when the median of their ranges holds it. This tests the live-edge offset and
     the steady discharge, needs no GPS, and is what calibrates the A->B range. Records are the
-    runner's, in the order written."""
+    runner's, in the order written. Yolox records are graded per device (`record_device`), one
+    named "yolox/<group> on <device>": the same frames give the same counts per path, not
+    across paths, so a CPU window never grades a GPU Now. One that names no device keeps the
+    plain name and is never pooled with one that does."""
     width = timedelta(minutes=WINDOW_MIN)
     predicted: dict[tuple, list[Segment]] = defaultdict(list)
     truth: dict[tuple, float] = {}
     for rec in records:
         if rec.get("kind") != "transit":
             continue
-        key = (rec.get("method"), rec.get("lane_type") or MIXED)
+        key = (rec.get("method"), rec.get("lane_type") or MIXED, record_device(rec))
         now = rec.get("now") or {}
         epoch = _epoch_at_now(rec) or {}
         seg = a_to_b(rec)
@@ -527,9 +542,9 @@ def self_check(records: Iterable[Mapping]) -> dict[str, dict]:
                 truth[(*key, _parse(w["start"]))] = entry["median"]
     errors: dict[str, list[float]] = defaultdict(list)
     covered: dict[str, list[bool]] = defaultdict(list)
-    for key in sorted(set(predicted) & set(truth)):
+    for key in sorted(set(predicted) & set(truth), key=lambda k: (*k[:2], k[2] or "", k[3])):
         segs, real = predicted[key], truth[key]
-        name = f"{key[0]}/{key[1]}"
+        name = f"{key[0]}/{key[1]}" + ("" if key[2] in (None, NO_DEVICE) else f" on {key[2]}")
         errors[name].append(_median([s.minutes for s in segs]) - real)
         covered[name].append(_median([s.low for s in segs]) <= real
                              <= _median([s.high for s in segs]))
@@ -542,6 +557,21 @@ def self_check(records: Iterable[Mapping]) -> dict[str, dict]:
                      "covered": _r(sum(covered[name]) / len(covered[name]), 3),
                      "calibrated": len(errs) >= SELF_CHECK_MIN_WINDOWS}
     return out
+
+
+def record_device(rec: Mapping) -> str | None:
+    """Where a transit record's YOLOX counts were made: its `devices` (runner.records, camera ->
+    detect.DetectorCounter.device_record) as one name, "cpu" or "gpu:<adapter>", or the
+    cameras' names joined with " + " when they differ; NO_DEVICE for a yolox record that names
+    none. None for any other method's record: no YOLOX path touches a loop count."""
+    if rec.get("method") != "yolox":
+        return None
+    devices = rec.get("devices")
+    if not isinstance(devices, Mapping) or not devices:
+        return NO_DEVICE
+    names = sorted({str((d.get("device") if isinstance(d, Mapping) else None) or NO_DEVICE)
+                    for d in devices.values()})
+    return " + ".join(names)
 
 
 # --- helpers --------------------------------------------------------------------------------
@@ -621,6 +651,14 @@ def _timed(hist: list[tuple[float, LaneEstimate]], length_m: float, t_at: float,
     return minutes, min(low, minutes), max(high, minutes), None
 
 
+def _dropped(latest: LaneEstimate) -> list[float] | None:
+    """[first, last] metres of a run the reader's head gap (cameras.json max_head_gap_m) dropped
+    from a no_queue reading, else None. Such a reading is not known to be free road: it may be a
+    line held inside the view (measure._queue_run), so it is a floor, never a known 0."""
+    far = latest.detail.get("far_run_m") if latest.state == "no_queue" else None
+    return [float(far[0]), float(far[1])] if far else None
+
+
 def _street(street: Mapping[str, list[tuple[float, LaneEstimate]]], t_at: float,
             from_head: bool) -> Part | None:
     """The street's line, timed per queued column and taken as `_segment` takes lanes. None when
@@ -632,6 +670,10 @@ def _street(street: Mapping[str, list[tuple[float, LaneEstimate]]], t_at: float,
         if latest is None or (latest.state == "insufficient" and not latest.queue_m):
             continue
         read = True
+        if (far := _dropped(latest)) is not None:
+            why = f"street {lane}: a run {far[0]:g}-{far[1]:g} m in was dropped by the head gap"
+            parts.append((None, 0.0, None, why))
+            continue
         if latest.state not in ("queue", "stalled", "insufficient") or not latest.queue_m:
             continue
         head = float(latest.detail.get("queue_head_m") or 0.0) if from_head else 0.0

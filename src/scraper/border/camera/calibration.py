@@ -67,6 +67,8 @@ class Camera:
     stream_clock: str = "pdt"
     display: bool = True           # False: never shown on our pages (the City feeds, ADR-0014)
     count_zones: tuple = ()        # crossing.Zone, the bands cars are counted across
+    max_head_gap_m: float | None = None   # booth out of view: a run starting further into the
+                                          # view is no line (measure._queue_run); None: no limit
 
 
 def _lane(raw: dict) -> Lane:
@@ -105,6 +107,9 @@ def camera_from_dict(cid: str, raw: dict) -> Camera:
     stream_clock = source.get("clock", "pdt")
     if stream_clock not in ("pdt", "last-modified"):
         raise ValueError(f"{cid}: source clock must be pdt or last-modified")
+    head_gap = raw.get("max_head_gap_m")
+    if head_gap is not None and head_gap < 0:
+        raise ValueError(f"{cid}: max_head_gap_m cannot be negative")
     return Camera(
         id=cid, title=raw["title"], port_number=raw["port_number"], direction=raw["direction"],
         direction_verified=bool(raw.get("direction_verified", False)),
@@ -118,6 +123,7 @@ def camera_from_dict(cid: str, raw: dict) -> Camera:
         source=source["kind"], url=source.get("url"), stream_clock=stream_clock,
         display=bool(raw.get("display", True)),
         count_zones=zones_from_raw(cid, raw.get("count_zones", [])),
+        max_head_gap_m=None if head_gap is None else float(head_gap),
     )
 
 

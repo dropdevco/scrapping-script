@@ -7,6 +7,8 @@ aggregate a window. Tolerances are what a crosser would notice, not what flatter
 from __future__ import annotations
 
 import copy
+import dataclasses
+import json
 import os
 import tempfile
 import unittest
@@ -19,7 +21,13 @@ pytest.importorskip("cv2")
 
 from camera_scene import FRAME, Scene, camera, queue_fronts
 
-from scraper.border.camera.calibration import Strip, camera_from_dict
+from scraper.border.camera.calibration import (
+    CAMERAS_FILE,
+    Camera,
+    Strip,
+    camera_from_dict,
+    load_cameras,
+)
 from scraper.border.camera.measure import (
     SCALE_SLACK,
     LaneEstimate,
@@ -235,6 +243,92 @@ class QueueRuns(unittest.TestCase):
 
     def test_one_parked_object_is_not_a_queue_when_the_booth_is_out_of_view(self):
         self.assertIsNone(self.run_of([0.0] * 20 + [1.0] * 5 + [0.0] * 20, booth_in_view=False))
+
+
+class HeadGap(unittest.TestCase):
+    """cameras.json's max_head_gap_m: with the booth out of view, a run that starts further
+    into the view than this is no line. The cases are from PDN's free-flow hour, 2026-10-27."""
+
+    def run_of(self, share, max_head_gap_m=18, seen=None):
+        from scraper.border.camera.measure import _queue_run
+
+        share = np.array(share, float)
+        seen = np.ones(len(share), bool) if seen is None else np.array(seen, bool)
+        return _queue_run(share, seen, booth_in_view=False, max_head_gap_m=max_head_gap_m)
+
+    def test_a_still_blob_far_into_an_empty_street_is_no_line(self):
+        # The street's left column, 19:41 UTC: a 10 m blob 41-50 m in, 41 m of free road before it.
+        self.assertIsNone(self.run_of([0.05] * 41 + [1.0] * 10))
+
+    def test_without_a_head_gap_the_rule_is_unchanged(self):
+        # Off unless the camera sets it: Lerdo and BOTA read the same blob as a line, as before.
+        self.assertEqual(self.run_of([0.05] * 41 + [1.0] * 10, max_head_gap_m=None)[:2], (41, 50))
+
+    def test_a_run_starting_within_the_head_gap_is_still_a_line(self):
+        self.assertEqual(self.run_of([0.1] * 18 + [0.95] * 30)[:2], (18, 47))
+
+    def test_lerdos_clear_head_is_still_a_line(self):
+        self.assertEqual(self.run_of([0.1] * 15 + [0.95] * 50)[:2], (15, 64))
+
+    def test_the_gap_is_counted_from_the_first_metre_in_view(self):
+        # 10 metres out of the picture at the booth end, then 15 m of free road: 15 m in.
+        share = [0.0] * 25 + [0.95] * 20 + [0.0] * 15
+        self.assertEqual(self.run_of(share, seen=[False] * 10 + [True] * 50)[:2], (25, 44))
+
+    def test_a_parked_object_near_the_head_does_not_carry_a_far_run(self):
+        # The 5 m object is no line on its own, so the head gap is the far run's: 37 m.
+        share = [0.0] * 2 + [1.0] * 5 + [0.0] * 30 + [1.0] * 15
+        self.assertIsNone(self.run_of(share))
+        self.assertEqual(self.run_of(share, max_head_gap_m=None)[:2], (37, 51))
+
+    def still_blob(self, cam):
+        # Three cars standing 30-47.5 m from the booth end, nothing between them and it.
+        scene = Scene()
+        frame = scene.render([(scene.view_m - 30 - 6.5 * i, i) for i in range(3)])
+        return run(cam, [frame] * 40)
+
+    def test_a_reading_on_a_camera_without_a_head_gap_keeps_the_far_blob(self):
+        est = self.still_blob(camera(booth_distance_m=120))
+        self.assertNotEqual(est.state, "no_queue", est.detail)
+        self.assertNotIn("far_run_m", est.detail)
+
+    def test_a_reading_on_a_camera_with_a_head_gap_drops_it_and_logs_where_it_was(self):
+        est = self.still_blob(with_head_gap(camera(booth_distance_m=120), 18))
+        self.assertEqual(est.state, "no_queue", est.detail)
+        self.assertIsNone(est.wait_min)
+        # Whole metres, end exclusive as visible_m: the cars stand 30-47.5 m in, past the 18 m.
+        self.assertEqual(est.detail["far_run_m"], [29.0, 48.0])
+
+    def test_with_the_booth_in_view_a_head_gap_changes_nothing(self):
+        # There the queue must already reach the booth (GAP_M).
+        est = self.still_blob(with_head_gap(camera(), 18))
+        self.assertEqual(est.state, "no_queue", est.detail)
+        self.assertNotIn("far_run_m", est.detail)
+
+    def test_cameras_json_sets_it_on_the_pdn_pair_only(self):
+        with open(CAMERAS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        gaps = {cid: c["max_head_gap_m"] for cid, c in raw.items()
+                if not cid.startswith("_") and "max_head_gap_m" in c}
+        self.assertEqual(gaps, {"pdn-north": 18, "pdn-south-street": 18})
+
+
+def with_head_gap(cam: Camera, gap: float) -> Camera:
+    return dataclasses.replace(cam, max_head_gap_m=gap)
+
+
+class HeadGapField(unittest.TestCase):
+    def test_it_is_read_from_cameras_json_and_absent_means_no_limit(self):
+        self.assertEqual(camera_from_dict("x", {**raw_camera(), "max_head_gap_m": 18})
+                         .max_head_gap_m, 18)
+        self.assertIsNone(camera_from_dict("x", raw_camera()).max_head_gap_m)
+        cams = load_cameras()
+        self.assertEqual((cams["pdn-north"].max_head_gap_m, cams["lerdo-north"].max_head_gap_m),
+                         (18, None))
+
+    def test_a_negative_head_gap_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "max_head_gap_m cannot be negative"):
+            camera_from_dict("x", {**raw_camera(), "max_head_gap_m": -1})
 
 
 class Serialisation(unittest.TestCase):

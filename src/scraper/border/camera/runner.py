@@ -1,6 +1,7 @@
 """`camera transit`: the crossing time between two cameras, by two methods (ADR-0014).
 
     python -m scraper.border camera transit [--a pdn-north] [--b city-pdn-north] [--minutes N]
+                                            [--device auto|gpu|cpu]
 
 Reads both cameras continuously as stamped frames (hls.py): every frame carries its capture time
 from the stream's own clock. Each frame goes to every counter of its camera:
@@ -55,7 +56,7 @@ measured), the line stays that far behind: stale, never an empty road.
 
 Lane types (QUESTIONS.md Q-22). The k-th car at A is the (offset + k)-th at B only among cars of
 one lane type, so each lane type that zones at both lines carry is a group, measured from its
-own lanes' crossings only, with its own chain of measurements. At PDN that is SENTRI (A lane-5,
+own lanes' crossings only, with its own chain of measurements. At PDN that is SENTRI (A lanes 4-5,
 B column E) and "normal" (the other lanes and columns). Then a lane with no type, or with a type
 the other line lacks, is in no group, and its crossings are not measured; a warning names it at
 start. A pair whose lines share no lane type (nothing typed, as before Q-22, or one camera
@@ -74,6 +75,20 @@ column too and the loop counts them there again: that over-count stays within th
 is drift (the anchors' line takes up part of it), not another group's cars, and the loop's
 normal cannot vote until the normal hand count at line B checks it (QUESTIONS.md Q-24). By how
 much it over-counts is not measured (ASSUMPTION).
+
+YOLOX runs where `device` says (gpu.py: "auto", "gpu" or "cpu"; None reads $CHISME_YOLOX_DEVICE,
+else "auto"), one network per camera. "gpu" asked for and refused at start (gpu.GpuRefused)
+stops the command before anything is read. A GPU path that stops mid-run (gpu.GpuFailed, raised
+out of a counter's `add`) stops for the whole process (gpu.STATE): every camera whose YOLOX runs
+on the GPU drops its counter at its own next frame, for the rest of the run, its line unseen by
+YOLOX from its frame before (an open gap, "YOLOX stopped: ..."), never counted on the
+CPU in its place, since the same frames give the same counts per path, not across paths. The
+loop counter, and the other method's records, go on; the log, the status and each yolox record
+say so (`yolox_stopped`, "devices"). Each yolox record carries "devices": per camera the path its
+boxes came from, "cpu" or "gpu:<adapter>", with the GPU's running check against the CPU
+(cpu_checked, cpu_differed), so records of the two paths are never graded together
+(combine.record_device). Each record also carries "anchoring": how far its latest epoch has come
+towards anchors (transit.anchoring), which the status shows as a bar.
 
 The loop counters' learnt roads are saved to CAMERA_STATE_DIR/<camera>.loop.npz and seeded on
 start, so a restart in a queue does not wait for the lane to clear. Each road is a median of
@@ -101,6 +116,7 @@ import numpy as np
 from . import transit
 from .calibration import Camera
 from .crossing import METHODS, SIGNATURE_TTL_S, Crossing, Zone
+from .gpu import DEVICE_ENV, GpuFailed, GpuRefused, requested_device
 from .hls import Blocked, Gap
 from .reader import live_reader, state_dir
 from .stream import StreamError, StreamFrozen
@@ -145,10 +161,14 @@ log = logging.getLogger(__name__)
 
 class TransitRunner:
     def __init__(self, cam_a: Camera, cam_b: Camera, methods=METHODS,
-                 lo_min: float = LO_MIN, hi_min: float = HI_MIN):
+                 lo_min: float = LO_MIN, hi_min: float = HI_MIN, device: str | None = None):
         if 2 * hi_min > SIGNATURE_TTL_S / 60:
             raise ValueError(f"hi_min {hi_min} min: no anchor could be trusted within the "
                              f"{SIGNATURE_TTL_S / 3600:.0f} h signatures are kept")
+        # where YOLOX runs: "auto", "gpu" or "cpu"; None reads $CHISME_YOLOX_DEVICE, else "auto"
+        self.device = device
+        # camera -> (its last frame before YOLOX's GPU path stopped, why, its device_record then)
+        self.yolox_stopped: dict[str, tuple[datetime, str, dict]] = {}
         self.cams = (cam_a, cam_b)
         self.lines = {cam_a.id: _one_line(cam_a), cam_b.id: _one_line(cam_b)}
         self.line_a, self.line_b = self.lines[cam_a.id], self.lines[cam_b.id]
@@ -194,8 +214,8 @@ class TransitRunner:
 
     def _counters(self, cam: Camera) -> list:
         """Each method's counter, over the zones that method counts (_counts). A zone stays in
-        when its group is not measured by the method: line A's loop judges a car across lane-4
-        and lane-5 by both (loop._beside), so leaving lane-5 out would change lane-4's count."""
+        when its group is not measured by the method: line A's loop judges a car across lane-3
+        and lane-4 by both (loop._beside), so leaving lane-4 out would change lane-3's count."""
         out = []
         loop_zones = tuple(z for z in cam.count_zones if _counts(z, "loop"))
         if "loop" in self.methods and loop_zones:      # a LoopCounter with no zones refuses
@@ -209,8 +229,9 @@ class TransitRunner:
         yolox_zones = tuple(z for z in cam.count_zones if _counts(z, "yolox"))
         if "yolox" in self.methods and yolox_zones:
             from .detect import DetectorCounter
-            # one network per camera: one thread each
-            out.append(DetectorCounter(cam, zones=yolox_zones))
+            # one network per camera: one thread each. gpu.GpuRefused ("gpu" asked for and
+            # refused) goes up to the command, which stops
+            out.append(DetectorCounter(cam, zones=yolox_zones, device=self.device))
         return out
 
     # -- reading ------------------------------------------------------------------------------
@@ -314,8 +335,15 @@ class TransitRunner:
         if moved:
             self._quiet(cam, frame.at)
         counted = False
-        for counter in self.counters[cam.id]:
-            found = [c for c in counter.add(frame) if c.line == line]
+        for counter in list(self.counters[cam.id]):
+            try:
+                found = [c for c in counter.add(frame) if c.line == line]
+            except GpuFailed as exc:
+                # Not the stream's fault: reconnecting would raise it again on every frame, and
+                # leave both methods dark. Only YOLOX stops here. The stop is process-wide
+                # (gpu.STATE): the other camera's YOLOX, if on the GPU, stops at its next frame.
+                self._yolox_failed(cam, counter, frame.at, exc)
+                continue
             own = counter.gaps()
             counted = counted or bool(found)
             with self._lock:
@@ -334,6 +362,23 @@ class TransitRunner:
                 self.moved_at[cam.id] = frame.at
             self.last_at[cam.id] = frame.at
             self.seen_mono[cam.id] = time.monotonic()
+
+    def _yolox_failed(self, cam: Camera, counter, at: datetime, exc: GpuFailed) -> None:
+        """YOLOX's GPU path stopped (gpu.GpuFailed) on this camera's frame at `at`. Its counter
+        is dropped for the rest of the run, and its line is unseen by YOLOX from the frame
+        before (`since`; an open gap, _gaps_for) - never counted on the CPU in its place. The
+        loop counter goes on. Said loudly: in the log here, and in the status and every yolox
+        record from now on."""
+        with self._lock:
+            if counter in self.counters[cam.id]:
+                self.counters[cam.id].remove(counter)
+            record = getattr(counter, "device_record", None)
+            since = self.last_at.get(cam.id, at)
+            self.yolox_stopped[cam.id] = (since, str(exc),
+                                          dict(record()) if callable(record) else {})
+        log.error("%s: YOLOX STOPPED for the rest of this run: %s. Its line is unseen by YOLOX "
+                  "from %s UTC (a gap in every yolox record), never counted on the CPU instead; "
+                  "the loop counter goes on.", cam.id, exc, f"{since:%H:%M:%S}")
 
     def _quiet(self, cam: Camera, at: datetime) -> None:
         """Something moved at `at`. If nothing had at the line for more than QUIET_S, that
@@ -470,6 +515,13 @@ class TransitRunner:
                 # `at` can be held back before it (seen_until): nothing is open there yet
                 if self.lines[cam.id] == line and since is not None and since < at:
                     gaps.append(Gap(since, (at - since).total_seconds(), "loop zones learning"))
+        if method == "yolox":
+            for cam in self.cams:
+                stopped = self.yolox_stopped.get(cam.id)
+                # open to the end of every measurement from now on: the counter is gone
+                if self.lines[cam.id] == line and stopped is not None and stopped[0] < at:
+                    gaps.append(Gap(stopped[0], (at - stopped[0]).total_seconds(),
+                                    f"YOLOX stopped: {stopped[1]}"))
         return gaps
 
     def _expire(self, method: str, cutoff: datetime) -> None:
@@ -483,6 +535,7 @@ class TransitRunner:
                                              seconds=g.seconds) >= cutoff]
 
     def records(self, measured: dict) -> list[dict]:
+        devices = self.devices()
         out = []
         for (method, group), (m, current) in measured.items():
             rec = transit.record(m, transit.windows(m), current, lane_type=group)
@@ -495,8 +548,31 @@ class TransitRunner:
                         # how often each line's stream was opened again since the start: with
                         # gaps_a / gaps_b, what cut the epochs
                         "reconnects_a": self.reconnects.get(self.cams[0].id, 0),
-                        "reconnects_b": self.reconnects.get(self.cams[1].id, 0)})
+                        "reconnects_b": self.reconnects.get(self.cams[1].id, 0),
+                        "anchoring": transit.anchoring(m)})
+            if method == "yolox":
+                # where its boxes came from at each camera: a loop count touches no YOLOX path
+                rec["devices"] = {cid: dict(d) for cid, d in devices.items()}
             out.append(rec)
+        return out
+
+    def devices(self) -> dict[str, dict]:
+        """camera -> where its YOLOX boxes come from (detect.DetectorCounter.device_record:
+        "device", "cpu" or "gpu:<adapter>", and on the GPU how many frames were also detected on
+        the CPU, "cpu_checked", and how many of those differed, "cpu_differed"), read now; for a
+        camera whose GPU path stopped, as it was then, with why ("stopped") and the minute of
+        its last frame counted ("stopped_at")."""
+        out = {}
+        with self._lock:
+            for cam in self.cams:
+                for counter in self.counters.get(cam.id, ()):
+                    record = getattr(counter, "device_record", None)
+                    if counter.method == "yolox" and callable(record):
+                        out[cam.id] = dict(record())
+                if cam.id in self.yolox_stopped:
+                    since, why, was = self.yolox_stopped[cam.id]
+                    out[cam.id] = {**was, "stopped": why, "stopped_at": since.replace(
+                        second=0, microsecond=0).isoformat()}
         return out
 
     def write(self, records: list[dict]) -> None:
@@ -560,7 +636,27 @@ class TransitRunner:
                 if learning:
                     text += f"  learning: {', '.join(learning)}"
             lines.append(text)
-        return "\n".join(lines)
+            if (m, group) in measured:
+                lines.append("  " + transit.anchoring_text(
+                    m, group, transit.anchoring(measured[(m, group)][0]),
+                    stopped=m == "yolox" and bool(self.yolox_stopped)))
+        return "\n".join(lines + self.device_lines())
+
+    def device_lines(self) -> list[str]:
+        """The status's YOLOX lines: where it runs at each camera, and, loudly, where its GPU
+        path stopped."""
+        devices = self.devices()
+        out = []
+        if devices:
+            out.append("  yolox device: " + "; ".join(f"{cid} {device_text(d)}"
+                                                      for cid, d in devices.items()))
+        with self._lock:
+            stopped = sorted(self.yolox_stopped.items())
+        for cid, (since, why, _) in stopped:
+            out.append(f"  YOLOX STOPPED at {cid}: {why}. Unseen by YOLOX there since "
+                       f"{since:%H:%M:%S} UTC for the rest of this run (a gap, never counted on "
+                       "the CPU instead); the loop goes on.")
+        return out
 
     def save_refs(self) -> None:
         for cam in self.cams:
@@ -572,6 +668,24 @@ class TransitRunner:
     def maybe_save_refs(self) -> None:
         if time.monotonic() - self._saved_at >= SAVE_EVERY_S:
             self.save_refs()
+
+
+def device_text(record: dict) -> str:
+    """One camera's YOLOX path (TransitRunner.devices) for the status: "cpu", or
+    "gpu:<adapter> (checked on the CPU: 12 frames, 0 differed)", and STOPPED once stopped."""
+    text = str(record.get("device", "unknown"))
+    if "cpu_checked" in record:
+        text += (f" (checked on the CPU: {record['cpu_checked']} frames, "
+                 f"{record.get('cpu_differed', 0)} differed)")
+    return text + (" STOPPED" if record.get("stopped") else "")
+
+
+def refused_text(exc: Exception) -> str:
+    """What `camera transit` and `camera estimate` print when "gpu" was asked for and refused
+    (gpu.GpuRefused) as the counters were built: nothing has been read."""
+    return (f"YOLOX on the GPU was asked for (--device gpu, or {DEVICE_ENV}=gpu) and refused: "
+            f"{exc}. Nothing was started. --device auto runs YOLOX on the CPU when the GPU is "
+            "refused; --device cpu runs it there always.")
 
 
 def _one_line(cam: Camera) -> str:
@@ -680,6 +794,10 @@ def cmd_transit(args, cameras) -> int:
     for cid in (args.a, args.b):
         if cid not in cameras:
             raise SystemExit(f"unknown camera {cid}")
+    try:
+        device = requested_device(getattr(args, "device", None))
+    except ValueError as exc:       # a $CHISME_YOLOX_DEVICE that is none of auto, gpu, cpu
+        raise SystemExit(str(exc)) from None
     state_dir().mkdir(parents=True, exist_ok=True)
     try:
         held = hold_lock(state_dir() / "transit.lock")
@@ -687,9 +805,19 @@ def cmd_transit(args, cameras) -> int:
         print(exc)
         return 1
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    runner = TransitRunner(cameras[args.a], cameras[args.b], methods)
+    try:
+        runner = TransitRunner(cameras[args.a], cameras[args.b], methods, device=device)
+    except GpuRefused as exc:
+        held.close()
+        print(refused_text(exc), flush=True)
+        return 1
+    except BaseException:
+        held.close()
+        raise
     runner.start()
-    print(f"Crossing time {args.a} -> {args.b}, methods {', '.join(methods)}. "
+    devices = "; ".join(f"{cid} {device_text(d)}" for cid, d in runner.devices().items())
+    print(f"Crossing time {args.a} -> {args.b}, methods {', '.join(methods)}"
+          + (f", YOLOX ({device}) on {devices}" if devices else "") + ". "
           f"Records: {state_dir()}\\transit-<date>.jsonl  (Ctrl+C to stop)", flush=True)
     ends = None if args.minutes is None else time.monotonic() + args.minutes * 60
     try:

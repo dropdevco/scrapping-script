@@ -11,10 +11,12 @@
     python -m scraper.border camera view [--cameras ...] [--every 120] [--port 8090]
                                                                # the worker plus a live page
     python -m scraper.border camera estimate [--port 8090] [--every 60] [--methods loop,yolox]
+                                             [--device auto|gpu|cpu]
                                                                # queue reader + both counters,
                                                                # each method's PDN camera wait
     python -m scraper.border camera estimate --replay transit-<date>.jsonl
                                              [--queue queue-<date>.jsonl]
+                                             [--device cpu|gpu|unlogged]
 
 `read` and `reference` take --source FILE to work from a recorded clip instead of the live
 stream, which is how a calibration is tuned and how a reading is reproduced.
@@ -44,6 +46,7 @@ import cv2
 import numpy as np
 
 from .calibration import PX_PER_M, Camera, Strip, live_region, load_cameras
+from .gpu import DEVICE_ENV, DEVICES
 from .hls import HlsReader, Stamped
 from .measure import (
     BIN_M,
@@ -599,6 +602,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--methods", default="loop,yolox")
     p.add_argument("--every", type=float, default=60, help="seconds between measurements")
     p.add_argument("--minutes", type=float, help="stop after this long (default: run on)")
+    p.add_argument("--device", choices=DEVICES, default=None,
+                   help=f"where YOLOX runs (default: ${DEVICE_ENV}, else auto: the GPU when it "
+                        "passes its checks, else the CPU)")
     p = sub.add_parser("estimate", help="queue reader and both counters in one process: each "
                                         "method's camera wait for PDN northbound")
     p.add_argument("--port", type=int, default=8090)
@@ -609,6 +615,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--replay", metavar="PATH",
                    help="re-make the camera records from a logged transit-<date>.jsonl")
     p.add_argument("--queue", metavar="PATH", help="with --replay: the queue-<date>.jsonl")
+    p.add_argument("--device", choices=(*DEVICES, "unlogged"), default=None,
+                   help=f"where YOLOX runs (default: ${DEVICE_ENV}, else auto: the GPU when it "
+                        "passes its checks, else the CPU); with --replay, the device whose yolox "
+                        "records are graded (needed when the log holds more than one; "
+                        "\"unlogged\": the records that name none)")
     args = parser.parse_args(argv)
     cameras = load_cameras()
     handler = {"list": cmd_list, "snapshot": cmd_snapshot, "reference": cmd_reference,

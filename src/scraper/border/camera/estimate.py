@@ -2,9 +2,10 @@
 method's camera wait for Paso del Norte northbound, side by side (combine.py, ADR-0015).
 
     python -m scraper.border camera estimate [--port 8090] [--every 60] [--queue-every 120]
-                                             [--methods loop,yolox]
+                                             [--methods loop,yolox] [--device auto|gpu|cpu]
     python -m scraper.border camera estimate --replay transit-<date>.jsonl
                                              [--queue queue-<date>.jsonl] [--methods loop,yolox]
+                                             [--device cpu|gpu|unlogged]
 
 One process holds both locks: `transit.lock`, and through its Worker `worker.lock`. So
 `camera view`, `camera run` and `camera transit` refuse to start while it runs, and it refuses
@@ -41,6 +42,14 @@ record's own kind of group only: a log of untyped ("mixed") records gains no typ
 Where those are not the live run's, such a replay can differ in the methods it lists as not
 measured, and a method they now refuse is listed so even where the run measured it
 (combine.combine).
+
+YOLOX runs where `--device` says (runner.py, gpu.py; default $CHISME_YOLOX_DEVICE, else auto).
+The same frames give the same counts per path, not across paths, so a replay never grades yolox
+records of two devices together (`replay_device`): a log whose yolox records name more than one
+(combine.record_device) is refused unless `--device cpu` or `--device gpu` picks one
+(`--device unlogged` picks the records that name none), and the others are listed as not
+measured in their ticks, with the device they were counted on. The loop's records are replayed
+whatever the device.
 
 The owner is shown each method's wait on this PC (ADR-0015 decision 2, accepted 2026-10-26),
 through combine.display, the one rule for what is shown; nothing votes (decisions 3 and 4,
@@ -255,18 +264,27 @@ class Live:
 
 
 class Alerts:
-    """One alert when a line's camera refuses us (never cleared: it is never read again), and
-    one when a line falls more than LAG_ALERT_S behind live, and again when it catches up."""
+    """One alert when a line's camera refuses us (never cleared: it is never read again), one
+    when YOLOX's GPU path stops at a camera (never cleared: it is not started again in this
+    run), and one when a line falls more than LAG_ALERT_S behind live, and again when it catches
+    up."""
 
     def __init__(self, notify: Callable[[str], None]):
         self.notify = notify
         self.blocked: set[str] = set()
         self.behind: set[str] = set()
+        self.yolox_stopped: set[str] = set()
 
     def check(self, runner, now: datetime) -> list[str]:
         out = []
         for cam in runner.cams:
             line = runner.lines[cam.id]
+            stopped = getattr(runner, "yolox_stopped", {}).get(cam.id)
+            if stopped is not None and cam.id not in self.yolox_stopped:
+                self.yolox_stopped.add(cam.id)
+                out.append(f"Border camera estimate: YOLOX stopped at line {line} ({cam.id}): "
+                           f"{stopped[1]}. Its yolox count there is a gap for the rest of this "
+                           "run, never made on the CPU instead; the loop goes on.")
             if cam.id in runner.blocked:
                 if cam.id not in self.blocked:
                     self.blocked.add(cam.id)
@@ -298,15 +316,20 @@ def status_text(runner, records: Sequence[Mapping], camera: Mapping | None,
 
     The runner's own status is printed without its measurements, so it never prints a
     transit's minutes: only the streams, the counts and rates per method and group, and loop
-    learning. The camera wait comes only through combine.status_text, under the display rule.
-    `alerts` (this tick's Alerts.check) are printed last: without Telegram set up, the terminal
-    is the only place they show."""
+    learning, and where YOLOX runs (stopped, loudly). Under each record's count line, its
+    anchoring bar (transit.anchoring_text): stretch minutes and anchors, never a wait. The
+    camera wait comes only through combine.status_text, under the display rule. `alerts` (this
+    tick's Alerts.check) are printed last: without Telegram set up, the terminal is the only
+    place they show."""
     lines = [f"[{datetime.now(UTC):%H:%M:%S} UTC]", runner.status({})]
     for rec in records:
         epoch = (rec.get("epochs") or [{}])[-1]
         sd = epoch.get("offset_sd")
         lines.append(f"  count {rec.get('method')!s:5} {rec.get('lane_type')!s:6}: "
                      f"{epoch.get('source', 'none')}, sd {'-' if sd is None else sd}")
+        stopped = any(d.get("stopped") for d in (rec.get("devices") or {}).values())
+        lines.append("  " + transit.anchoring_text(rec.get("method"), rec.get("lane_type"),
+                                                   rec.get("anchoring"), stopped=stopped))
     a_m = pair.get("a_m") or {}
     for (cid, lane), ev in queue_log.latest().items():
         text = (f"  queue {cid} {lane}: {ev.get('state')} {float(ev.get('queue_m') or 0):.0f} m"
@@ -362,7 +385,9 @@ class Estimate:
 
     def __init__(self, cameras: Mapping[str, Camera], pair: Mapping, methods: Sequence[str],
                  queue_every: float, notify: Callable[[str], None] | None = None,
-                 alert: bool = True):
+                 alert: bool = True, device: str | None = None):
+        """`device` is where YOLOX runs (runner.TransitRunner): gpu.GpuRefused, when "gpu" is
+        asked for and refused, lets go of both locks and goes up to the caller."""
         from .runner import TransitRunner
         from .worker import Worker, hold_lock
 
@@ -375,7 +400,8 @@ class Estimate:
             self.worker = Worker(queue_cameras(cameras, pair), seconds=WINDOW_SECONDS,
                                  every=queue_every, emit=self.queue_log.add, alert=alert,
                                  compare_cbp=True)
-            self.runner = TransitRunner(cameras[pair["a"]], cameras[pair["b"]], methods)
+            self.runner = TransitRunner(cameras[pair["a"]], cameras[pair["b"]], methods,
+                                        device=device)
         except BaseException:
             self._release()
             raise
@@ -435,6 +461,8 @@ class Estimate:
 
 
 def cmd_estimate(args, cameras: Mapping[str, Camera]) -> int:
+    from .gpu import GpuRefused, requested_device
+    from .runner import device_text, refused_text
     from .viewer import serve
     from .worker import AlreadyRunning
 
@@ -442,13 +470,21 @@ def cmd_estimate(args, cameras: Mapping[str, Camera]) -> int:
         return cmd_replay(args, cameras)
     if getattr(args, "queue", None):
         raise SystemExit("--queue goes with --replay")
+    try:
+        device = requested_device(getattr(args, "device", None))
+    except ValueError as exc:       # a $CHISME_YOLOX_DEVICE that is none of auto, gpu, cpu
+        raise SystemExit(str(exc)) from None
     pair = load_pair(cameras)
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     try:
-        est = Estimate(cameras, pair, methods, args.queue_every)
+        est = Estimate(cameras, pair, methods, args.queue_every, device=device)
     except AlreadyRunning as exc:
         print(exc)
         return 1
+    except GpuRefused as exc:       # both locks are let go already
+        print(refused_text(exc), flush=True)
+        return 1
+    devices = "; ".join(f"{cid} {device_text(d)}" for cid, d in est.runner.devices().items())
     cv2.setNumThreads(THREADS)          # no code set it before; detect.py was timed at 4
     server = None
     try:
@@ -456,7 +492,8 @@ def cmd_estimate(args, cameras: Mapping[str, Camera]) -> int:
         server = serve(args.port)
         server.worker, server.estimate = est.worker, est.live
         threading.Thread(target=server.serve_forever, daemon=True, name="viewer").start()
-        print(f"Camera estimate, {pair['a']} -> {pair['b']}, methods {', '.join(methods)}. "
+        print(f"Camera estimate, {pair['a']} -> {pair['b']}, methods {', '.join(methods)}"
+              + (f", YOLOX ({device}) on {devices}" if devices else "") + ". "
               f"Page: http://127.0.0.1:{args.port}  Records: {state_dir()}  (Ctrl+C to stop)",
               flush=True)
         cpu = Cpu()
@@ -479,19 +516,59 @@ def cmd_estimate(args, cameras: Mapping[str, Camera]) -> int:
 # --- replay -----------------------------------------------------------------------------------
 
 def replay(records: Iterable[Mapping], signals: Iterable[Mapping], pair: Mapping,
-           not_measured: Mapping[tuple[str, str], str] | None = None) -> list[dict]:
+           not_measured: Mapping[tuple[str, str], str] | None = None,
+           device: str | None = None) -> list[dict]:
     """The camera records made again from the logged transit records (split into the live
     ticks by `ticks`) and queue signals, under the live rule: see the module docstring for
     where they can differ from the records the live ticks wrote. A tick's not_measured is the
     one its records carry; for records that carry none, `not_measured` (runner.unmeasured,
-    rebuilt from the cameras and the live run's methods), as `_not_measured` narrows it."""
+    rebuilt from the cameras and the live run's methods), as `_not_measured` narrows it.
+
+    Only the yolox records of one device are graded (`replay_device`, which picks it by
+    `device` and refuses a log of several with none picked: ValueError). A yolox record of any
+    other is listed as not measured in its tick, with the device it was counted on."""
+    records = list(records)
+    graded = replay_device(records, device)
     readings = [s for s in signals if _is_reading(s)]
     out = []
     for group in ticks(records):
         at = _parse(group[0]["seen_until"])
+        skipped = _not_measured(group, not_measured)
+        for rec in group:
+            counted = combine.record_device(rec)
+            if counted is not None and counted != graded:
+                skipped[(rec.get("method"), rec.get("lane_type") or combine.MIXED)] = (
+                    f"counted on {counted}; this replay grades {graded} only (--device)")
         out.append(combine.combine(group, within(readings, at), pair, at,
-                                   not_measured=_not_measured(group, not_measured)))
+                                   not_measured=skipped))
     return out
+
+
+def replay_device(records: Iterable[Mapping], wanted: str | None = None) -> str | None:
+    """The one device whose yolox records a replay grades (combine.record_device): `wanted`
+    "cpu" or "gpu" picks it, "unlogged" the records that name none (combine.NO_DEVICE: written
+    before records named their device), and with none (or "auto") the log must name one only.
+    ValueError for a log of several devices with none picked, or "gpu" matching more than one
+    adapter. None for a log with no yolox record."""
+    if wanted == "unlogged":
+        wanted = combine.NO_DEVICE
+    seen = sorted({d for r in records if r.get("kind") == "transit"
+                   and (d := combine.record_device(r)) is not None})
+    if wanted in (None, "auto"):
+        chosen = seen
+    elif wanted == "gpu":
+        chosen = [d for d in seen if d.startswith("gpu:")]
+    else:
+        chosen = [d for d in seen if d == wanted]
+    if len(chosen) > 1:
+        raise ValueError(f"this log's yolox records were counted on {', '.join(chosen)}; the "
+                         "same frames give the same counts per path, not across paths, so a "
+                         "replay grades one: give --device cpu or --device gpu"
+                         + (", or --device unlogged for the records that name none"
+                            if combine.NO_DEVICE in chosen else ""))
+    if chosen:
+        return chosen[0]
+    return None if wanted in (None, "auto") else wanted
 
 
 def _not_measured(tick: Sequence[Mapping],
@@ -544,14 +621,29 @@ def cmd_replay(args, cameras: Mapping[str, Camera]) -> int:
     # since a method all of whose groups were skipped leaves no record to infer it from, and
     # the replay would then differ from the live camera record.
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    # Which device's yolox records to grade: --device only, never $CHISME_YOLOX_DEVICE, which
+    # says where a live run's YOLOX runs, not what a log holds.
+    wanted = getattr(args, "device", None)
+    try:
+        replay_device(records, wanted)
+    except ValueError as exc:       # yolox records of several devices, none picked
+        raise SystemExit(str(exc)) from None
     out = replay(records, signals, pair,
-                 unmeasured(cameras[pair["a"]], cameras[pair["b"]], methods))
+                 unmeasured(cameras[pair["a"]], cameras[pair["b"]], methods), wanted)
     state_dir().mkdir(parents=True, exist_ok=True)
     path = state_dir() / f"camera-replay-{source.stem}.jsonl"
     path.unlink(missing_ok=True)
     _append(path, out)
     read = sum(1 for r in records if r.get("kind") == "transit")
     print(f"{len(out)} camera records from {read} transit records -> {path}")
+    counted: dict[str, int] = {}
+    for rec in records:
+        if rec.get("kind") == "transit" and (d := combine.record_device(rec)) is not None:
+            counted[d] = counted.get(d, 0) + 1
+    if counted:
+        graded = replay_device(records, wanted)
+        print("yolox records by device: " + ", ".join(f"{d} {n}" for d, n in counted.items())
+              + f"; graded: {graded} only")
     print("self-check, the logged Now against the later by-entry windows:")
     print(json.dumps(combine.self_check(records), indent=2))
     return 0

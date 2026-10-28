@@ -50,7 +50,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from .crossing import METHODS
-from .measure import MIN_SPEED_M_S, ROLLING_SECONDS, LaneEstimate, rolling, wait_bounds
+from .measure import (
+    BEYOND_VIEW_M,
+    MIN_SPEED_M_S,
+    ROLLING_SECONDS,
+    LaneEstimate,
+    rolling,
+    wait_bounds,
+)
 from .transit import _SURE, MIN_EXIT_RATE, OUTLIER_CARS, RATE_WINDOW_MIN, WINDOW_MIN
 
 Part = tuple[float | None, float | None, float | None, str | None]  # one lane's (minutes, low,
@@ -233,10 +240,10 @@ def tail_to_a(queue_windows: Iterable[Mapping], pair: Mapping, group: str,
 
     With no lane of the group reaching A, a line on the street is a line before A with free road
     to it (something metering traffic before A), and is timed alone, unless another type's strip
-    of camera A runs past its near edge: the street's line is then that type's, and whether this
-    type's cars queue in it is not known (an open owner question), so a floor of 0. A street that
-    cannot be read then counts as no line, since a line before A would show at A as well, in
-    this group's strips or another type's.
+    of camera A runs past its near edge (or the head gap dropped a run that reached it): the
+    street's line is then that type's, and whether this type's cars queue in it is not known (an
+    open owner question), so a floor of 0. A street that cannot be read then counts as no line,
+    since a line before A would show at A as well, in this group's strips or another type's.
 
     Not known, so a floor: a strip down, stale or unread; no recent speed; a line stalled; a
     line past the near edge whose street cannot be read, ends between the views, or runs past
@@ -288,8 +295,10 @@ def tail_to_a(queue_windows: Iterable[Mapping], pair: Mapping, group: str,
         # A line on the street runs on from another lane type's lanes past camera A's near
         # edge, so it is that line, not one metered before A. Whether this type's cars queue
         # in it before their own lane splits off is the owner's to say: not known until then.
+        # A run the head gap dropped that reached the near edge may be that line as well.
         others = [lane for lane in sorted(lanes) if lane not in own
-                  and (e := _latest(north.get(lane), t_at)) is not None and e.beyond_view]
+                  and (e := _latest(north.get(lane), t_at)) is not None
+                  and (e.beyond_view or _dropped_to_edge(e, pair, lane))]
         if on_street is not None and on_street[0] != 0.0 and others:
             return _unknown("tail_to_a", f"{sensor} and {street_cam}",
                             f"the street's line runs on from {', '.join(others)} past "
@@ -297,10 +306,17 @@ def tail_to_a(queue_windows: Iterable[Mapping], pair: Mapping, group: str,
                             low=0.0)
         # No strip of camera A reaches past its near edge: a line on the street is metered
         # before A, with free road between.
+        # When every column the street holds is a run the head gap dropped, no line is known
+        # to be there: the floor stands, but the card must not say there is one.
         if on_street is not None and on_street[0] != 0.0:
+            lined = any((e := _latest(hist, t_at)) is not None and e.queue_m
+                        and e.state in ("queue", "stalled", "insufficient")
+                        for hist in street.values())
+            held = ("a line on the street with free road to A: metered before A" if lined else
+                    "a run on the street the head gap dropped: if it is a line, it is metered "
+                    "before A")
             return _segment("tail_to_a", f"{sensor} and {street_cam}", [on_street],
-                            ("a line on the street with free road to A: metered before A",
-                             STREET_UNTYPED))
+                            (held, STREET_UNTYPED))
     if not used_street:
         return _segment("tail_to_a", sensor, parts)
     gap = pair.get("gap_street_a_m") or {}
@@ -657,6 +673,17 @@ def _dropped(latest: LaneEstimate) -> list[float] | None:
     line held inside the view (measure._queue_run), so it is a floor, never a known 0."""
     far = latest.detail.get("far_run_m") if latest.state == "no_queue" else None
     return [float(far[0]), float(far[1])] if far else None
+
+
+def _dropped_to_edge(latest: LaneEstimate, pair: Mapping, lane: str) -> bool:
+    """A run the head gap dropped that reached the strip's near edge, so it may run on past the
+    view as a kept run would (measure: beyond_view). The edge is line A's place plus the strip's
+    view past it (estimate.line_a_place); a strip with neither known counts as reaching it."""
+    far = _dropped(latest)
+    if far is None:
+        return False
+    a_m, r_m = (pair.get("a_m") or {}).get(lane), (pair.get("r_m") or {}).get(lane)
+    return a_m is None or r_m is None or far[1] > a_m + r_m - BEYOND_VIEW_M
 
 
 def _street(street: Mapping[str, list[tuple[float, LaneEstimate]]], t_at: float,

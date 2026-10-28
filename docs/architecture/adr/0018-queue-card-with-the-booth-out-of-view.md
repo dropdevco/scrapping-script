@@ -81,7 +81,7 @@ has one pair: `lerdo-north` and `bota-south-approach` have their booths out of v
 | Line-only cards at Lerdo and BOTA too | Not taken: they have no camera wait, so their cards would carry no figure at all. The owner decides (Q-34) |
 | One head gap for every camera | Not taken. 18 m is fitted to one PDN hour, and Lerdo's one real clear head (15 m) is 3 m under it. On renders, queues filling each lane from its booth end were never dropped (0 of 44 line windows; the largest head was 5 m), but the reader also missed most rendered lines on the street's right column (7 of 8 windows) and on `lerdo-north` (6 of 8), so renders cannot validate it there |
 | Absorb into the reference what stood still for the last 18 samples (about 12 min; the review's F3) | Rejected as proposed. On renders it hid real stop-and-go lines: over 64 min, 14 of 18 reads (0 on today's rule). Right after a learning cycle its window is about 3 min, not 12, because learning puts 15 samples a read into the bank. Where the booth is in view a standing line would become a published 0. A slowly moving shadow edge defeats it as it defeats today's rule. A 30-min span fed only by regular reads hid 0 of 18; it is left with day and night references as the follow-up (Q-34 v) |
-| Drop the "metered before A" tail (the review's F4) | Rejected. On the repo's own METERED simulation (a line held before A, truth 34.0 min, 30.0 of it before A) it turns a known 30.0-min tail into a known 0: the floor falls from ≥ 30.9 to ≥ 0.9 min. The false street lines it would have cleared are mostly decision 3's: with it, the street blocks the tail in 4 records, not 16 |
+| Drop the "metered before A" tail (the review's F4) | Rejected. On the repo's own METERED simulation (a line held before A, truth 34.0 min, 30.0 of it before A) it turns a known 30.0-min tail into a known 0: the floor falls from ≥ 30.9 to ≥ 0.9 min. The false street lines it would have cleared are mostly decision 3's, but a run decision 3 drops is a floor in the tail, not free road (Q-34 vii): on that hour the tail stays unknown in 18 records per lane type, against 16 without decision 3 (4 if dropped runs were read as free road) |
 | Apply that rule on the cards instead (no minutes for a street line while the bridge is clear) | More code across cameras in the worker, and decision 2 already shows no minutes there |
 
 ## Consequences
@@ -95,8 +95,8 @@ has one pair: `lerdo-north` and `bota-south-approach` have their booths out of v
   | Lines (decision 3 passed in by hand) | 14 | 3 |
   | Published signals with minutes (decision 3 passed in by hand) | 9 | 3 |
 
-  The 0s need only decisions 1 and 2. Without decision 3, as wired today, the 14 lines stay, shown as
-  length and speed. With it, every card at 13:45 reads "no line".
+  The 0s need only decisions 1 and 2. Without decision 3 the 14 lines would stay, shown as length and
+  speed. With it, as now read from `cameras.json`, 3 stay and every card at 13:45 reads "no line".
 - **PDN's cards show measurements only.** Their wait comes from the camera wait, which needs `camera
   estimate` running. Under `camera view` or `camera run` alone no PDN card shows minutes.
 - **Lerdo and BOTA keep (D + L) / v on cards with a line**, approximate, as nothing else times their
@@ -108,8 +108,12 @@ has one pair: `lerdo-north` and `bota-south-approach` have their booths out of v
   that line for one reading. A line held inside the street's view, at a crosswalk about 23-27 m in,
   reads "no line", where combine would otherwise time it from its own head (`_street`, `from_head`).
   Whether anything holds cars there is Q-34 i. `far_run_m` keeps such a run findable in the log.
-- **"Metered before A" stays.** With decision 3, the hour's 4 records with the street blocking the tail
-  (19:57-20:00 UTC) stay unknown: the honest answer for an unconfirmed line (Q-34 iv).
+- **"Metered before A" stays.** With decision 3 as built, 18 of the hour's 56 records per lane type
+  (19:42-20:00 UTC) have an unknown tail, against 16 without it: a run the head gap dropped is a
+  floor, not free road (Q-34 vii). Read as free road, 4 would (19:57-20:00 UTC). Unknown is the
+  honest answer for an unconfirmed line (Q-34 iv). When every street run in such a tail was dropped,
+  its card says "if it is a line, it is metered before A", not that a line is there (replayed
+  2026-10-28: 28 of the hour's 36 unknown tails, both lane types).
 - **The day reference lock is not fixed here.** A run started on a reference learnt by day reads false
   lines at night (16 of 16 windows above), and the reverse is expected at dawn (ASSUMPTION). Until day
   and night references exist, a run learns its road in a new `CAMERA_STATE_DIR`, as the 3.5-hour night
@@ -123,4 +127,4 @@ has one pair: `lerdo-north` and `bota-south-approach` have their booths out of v
   refused). `test_border_camera_crossing.py`'s geometry check leaves the field out, as it leaves out
   the notes.
 - **Tests:** `test_border_camera_viewer.py`, `test_border_camera.py` (`QueueRuns`, `HeadGap`,
-  `HeadGapField`) and `test_border_camera_combine.py` (`TailTest`'s two head-gap cases).
+  `HeadGapField`) and `test_border_camera_combine.py` (`TailTest`'s four head-gap cases).

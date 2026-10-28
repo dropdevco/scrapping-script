@@ -451,9 +451,10 @@ or something learnt and since gone; no frame of that column was checked)
   there? If so, such a line would read "no line" on the card, and
   combine's tail before A would be a floor (not known) where it would otherwise time the line from
   its own head. **Default:** nothing holds cars there.
-- **(ii) 18 m or 15 m?** On the logged hour, 15 m also removes the 19:59 UTC right-column line (the
-  street then blocks the tail in 2 records, not 4), but it sits exactly on Lerdo's one real 15 m clear
-  head (07:16 local, 2026-10-19). **Default:** 18 m, on `pdn-north` and `pdn-south-street` only.
+- **(ii) 18 m or 15 m?** On the logged hour, 15 m also removes the 19:59 UTC right-column line. With
+  dropped runs as a floor ((vii), as built) the tail stays unknown in 18 records per lane type at
+  either gap; read as free road it would be 2 at 15 m against 4 at 18 m. 15 m sits exactly on
+  Lerdo's one real 15 m clear head (07:16 local, 2026-10-19). **Default:** 18 m, on `pdn-north` and `pdn-south-street` only.
 - **(iii) Lerdo and BOTA** have no camera wait. Should their cards also show the line only, with no
   minutes, and should they get a head gap once their real heads are logged? **Default:** both kept as
   they were: (D + L) / v on a card with a line, no head gap.
@@ -480,8 +481,12 @@ or something learnt and since gone; no frame of that column was checked)
 - **(vii) A run the head gap drops, in the camera wait.** combine counts it as not known (a floor at
   0) in the tail before A, never a known 0, unless the dropped run ended short of line A
   (`combine._dropped`). ASSUMPTION: a run far into the view may be a real line held there. On the
-  free-flow hour the review replayed, this keeps more street-blocked floors than reading such runs as
-  free road would (16 records against 4). Or count it as free road, a known 0? **Default:** a floor.
+  free-flow hour the review replayed, this keeps more unknown tails than reading such runs as free
+  road would: 18 of 56 records per lane type against 4, and 16 with no head gap at all (replayed
+  2026-10-28). A dropped run on another lane type's strip that reached the view's near edge counts
+  as that type's line running on, as a kept one would, and a tail whose street runs were all
+  dropped says "if it is a line", not that one is there. Or count it as free road, a known 0?
+  **Default:** a floor.
 
 ### Q-35. YOLOX on the GPU: the limits of its checks (ADR-0017)
 

@@ -727,6 +727,23 @@ class TailTest(unittest.TestCase):
         mirror = self.tail(self.lanes(short, past, street), "normal")
         self.assertEqual((mirror.minutes, mirror.low, mirror.known), (None, 0.0, False))
 
+    def test_a_dropped_run_to_another_types_near_edge_keeps_the_street_line_theirs(self):
+        """The head gap drops lanes 1-3's run, which reached pdn-north's near edge (A_M + R_M):
+        it may be the normal lanes' line running on onto the street, so for SENTRI the street's
+        line is not known to be metered before A, as when the run is kept. A dropped run that
+        ends short of the edge leaves the street's line metered."""
+        short = {"queue_m": 20.0, "speed": self.v}
+        for far, known in (([52.0, 75.0], False), ([52.0, 70.0], True)):
+            queue = self.lanes({"state": "no_queue"}, short, {"queue_m": 40.0, "speed": self.v})
+            for s in queue:
+                if s["evidence"]["lane"] in ("lane-1", "lane-2", "lane-3"):
+                    s["evidence"]["detail"]["far_run_m"] = far
+            sentri = self.tail(queue)
+            self.assertEqual(sentri.known, known, far)
+            if not known:
+                self.assertEqual((sentri.minutes, sentri.low), (None, 0.0))
+                self.assertIn("whether sentri cars queue in it is not known", sentri.why)
+
     def test_a_street_line_with_no_lane_past_the_near_edge_is_metered_for_every_type(self):
         """No strip of pdn-north runs past its near edge, so a line on the street has free road
         to A: metered before A, and timed for each type (the street's columns are not typed)."""
@@ -750,9 +767,15 @@ class TailTest(unittest.TestCase):
             seg = self.tail(queue, group)
             self.assertEqual((seg.minutes, seg.low, seg.known), (None, 0.0, False), group)
             self.assertIn("dropped by the head gap", seg.why)
+            # no line is known to be on the street, so the card must not say there is one
+            self.assertNotIn("a line on the street", " ".join(seg.info), group)
+            self.assertIn("if it is a line, it is metered before A", " ".join(seg.info), group)
 
     def test_an_a_lane_run_dropped_by_the_head_gap_counts_only_if_it_reached_a(self):
-        for far, want in (([25.0, 50.0], (0.0, 0.0, True)), ([25.0, 70.0], (None, 0.0, False))):
+        # far_run_m's end is exclusive, as queue_m's is: a run ending at A reaches it, as a
+        # queue_m of A_M does (tail_to_a: queue_m < a_m is short of A)
+        for far, want in (([25.0, 50.0], (0.0, 0.0, True)), ([25.0, A_M], (None, 0.0, False)),
+                          ([25.0, 70.0], (None, 0.0, False))):
             queue = []
             for lane in A_LANES:
                 queue += signals("pdn-north", lane, self.end, state="no_queue")
@@ -762,6 +785,19 @@ class TailTest(unittest.TestCase):
                 queue += signals("pdn-south-street", column, self.end, state="no_queue")
             seg = self.tail(queue)
             self.assertEqual((seg.minutes, seg.low, seg.known), want, far)
+
+    def test_a_dropped_run_on_a_lane_whose_line_a_is_not_placed_is_a_floor(self):
+        """Without a_m, whether the dropped run reached A cannot be told: not a known 0."""
+        queue = []
+        for lane in A_LANES:
+            queue += signals("pdn-north", lane, self.end, state="no_queue")
+        for s in queue:
+            s["evidence"]["detail"]["far_run_m"] = [25.0, 50.0]
+        for column in ("left-column", "right-column"):
+            queue += signals("pdn-south-street", column, self.end, state="no_queue")
+        seg = combine.tail_to_a(queue, pair(a_m={}), "sentri", self.end)
+        self.assertEqual((seg.minutes, seg.low, seg.known), (None, 0.0, False))
+        self.assertIn("dropped by the head gap", seg.why)
 
 
 class PairFactsTest(unittest.TestCase):

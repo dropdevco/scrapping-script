@@ -374,6 +374,15 @@ cars). On 2026-10-26 at 21:30, yolox counted "normal" at 2.62 a minute at A and 
 spans, which neither shows nor rules out 1 %. A 15-min hand count of yolox "normal" at both lines
 (Q-24) should come first.
 
+**The night run of 2026-10-28 (ROADMAP 6.8).** Option (a) was run: 3.50 h at night, uncut apart from the loop's
+start-up learning, about 209 min for yolox and 207 for the loop. No count anchored: at most 1 enclosed anchor
+agreed at any tick, against 3. Length was not the limit. Crossings are kept 3 h (`SIGNATURE_TTL_S`), so no
+measured span passes 180 min, and at `hi_min` 90 an anchor of a T-min trip is enclosed only for A crossings in
+a band at most T min wide: about 6 min at night. Running longer slides that band; it does not widen it. The
+anchors found also behaved like look-alikes (INFERRED), and B counted 15-22 % more cars than A. A lower
+`hi_min` (option b; 60 widens the band to about 66 min at T = 6) or keeping crossings longer are the two
+levers, each the owner's to choose through an ADR.
+
 ### Q-30. Was SENTRI open at 21:30 on 2026-10-26, or is col-e in the wrong place?
 
 In the live check of 2026-10-26, 21:32-21:52 local, yolox counted **0 cars** at B's col-e in every
@@ -579,11 +588,12 @@ The GPU smoke run of 2026-10-28 started at 11:04 UTC in a fresh state folder, wi
 already standing at line B (`city-pdn-north`). A loop zone learns its empty road only from moments
 when it is near empty (`loop.py`: `EMPTY_MIN_SAMPLES` of them), and a lane queued since the counter
 started has none. While any of a line's zones learns, the loop's count at that line is a gap. So the
-loop was blind at line B for **55+ min**: every loop record from 11:05 to 11:59 UTC (55 of 55) read
-broken, with no epoch and no count, and the run was still going when we looked (11:59 UTC). The
+loop was blind at line B for **about 56 min**: every loop record from 11:05 to 11:59 UTC (55 of 55) read
+broken, with no epoch and no count, and the last zone learnt at about 12:00 UTC, 4 min before the run's planned end. The
 saved roads (`city-pdn-north.loop.npz`) held col-1 and col-2 at 11:44 UTC, and col-1, col-2 and
 col-4 at 11:54 UTC, so col-3 was still learning; the night run's file holds all four. The night
-run of 2026-10-28 started at a quiet hour, and its learning ended after 5 s. YOLOX's stretch at both lines ran unbroken meanwhile
+run of 2026-10-28 started at a quiet hour, and its learning ended within about 2 min (the 5 s in its
+record is only the gap's pad: the runner starts the span at the gap's end). YOLOX's stretch at both lines ran unbroken meanwhile
 (39 min unbroken at 11:43 UTC).
 
 Until 2026-10-28 nothing in the records named the cause: the runner moves a measurement's start
@@ -610,6 +620,16 @@ status names the camera only; the saved roads file shows which have learnt). ASS
 that is one run.
 
 Which: (a), (b) or (c)? And does a blind loop at one line matter while YOLOX counts there?
+
+### Q-40. Is `pdn-north` lane-4's "line" a SENTRI line?
+
+On the night run of 2026-10-28, lane-4 read a line in 29 readings from 10:03 UTC. Its head sat 46-54 m from
+the strips' booth end, near the Feliz Viaje gantry (about 45 m, nominal), with clear road ahead of it, while
+lane-5, the other half of the same SENTRI lane, stayed empty. Its speed tracked lane-3's (Pearson 0.95), and
+CBP posted SENTRI at 1 min. The GPU run that morning dropped every lane-4 reading by the head gap (27 of 27).
+INFERRED: lane-3 traffic seen in lane-4's strip, or something held at the gantry, not SENTRI cars queued.
+No frame was looked at. **Default:** the head gap's "no line" stands on lane-4's card. One frame from
+`pdn-north` during a morning queue settles it: may we look at one (our own YouTube camera, nothing stored)?
 
 ---
 
